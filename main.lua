@@ -1,6 +1,6 @@
 --[[
 ═══════════════════════════════════════════════════════════════════════
-  🐍 BSS HOPPER v1.3.36 No-Lag Ultra Smooth Movement Fix
+  🐍 BSS HOPPER v1.3.37 Strict In-Field MoveTo & Token Lock
 ═══════════════════════════════════════════════════════════════════════
   ЛКМ по змейке  → вкл / выкл
   ПКМ по змейке  → меню    |    F — меню    |    P — вкл/выкл
@@ -2228,26 +2228,28 @@ collectTokensFor = function(maxSeconds, stopFn, fieldAnchor)
             -- Автосвинг палкой (с лимитом вызовов)
             pcall(swingDigTool)
 
-            -- Безопасные границы поля
+            -- Безопасные границы поля: строгий фильтр (только внутри поля)
             local limitX, limitZ = 40, 40
             if anchorZone then
                 local half = anchorZone.Size * 0.5
-                limitX = math.max(10, half.X - 5.0)
-                limitZ = math.max(10, half.Z - 5.0)
+                limitX = math.max(6, half.X - 5.0)
+                limitZ = math.max(6, half.Z - 5.0)
             end
 
-            -- Поиск токенов внутри поля
+            -- Поиск токенов СТРОГО внутри границ поля (токены за полем ПОЛНОСТЬЮ игнорируются)
             local tokens = findTokens()
             local best, bestKey = nil, math.huge
             for _, token in ipairs(tokens) do
                 local inField = false
                 if anchorZone and token.obj and token.obj.Parent then
                     local lp = anchorZone.CFrame:PointToObjectSpace(token.pos)
+                    -- Ни при каких условиях не берем токены у края или за полем!
                     if math.abs(lp.X) <= limitX and math.abs(lp.Z) <= limitZ then
                         inField = true
                     end
                 elseif fieldAnchor then
-                    inField = (token.pos - fieldAnchor).Magnitude <= 55
+                    local horizDist = (Vector3.new(token.pos.X, 0, token.pos.Z) - Vector3.new(fieldAnchor.X, 0, fieldAnchor.Z)).Magnitude
+                    inField = horizDist <= 42
                 end
 
                 if inField and token.priority <= 3 then
@@ -2281,15 +2283,15 @@ collectTokensFor = function(maxSeconds, stopFn, fieldAnchor)
             else
                 activeTokenObj = nil
                 local needNewPatrol = not patrolTarget 
-                    or (root.Position - patrolTarget).Magnitude < 4
-                    or (os.clock() - lastPatrolPickAt > 1.2)
+                    or (root.Position - patrolTarget).Magnitude < 3
+                    or (os.clock() - lastPatrolPickAt > 0.8)
 
                 if needNewPatrol then
                     lastPatrolPickAt = os.clock()
                     if anchorZone then
                         local half = anchorZone.Size * 0.5
-                        local xSpan = (half.X - 8) * 0.65
-                        local zSpan = (half.Z - 8) * 0.65
+                        local xSpan = (half.X - 8) * 0.60
+                        local zSpan = (half.Z - 8) * 0.60
                         local localTarget = Vector3.new(
                             (math.random() * 2 - 1) * xSpan,
                             0,
@@ -2307,7 +2309,7 @@ collectTokensFor = function(maxSeconds, stopFn, fieldAnchor)
                 end
             end
 
-            -- Ограничение цели строго в границы поля
+            -- Ограничение цели СТРОГО в границы поля
             if anchorZone and patrolTarget then
                 local lp = anchorZone.CFrame:PointToObjectSpace(patrolTarget)
                 local safeX = math.clamp(lp.X, -limitX, limitX)
@@ -2316,16 +2318,9 @@ collectTokensFor = function(maxSeconds, stopFn, fieldAnchor)
                 patrolTarget = Vector3.new(safeWorld.X, root.Position.Y, safeWorld.Z)
             end
 
-            -- Непрерывный бег к цели (без ломающих CFrame телепортов!)
+            -- Бег строго через MoveTo (без конфликтующих вызовов Move, которые отменяли ходьбу)
             if patrolTarget then
-                local delta = patrolTarget - root.Position
-                local flatDir = Vector3.new(delta.X, 0, delta.Z)
-                if flatDir.Magnitude > 0.4 then
-                    humanoid:Move(flatDir.Unit, false)
-                    humanoid:MoveTo(patrolTarget)
-                else
-                    humanoid:Move(root.CFrame.LookVector, false)
-                end
+                humanoid:MoveTo(patrolTarget)
             end
 
             RunService.Heartbeat:Wait()
@@ -3180,7 +3175,7 @@ new("TextLabel", {
 })
 new("TextLabel", {
     Size = UDim2.new(0, 220, 0, 25), Position = UDim2.new(0, 58, 0, 10),
-    BackgroundTransparency = 1, Text = "🐍 BSS Hopper v1.3.36",
+    BackgroundTransparency = 1, Text = "🐍 BSS Hopper v1.3.37",
     TextColor3 = C.text, Font = Enum.Font.GothamBold, TextSize = 22,
     TextXAlignment = Enum.TextXAlignment.Left, Parent = head,
 })
@@ -4239,7 +4234,7 @@ end
 trace("Запуск завершён")
 
 print("=====================================================")
-print("  BSS HOPPER v1.3.36 ЗАГРУЖЕН")
+print("  BSS HOPPER v1.3.37 ЗАГРУЖЕН")
 print("  Bypass  : " .. (_G.BSS_BYPASS_ACTIVE and "session_bypass.lua" or "встроенный"))
 print("  Тег     : " .. tostring(CONFIG.SELF_TAG))
 print("  Бот     : " .. tostring(CONFIG.API_URL))
