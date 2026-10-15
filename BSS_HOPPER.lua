@@ -1,6 +1,6 @@
 --[[
 ═══════════════════════════════════════════════════════════════════════
-  🐍 BSS HOPPER v1.3.46 Looter Loop & Hive Claim Fix
+  🐍 BSS HOPPER v1.3.47 Strict Target Hive Claim & Cache Fix
 ═══════════════════════════════════════════════════════════════════════
   ЛКМ по змейке  → вкл / выкл
   ПКМ по змейке  → меню    |    F — меню    |    P — вкл/выкл
@@ -1073,6 +1073,11 @@ local function fightVicious(vicious)
     if not vicious or not vicious.Parent then return false end
     vicious = getViciousTargetRoot(vicious) or vicious
     if not vicious or not vicious.Parent then return false end
+
+    if not hasOwnHive() then
+        pcall(ensureHiveClaimed)
+    end
+
     local started = os.clock()
     setFlightNoclip(true)
     log("Vicious", "Шип/Вициус подтверждён; полёт сквозь стены на скорости 50-150")
@@ -1969,6 +1974,12 @@ local function makeHoney()
     local root = char and char:FindFirstChild("HumanoidRootPart")
     local hum = char and char:FindFirstChildOfClass("Humanoid")
     if not root or not hum or hum.Health <= 0 then return false end
+
+    -- Если пыльцы нет вообще (0), не занимаем улей и не разгружаемся
+    local info = getBackpackPollen()
+    if not info or not info.current or info.current <= 0 then
+        return false
+    end
 
     -- Проверяем наличие своего улья
     if not hasOwnHive() then
@@ -2924,12 +2935,6 @@ function Looter:harvest()
     local sprout = findLootableSprout()
     if not sprout then return end
 
-    if not hasOwnHive() then
-        s.currentStatus = "Росток найден — занимаю улей"
-        local claimOk, claimed = pcall(ensureHiveClaimed)
-        if claimOk and claimed then s.hivesClaimed += 1 end
-    end
-
     local rar = detectRarity(sprout)
     s.lastSprout = { fieldName = RARITY_LABEL[rar] or "спрут" }
     s.sproutsHarvested += 1
@@ -2938,6 +2943,15 @@ function Looter:harvest()
     local sproutAnchor = worldPos(sprout)
     if moveToSprout(sprout) then
         sproutAnchor = worldPos(sprout) or sproutAnchor or (player.Character and player.Character:FindFirstChild("HumanoidRootPart") and player.Character.HumanoidRootPart.Position)
+
+        -- Занимаем улей ТОЛЬКО когда реально подлетели к подтвержденному ростку
+        if not hasOwnHive() then
+            s.currentStatus = "Росток подтвержден — занимаю улей"
+            local claimOk, claimed = pcall(ensureHiveClaimed)
+            if claimOk and claimed then s.hivesClaimed += 1 end
+            moveToSprout(sprout)
+        end
+
         s.currentStatus = "Росток: ставлю поливалку"
         task.wait(0.15)
         if useSprinklerBuilder then pcall(useSprinklerBuilder, sproutAnchor) end
@@ -3049,11 +3063,6 @@ function Looter:Start()
                 if CONFIG.CHECK_VICIOUS then
                     local v = findVicious()
                     if v then
-                        if not hasOwnHive() then
-                            s.currentStatus = "Vicious найден — занимаю улей"
-                            local claimOk, claimed = pcall(ensureHiveClaimed)
-                            if claimOk and claimed then s.hivesClaimed += 1 end
-                        end
                         s.currentStatus = "Vicious — лечу"
                         pcall(function() fightVicious(v) end)
                         return
@@ -3503,7 +3512,7 @@ new("TextLabel", {
 })
 new("TextLabel", {
     Size = UDim2.new(0, 220, 0, 25), Position = UDim2.new(0, 58, 0, 10),
-    BackgroundTransparency = 1, Text = "🐍 BSS Hopper v1.3.46",
+    BackgroundTransparency = 1, Text = "🐍 BSS Hopper v1.3.47",
     TextColor3 = C.text, Font = Enum.Font.GothamBold, TextSize = 22,
     TextXAlignment = Enum.TextXAlignment.Left, Parent = head,
 })
@@ -4562,7 +4571,7 @@ end
 trace("Запуск завершён")
 
 print("=====================================================")
-print("  BSS HOPPER v1.3.46 ЗАГРУЖЕН")
+print("  BSS HOPPER v1.3.47 ЗАГРУЖЕН")
 print("  Bypass  : " .. (_G.BSS_BYPASS_ACTIVE and "session_bypass.lua" or "встроенный"))
 print("  Тег     : " .. tostring(CONFIG.SELF_TAG))
 print("  Бот     : " .. tostring(CONFIG.API_URL))
