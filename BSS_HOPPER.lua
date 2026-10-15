@@ -1,6 +1,6 @@
 --[[
 ═══════════════════════════════════════════════════════════════════════
-  🐍 BSS HOPPER v1.3.37 Strict In-Field MoveTo & Token Lock
+  🐍 BSS HOPPER v1.3.38 Instant Token Switch & Zero Delay
 ═══════════════════════════════════════════════════════════════════════
   ЛКМ по змейке  → вкл / выкл
   ПКМ по змейке  → меню    |    F — меню    |    P — вкл/выкл
@@ -2134,9 +2134,10 @@ local function swingDigTool()
 end
 
 local TOKEN_CACHE, TOKEN_CACHE_AT = {}, 0
+local collectedTokens = setmetatable({}, { __mode = "k" })
 local function findTokens()
     local now = os.clock()
-    if now - TOKEN_CACHE_AT < 0.12 then
+    if now - TOKEN_CACHE_AT < 0.02 then
         return TOKEN_CACHE
     end
     TOKEN_CACHE_AT = now
@@ -2236,32 +2237,51 @@ collectTokensFor = function(maxSeconds, stopFn, fieldAnchor)
                 limitZ = math.max(6, half.Z - 5.0)
             end
 
+            local rootPos = root.Position
+            -- Мгновенно исключаем только что взятый токен, не дожидаясь пока BSS его удалит
+            if activeTokenObj then
+                if not activeTokenObj.Parent then
+                    activeTokenObj = nil
+                else
+                    local p = worldPos(activeTokenObj)
+                    if p and (Vector3.new(p.X, 0, p.Z) - Vector3.new(rootPos.X, 0, rootPos.Z)).Magnitude <= 4.2 then
+                        collectedTokens[activeTokenObj] = true
+                        activeTokenObj = nil
+                    end
+                end
+            end
+
             -- Поиск токенов СТРОГО внутри границ поля (токены за полем ПОЛНОСТЬЮ игнорируются)
             local tokens = findTokens()
             local best, bestKey = nil, math.huge
             for _, token in ipairs(tokens) do
-                local inField = false
-                if anchorZone and token.obj and token.obj.Parent then
-                    local lp = anchorZone.CFrame:PointToObjectSpace(token.pos)
-                    -- Ни при каких условиях не берем токены у края или за полем!
-                    if math.abs(lp.X) <= limitX and math.abs(lp.Z) <= limitZ then
-                        inField = true
-                    end
-                elseif fieldAnchor then
-                    local horizDist = (Vector3.new(token.pos.X, 0, token.pos.Z) - Vector3.new(fieldAnchor.X, 0, fieldAnchor.Z)).Magnitude
-                    inField = horizDist <= 42
-                end
+                if token.obj and token.obj.Parent and not collectedTokens[token.obj] then
+                    local horizDist = (Vector3.new(token.pos.X, 0, token.pos.Z) - Vector3.new(rootPos.X, 0, rootPos.Z)).Magnitude
+                    if horizDist <= 3.8 then
+                        -- Персонаж уже коснулся токена: помечаем собранным, не ждем пока BSS его удалит!
+                        collectedTokens[token.obj] = true
+                    else
+                        local inField = false
+                        if anchorZone then
+                            local lp = anchorZone.CFrame:PointToObjectSpace(token.pos)
+                            if math.abs(lp.X) <= limitX and math.abs(lp.Z) <= limitZ then
+                                inField = true
+                            end
+                        elseif fieldAnchor then
+                            inField = (Vector3.new(token.pos.X, 0, token.pos.Z) - Vector3.new(fieldAnchor.X, 0, fieldAnchor.Z)).Magnitude <= 42
+                        end
 
-                if inField and token.priority <= 3 then
-                    local d = (token.pos - root.Position).Magnitude
-                    local score = 200000
-                    if token.priority == 1 then
-                        score = 0
-                    elseif token.priority == 2 then
-                        score = 100000
+                        if inField and token.priority <= 3 then
+                            local score = 200000
+                            if token.priority == 1 then
+                                score = 0
+                            elseif token.priority == 2 then
+                                score = 100000
+                            end
+                            local key = score + horizDist
+                            if key < bestKey then best, bestKey = token, key end
+                        end
                     end
-                    local key = score + d
-                    if key < bestKey then best, bestKey = token, key end
                 end
             end
 
@@ -3175,7 +3195,7 @@ new("TextLabel", {
 })
 new("TextLabel", {
     Size = UDim2.new(0, 220, 0, 25), Position = UDim2.new(0, 58, 0, 10),
-    BackgroundTransparency = 1, Text = "🐍 BSS Hopper v1.3.37",
+    BackgroundTransparency = 1, Text = "🐍 BSS Hopper v1.3.38",
     TextColor3 = C.text, Font = Enum.Font.GothamBold, TextSize = 22,
     TextXAlignment = Enum.TextXAlignment.Left, Parent = head,
 })
@@ -4234,7 +4254,7 @@ end
 trace("Запуск завершён")
 
 print("=====================================================")
-print("  BSS HOPPER v1.3.37 ЗАГРУЖЕН")
+print("  BSS HOPPER v1.3.38 ЗАГРУЖЕН")
 print("  Bypass  : " .. (_G.BSS_BYPASS_ACTIVE and "session_bypass.lua" or "встроенный"))
 print("  Тег     : " .. tostring(CONFIG.SELF_TAG))
 print("  Бот     : " .. tostring(CONFIG.API_URL))
