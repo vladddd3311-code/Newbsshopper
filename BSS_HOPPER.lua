@@ -1926,52 +1926,56 @@ local TOKEN_P2 = {
 }
 
 local function isHoneyToken(low)
-    return string.find(low, "honey", 1, true) ~= nil
+    if string.find(low, "honey", 1, true) then return true end
+    -- Идентификаторы ассетов текстур медовых токенов (медовые монетки BSS)
+    if string.find(low, "1629547638", 1, true) or string.find(low, "2028607990", 1, true)
+       or string.find(low, "honeytoken", 1, true) or string.find(low, "honeydrop", 1, true) then
+        return true
+    end
+    return false
 end
 
 local function tokenPriority(name)
     local low = string.lower(tostring(name or ""))
-    -- Медовые токены не преследуются целенаправленно (подбираются только попутно)
+    -- Медовые токены: низший приоритет 99 (подбираются только попутно, не бежим за ними)
     if isHoneyToken(low) then return 99 end
-    -- N1: Супер редкие предметы
+    -- N1: Супер редкие предметы (Glue, Blue Extract, Glitter, Star Jelly и т.д.)
     for _, w in ipairs(TOKEN_P1) do
         if string.find(low, w, 1, true) then return 1 end
     end
-    -- N2: Фрукты, семена, билеты
+    -- N2: Фрукты, ресурсы (Blueberry, Strawberry, Seeds, Treats, Tickets и т.д.)
     for _, w in ipairs(TOKEN_P2) do
         if string.find(low, w, 1, true) then return 2 end
     end
-    -- N3: ВСЕ ОСТАЛЬНЫЕ ТОКЕНЫ (абилки, бусты, бомбы, токены поля и т.д.)
+    -- N3: Все остальные полезные токены (абилки, бусты, баффы, бомбы)
     return 3
 end
 
 local function resolveTokenName(obj)
+    local parts = {}
     local name = tostring(obj.Name or "")
-    local low = string.lower(name)
-    if low ~= "c" and low ~= "part" and low ~= "model" and low ~= "" then
-        return name
-    end
+    table.insert(parts, name)
     for _, child in ipairs(obj:GetChildren()) do
         if child:IsA("Decal") or child:IsA("Texture") then
-            local cName = tostring(child.Name or "")
-            local cLow = string.lower(cName)
-            if cLow ~= "decal" and cLow ~= "texture" and cLow ~= "" then
-                return cName
-            end
+            table.insert(parts, tostring(child.Name or ""))
             local tex = tostring(child.Texture or "")
-            if tex ~= "" then
-                local texLow = string.lower(tex)
-                if isHoneyToken(texLow) then return "honey" end
-                for _, w in ipairs(TOKEN_P1) do
-                    if string.find(texLow, w, 1, true) then return w end
-                end
-                for _, w in ipairs(TOKEN_P2) do
-                    if string.find(texLow, w, 1, true) then return w end
-                end
-            end
+            if tex ~= "" then table.insert(parts, tex) end
         end
     end
-    return name
+    local combined = string.lower(table.concat(parts, " "))
+
+    -- 1. Сначала проверяем N1 (редкие предметы: glitter, glue, extract...)
+    for _, w in ipairs(TOKEN_P1) do
+        if string.find(combined, w, 1, true) then return w end
+    end
+    -- 2. Затем N2 (фрукты, билеты, семена...)
+    for _, w in ipairs(TOKEN_P2) do
+        if string.find(combined, w, 1, true) then return w end
+    end
+    -- 3. Проверка на мёд
+    if isHoneyToken(combined) then return "honey" end
+
+    return name ~= "" and name or "token"
 end
 
 local TOKEN_FOLDERS = { "Collectibles", "Tokens", "Drops" }
@@ -2026,17 +2030,16 @@ end
 
 local lastSwingAt = 0
 local function swingDigTool()
-    if os.clock() - lastSwingAt < 0.22 then return end
+    if os.clock() - lastSwingAt < 0.08 then return end
     lastSwingAt = os.clock()
     local char = player.Character
     if not char then return end
     local tool = findHarvestTool()
     if tool then
         if tool.Parent ~= char then
-            pcall(function()
-                local hum = char:FindFirstChildOfClass("Humanoid")
-                if hum then hum:EquipTool(tool) else tool.Parent = char end
-            end)
+            local hum = char:FindFirstChildOfClass("Humanoid")
+            if hum then pcall(function() hum:EquipTool(tool) end) end
+            if tool.Parent ~= char then pcall(function() tool.Parent = char end) end
         end
         pcall(function() tool:Activate() end)
     end
@@ -2136,17 +2139,11 @@ collectTokensFor = function(maxSeconds, stopFn, fieldAnchor)
                 break
             end
 
-            -- Форсированная скорость бега
-            local desiredSpeed = 16 * (tonumber(CONFIG.WALK_SPEED_MULT) or 2.4)
-            if math.abs(humanoid.WalkSpeed - desiredSpeed) > 0.5 then
-                humanoid.WalkSpeed = desiredSpeed
-            end
-
             -- Непрерывный автосвинг палкой
             swingDigTool()
 
-            -- Сбор токенов N1, N2, N3 (все токены кроме honey)
-            local tokens = findTokens()
+            -- Мгновенный поиск токенов без задержек кэша
+            local tokens = findTokens(true)
             local best, bestKey = nil, math.huge
             for _, token in ipairs(tokens) do
                 local inField = true
@@ -2154,18 +2151,31 @@ collectTokensFor = function(maxSeconds, stopFn, fieldAnchor)
                     if token.obj and token.obj.Parent then
                         local lp = anchorZone.CFrame:PointToObjectSpace(token.pos)
                         local half = anchorZone.Size * 0.5
-                        inField = math.abs(lp.X) <= half.X + 6 and math.abs(lp.Z) <= half.Z + 6
+                        inField = math.abs(lp.X) <= half.X + 8 and math.abs(lp.Z) <= half.Z + 8
                     else
                         inField = false
                     end
                 elseif anchor then
-                    inField = (token.pos - anchor).Magnitude <= 120
+                    inField = (token.pos - anchor).Magnitude <= 140
                 end
                 local d = (token.pos - root.Position).Magnitude
-                if inField and d <= 85 and token.priority <= 3 then
-                    local key = token.priority * 1e6 + d
+                if inField and d <= 120 and token.priority <= 3 then
+                    -- Жесткий приоритет: N1 (10000) > N2 (20000) > N3 (30000)
+                    local key = token.priority * 10000 + d
                     if key < bestKey then best, bestKey = token, key end
                 end
+            end
+
+            -- Высокая скорость бега: разгон до 70-100 studs/s для моментального сбора
+            local baseSpeed = 16 * (tonumber(CONFIG.WALK_SPEED_MULT) or 2.4)
+            local targetSpeed = math.max(baseSpeed, 65)
+            if best and best.priority == 1 then
+                targetSpeed = math.max(targetSpeed, 95)
+            elseif best and best.priority == 2 then
+                targetSpeed = math.max(targetSpeed, 75)
+            end
+            if math.abs(humanoid.WalkSpeed - targetSpeed) > 1 then
+                humanoid.WalkSpeed = targetSpeed
             end
 
             if best then
@@ -2176,7 +2186,7 @@ collectTokensFor = function(maxSeconds, stopFn, fieldAnchor)
                 activeTokenObj = nil
                 local needNewPatrol = not patrolTarget 
                     or (root.Position - patrolTarget).Magnitude < 4
-                    or (os.clock() - lastPatrolPickAt > 1.8)
+                    or (os.clock() - lastPatrolPickAt > 1.2)
 
                 if needNewPatrol then
                     lastPatrolPickAt = os.clock()
@@ -2208,7 +2218,8 @@ collectTokensFor = function(maxSeconds, stopFn, fieldAnchor)
                 end
             end
 
-            task.wait(math.clamp(tonumber(CONFIG.TOKEN_SCAN_INTERVAL) or 0.12, 0.08, 0.20))
+            -- Мгновенная покадровая обработка (без задержек 0.12s)
+            RunService.Heartbeat:Wait()
         end
     end
 
@@ -2257,6 +2268,15 @@ useSprinklerBuilder = function()
         placed += 1
     end
     log("Инструмент", "Sprinkler Builder: попыток размещения " .. tostring(placed) .. "/" .. tostring(count))
+    task.spawn(function()
+        task.wait(0.1)
+        local hTool = findHarvestTool()
+        if hTool and player.Character then
+            local hHum = player.Character:FindFirstChildOfClass("Humanoid")
+            if hHum then pcall(function() hHum:EquipTool(hTool) end) end
+            if hTool.Parent ~= player.Character then pcall(function() hTool.Parent = player.Character end) end
+        end
+    end)
     return placed > 0
 end
 
