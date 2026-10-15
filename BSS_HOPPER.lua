@@ -1,6 +1,6 @@
 --[[
 ═══════════════════════════════════════════════════════════════════════
-  🐍 BSS HOPPER v1.3.34 Sprout Claim & Priority Loot Fix
+  🐍 BSS HOPPER v1.3.35 Sprout AFK Fix, Instant Run & 100% Stick Swing
 ═══════════════════════════════════════════════════════════════════════
   ЛКМ по змейке  → вкл / выкл
   ПКМ по змейке  → меню    |    F — меню    |    P — вкл/выкл
@@ -433,6 +433,31 @@ local function findSprout()
     return nil
 end
 
+local function isSproutAlive(sprout, anchorPos)
+    if sprout and sprout.Parent then
+        local ok, isDesc = pcall(function() return sprout:IsDescendantOf(Workspace) end)
+        if ok and isDesc then return true end
+    end
+    if anchorPos then
+        for _, folder in ipairs(sproutFolders) do
+            if folder and folder.Parent then
+                local ok, descendants = pcall(function() return folder:GetDescendants() end)
+                if ok and descendants then
+                    for _, child in ipairs(descendants) do
+                        if isSprout(child) then
+                            local p = worldPos(child)
+                            if p and (p - anchorPos).Magnitude <= 65 then
+                                return true
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+    return false
+end
+
 local function worldPos(obj)
     if not obj then return nil end
     local ok, p = pcall(function()
@@ -579,17 +604,18 @@ local function moveRootToPosition(root, destination, maxDuration)
         root.AssemblyLinearVelocity = Vector3.zero
         root.AssemblyAngularVelocity = Vector3.zero
     end)
-    return not flightStopRequested and root.Parent ~= nil and (root.Position - destination).Magnitude < 8
+    return not flightStopRequested and root.Parent ~= nil and (root.Position - destination).Magnitude < 18
 end
 
 local function moveToSprout(sprout)
-    if not sprout or not sprout.Parent then return false end
+    if not sprout then return false end
     local targetPos = worldPos(sprout)
     if not targetPos then return false end
     local root = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
     if not root then return false end
     local safeLanding = getGroundPos(targetPos)
-    return moveRootToPosition(root, safeLanding, 7)
+    local ok = moveRootToPosition(root, safeLanding, 8)
+    return ok or ((root.Position - safeLanding).Magnitude < 25)
 end
 
 local function getFieldForPos(pos, maxExtra)
@@ -1938,9 +1964,12 @@ local function isHoneyToken(low)
     return false
 end
 
+local TOKEN_NAME_CACHE = setmetatable({}, { __mode = "k" })
+local TOKEN_PRIO_CACHE = setmetatable({}, { __mode = "k" })
+
 local function tokenPriority(name)
     local low = string.lower(tostring(name or ""))
-    -- Медовые токены: приоритет 99 (игнорируются, подбираются только наступая на них)
+    -- Медовые токены: приоритет 99 (игнорируются от целенаправленного бега, собираются только наступая)
     if isHoneyToken(low) then return 99 end
     -- N1: Супер редкие предметы (Glue, Blue Extract, Glitter, Star Jelly, Magic Beans и т.д.)
     for _, w in ipairs(TOKEN_P1) do
@@ -1955,17 +1984,23 @@ local function tokenPriority(name)
 end
 
 local function resolveTokenName(obj)
+    if not obj then return "token" end
+    local cached = TOKEN_NAME_CACHE[obj]
+    if cached then return cached end
+
     local parts = {}
     local name = tostring(obj.Name or "")
     table.insert(parts, name)
-    for _, child in ipairs(obj:GetChildren()) do
-        if child:IsA("Decal") or child:IsA("Texture") then
-            table.insert(parts, tostring(child.Name or ""))
-            local tex = tostring(child.Texture or "")
-            if tex ~= "" then table.insert(parts, tex) end
+    local okC, children = pcall(function() return obj:GetChildren() end)
+    if okC and children then
+        for _, child in ipairs(children) do
+            if child:IsA("Decal") or child:IsA("Texture") then
+                table.insert(parts, tostring(child.Name or ""))
+                local tex = tostring(child.Texture or "")
+                if tex ~= "" then table.insert(parts, tex) end
+            end
         end
     end
-    -- Атрибуты BSS токенов
     local okAttr, attrs = pcall(function() return obj:GetAttributes() end)
     if okAttr and attrs then
         for k, v in pairs(attrs) do
@@ -1974,18 +2009,29 @@ local function resolveTokenName(obj)
     end
     local combined = string.lower(table.concat(parts, " "))
 
-    -- 1. Сначала N1 (glue, blue extract, glitter, star jelly...)
+    local result = name ~= "" and name or "token"
     for _, w in ipairs(TOKEN_P1) do
-        if string.find(combined, w, 1, true) then return w end
+        if string.find(combined, w, 1, true) then result = w; break end
     end
-    -- 2. Затем N2 (blueberry, strawberry, pineapple, seeds, tickets...)
-    for _, w in ipairs(TOKEN_P2) do
-        if string.find(combined, w, 1, true) then return w end
+    if result == name or result == "token" then
+        for _, w in ipairs(TOKEN_P2) do
+            if string.find(combined, w, 1, true) then result = w; break end
+        end
     end
-    -- 3. Проверка на мёд
-    if isHoneyToken(combined) then return "honey" end
+    if isHoneyToken(combined) then result = "honey" end
 
-    return name ~= "" and name or "token"
+    TOKEN_NAME_CACHE[obj] = result
+    return result
+end
+
+local function getTokenPriorityForObj(obj)
+    if not obj then return 3 end
+    local cached = TOKEN_PRIO_CACHE[obj]
+    if cached then return cached end
+    local name = resolveTokenName(obj)
+    local prio = tokenPriority(name)
+    TOKEN_PRIO_CACHE[obj] = prio
+    return prio
 end
 
 local TOKEN_FOLDERS = { "Collectibles", "Tokens", "Drops" }
@@ -2021,14 +2067,14 @@ local function ensureHarvestToolEquipped()
     local char = player.Character
     if not char then return nil end
     local hum = char:FindFirstChildOfClass("Humanoid")
+    if not hum then return nil end
 
     -- 1. Если в руках осталась лейка/поливалка — СНИМАЕМ ЕЁ!
     for _, item in ipairs(char:GetChildren()) do
         if item:IsA("Tool") and string.find(string.lower(item.Name), "sprinkler", 1, true) then
-            if hum then pcall(function() hum:UnequipTools() end) end
+            pcall(function() hum:UnequipTools() end)
             local bp = player:FindFirstChildOfClass("Backpack")
             if bp then pcall(function() item.Parent = bp end) end
-            task.wait(0.05)
             break
         end
     end
@@ -2040,13 +2086,13 @@ local function ensureHarvestToolEquipped()
         end
     end
 
-    -- 3. Если инструмент в рюкзаке — экипируем
+    -- 3. Если инструмент в рюкзаке — экипируем моментально без задержек
     local bp = player:FindFirstChildOfClass("Backpack")
     if bp then
         for _, item in ipairs(bp:GetChildren()) do
             if item:IsA("Tool") and not string.find(string.lower(item.Name), "sprinkler", 1, true) then
-                if hum then pcall(function() hum:EquipTool(item) end) end
-                pcall(function() item.Parent = char end)
+                pcall(function() hum:EquipTool(item) end)
+                if item.Parent ~= char then pcall(function() item.Parent = char end) end
                 return item
             end
         end
@@ -2108,47 +2154,33 @@ task.spawn(function()
     end
 end)
 
-local function findTokens(forceRefresh)
-    local now = os.clock()
-    if not forceRefresh and now - TOKEN_CACHE_AT < TOKEN_CACHE_TTL then
-        local cached = {}
-        for _, t in ipairs(TOKEN_CACHE) do
-            if t.obj and t.obj.Parent then
-                local pos = worldPos(t.obj)
-                if pos then
-                    cached[#cached+1] = {obj=t.obj, name=t.name, pos=pos, priority=t.priority}
-                end
-            end
-        end
-        return cached
-    end
+local function findTokens()
     local out = {}
     for _, folderName in ipairs(TOKEN_FOLDERS) do
         local folder = Workspace:FindFirstChild(folderName)
         if folder then
-            local ok, desc = pcall(function() return folder:GetDescendants() end)
-            if ok then
-                for _, obj in ipairs(desc) do
-                    if obj:IsA("BasePart") or obj:IsA("Model") then
-                        local pos = worldPos(obj)
-                        if pos then
-                            local resolvedName = resolveTokenName(obj)
-                            table.insert(out, {
-                                obj=obj, name=resolvedName, pos=pos,
-                                priority=tokenPriority(resolvedName),
-                            })
-                        end
+            local ok, items = pcall(function() return folder:GetChildren() end)
+            if ok and items then
+                for _, obj in ipairs(items) do
+                    local pos = worldPos(obj)
+                    if pos then
+                        local prio = getTokenPriorityForObj(obj)
+                        out[#out+1] = {
+                            obj = obj,
+                            name = TOKEN_NAME_CACHE[obj] or "token",
+                            pos = pos,
+                            priority = prio,
+                        }
                     end
                 end
             end
         end
     end
-    TOKEN_CACHE = out
-    TOKEN_CACHE_AT = now
     return out
 end
 
 local tokenCollectorBusy = false
+local collectorTokenGen = 0
 local patrolTarget = nil
 local activeTokenObj = nil
 local lastPatrolPickAt = 0
@@ -2177,8 +2209,8 @@ local function getActiveFlowerZone(anchorPos)
 end
 
 collectTokensFor = function(maxSeconds, stopFn, fieldAnchor)
-    while tokenCollectorBusy and alive() do task.wait(0.05) end
-    if not alive() then return end
+    collectorTokenGen = collectorTokenGen + 1
+    local myGen = collectorTokenGen
     tokenCollectorBusy = true
 
     local function runLoop()
@@ -2190,7 +2222,9 @@ collectTokensFor = function(maxSeconds, stopFn, fieldAnchor)
         local anchorZone = getActiveFlowerZone(fieldAnchor)
 
         while alive() and os.clock() - started < maxSeconds do
+            if collectorTokenGen ~= myGen then break end
             if stopFn and stopFn() then break end
+
             local char = player.Character
             local root = char and char:FindFirstChild("HumanoidRootPart")
             local humanoid = char and char:FindFirstChildOfClass("Humanoid")
@@ -2205,23 +2239,27 @@ collectTokensFor = function(maxSeconds, stopFn, fieldAnchor)
                 anchorZone = getActiveFlowerZone(root.Position)
             end
 
-            -- Непрерывный автосвинг палкой
+            -- 100% автосвинг палкой
             pcall(swingDigTool)
 
+            -- Границы поля: 6.5 студов запас от края
+            local limitX, limitZ = 40, 40
+            if anchorZone then
+                local half = anchorZone.Size * 0.5
+                limitX = math.max(6, half.X - 6.5)
+                limitZ = math.max(6, half.Z - 6.5)
+            end
+
             -- Поиск токенов строго внутри безопасной границы поля
-            local tokens = findTokens(true)
+            local tokens = findTokens()
             local best, bestKey = nil, math.huge
             for _, token in ipairs(tokens) do
                 local inField = false
-                if anchorZone then
-                    if token.obj and token.obj.Parent then
-                        local lp = anchorZone.CFrame:PointToObjectSpace(token.pos)
-                        local half = anchorZone.Size * 0.5
-                        -- НИ ПРИ КАКИХ УСЛОВИЯХ НЕ ВЫБЕГАЕМ ЗА ПОЛЕ:
-                        -- Запас 6.5 студов от края! Если токен на краю или за полем — ИГНОРИРУЕМ!
-                        if math.abs(lp.X) <= half.X - 6.5 and math.abs(lp.Z) <= half.Z - 6.5 then
-                            inField = true
-                        end
+                if anchorZone and token.obj and token.obj.Parent then
+                    local lp = anchorZone.CFrame:PointToObjectSpace(token.pos)
+                    -- НИ ПРИ КАКИХ УСЛОВИЯХ НЕ ВЫБЕГАЕМ ЗА ПОЛЕ
+                    if math.abs(lp.X) <= limitX and math.abs(lp.Z) <= limitZ then
+                        inField = true
                     end
                 elseif fieldAnchor then
                     inField = (token.pos - fieldAnchor).Magnitude <= 55
@@ -2246,11 +2284,11 @@ collectTokensFor = function(maxSeconds, stopFn, fieldAnchor)
 
             -- Скорость бега
             local baseSpeed = 16 * (tonumber(CONFIG.WALK_SPEED_MULT) or 2.4)
-            local targetSpeed = math.max(baseSpeed, 65)
+            local targetSpeed = math.max(baseSpeed, 70)
             if best and best.priority == 1 then
-                targetSpeed = math.max(targetSpeed, 95)
+                targetSpeed = math.max(targetSpeed, 100)
             elseif best and best.priority == 2 then
-                targetSpeed = math.max(targetSpeed, 80)
+                targetSpeed = math.max(targetSpeed, 85)
             end
             if math.abs(humanoid.WalkSpeed - targetSpeed) > 1 then
                 humanoid.WalkSpeed = targetSpeed
@@ -2263,7 +2301,7 @@ collectTokensFor = function(maxSeconds, stopFn, fieldAnchor)
                 activeTokenObj = nil
                 local needNewPatrol = not patrolTarget 
                     or (root.Position - patrolTarget).Magnitude < 4
-                    or (os.clock() - lastPatrolPickAt > 1.0)
+                    or (os.clock() - lastPatrolPickAt > 0.8)
 
                 if needNewPatrol then
                     lastPatrolPickAt = os.clock()
@@ -2291,10 +2329,6 @@ collectTokensFor = function(maxSeconds, stopFn, fieldAnchor)
 
             -- ЖЕЛЕЗНЫЙ ЗАМОК ГРАНИЦЫ ПОЛЯ:
             if anchorZone then
-                local half = anchorZone.Size * 0.5
-                local limitX = half.X - 6.0
-                local limitZ = half.Z - 6.0
-
                 -- 1. Клампим цель движения строго внутрь поля
                 if patrolTarget then
                     local lp = anchorZone.CFrame:PointToObjectSpace(patrolTarget)
@@ -2307,15 +2341,13 @@ collectTokensFor = function(maxSeconds, stopFn, fieldAnchor)
                 -- 2. Если физический персонаж оказался у границы поля (>= limitX):
                 local curLp = anchorZone.CFrame:PointToObjectSpace(root.Position)
                 if math.abs(curLp.X) >= limitX or math.abs(curLp.Z) >= limitZ then
-                    -- Возвращаем координаты в безопасную зону и гасим инерцию
-                    local clampedX = math.clamp(curLp.X, -limitX, limitX)
-                    local clampedZ = math.clamp(curLp.Z, -limitZ, limitZ)
+                    local clampedX = math.clamp(curLp.X, -limitX + 1.5, limitX - 1.5)
+                    local clampedZ = math.clamp(curLp.Z, -limitZ + 1.5, limitZ - 1.5)
                     local clampedPos = anchorZone.CFrame:PointToWorldSpace(Vector3.new(clampedX, curLp.Y, clampedZ))
                     pcall(function()
                         root.CFrame = CFrame.new(clampedPos.X, root.Position.Y, clampedPos.Z)
                         root.AssemblyLinearVelocity = Vector3.zero
                     end)
-                    -- Разворачиваем цель строго в центр поля
                     patrolTarget = anchorZone.Position
                 end
             end
@@ -2325,9 +2357,14 @@ collectTokensFor = function(maxSeconds, stopFn, fieldAnchor)
                 local delta = patrolTarget - root.Position
                 local flatDir = Vector3.new(delta.X, 0, delta.Z)
                 if flatDir.Magnitude > 0.3 then
-                    humanoid:Move(flatDir.Unit, false)
+                    local dir = flatDir.Unit
+                    pcall(function()
+                        root.CFrame = CFrame.new(root.Position, root.Position + dir)
+                    end)
+                    pcall(function() humanoid:MoveTo(patrolTarget) end)
+                    pcall(function() humanoid:Move(dir, false) end)
                 else
-                    humanoid:Move(root.CFrame.LookVector, false)
+                    pcall(function() humanoid:Move(root.CFrame.LookVector, false) end)
                 end
             end
 
@@ -2336,7 +2373,9 @@ collectTokensFor = function(maxSeconds, stopFn, fieldAnchor)
     end
 
     pcall(runLoop)
-    tokenCollectorBusy = false
+    if collectorTokenGen == myGen then
+        tokenCollectorBusy = false
+    end
 end
 
 useSprinklerBuilder = function()
@@ -2358,7 +2397,6 @@ useSprinklerBuilder = function()
     local origin = root.Position
     local look = root.CFrame.LookVector
     local right = root.CFrame.RightVector
-    -- Spread placements around the field rather than stacking them at one spot.
     local offsets = {
         Vector3.new(0,0,0), right * 9 + look * 5,
         right * -9 + look * 5, look * -10,
@@ -2370,25 +2408,21 @@ useSprinklerBuilder = function()
         if offset.Magnitude > 0 then
             local goal = origin + offset
             pcall(function() hum:MoveTo(Vector3.new(goal.X, root.Position.Y, goal.Z)) end)
-            local deadline = os.clock() + 0.45
+            local deadline = os.clock() + 0.35
             while alive() and os.clock() < deadline and (root.Position - goal).Magnitude > 3 do
                 RunService.Heartbeat:Wait()
             end
         end
         pcall(function() tool:Activate() end)
-        task.wait(0.12)
+        task.wait(0.1)
         placed += 1
     end
     log("Инструмент", "Sprinkler Builder: попыток размещения " .. tostring(placed) .. "/" .. tostring(count))
-    task.spawn(function()
-        task.wait(0.1)
-        local hTool = findHarvestTool()
-        if hTool and player.Character then
-            local hHum = player.Character:FindFirstChildOfClass("Humanoid")
-            if hHum then pcall(function() hHum:EquipTool(hTool) end) end
-            if hTool.Parent ~= player.Character then pcall(function() hTool.Parent = player.Character end) end
-        end
-    end)
+    -- Синхронное снятие лейки и немедленное вооружение палкой
+    pcall(function() hum:UnequipTools() end)
+    local bp = player:FindFirstChildOfClass("Backpack")
+    if bp then pcall(function() tool.Parent = bp end) end
+    ensureHarvestToolEquipped()
     return placed > 0
 end
 
@@ -2675,20 +2709,21 @@ function Looter:harvest()
     s.currentStatus = "Лечу к ростку: " .. (RARITY_LABEL[rar] or "спрут")
 
     local sproutAnchor = worldPos(sprout)
-    if moveToSprout(sprout) and sprout.Parent and findSprout() == sprout then
-        sproutAnchor = worldPos(sprout) or sproutAnchor
+    if moveToSprout(sprout) then
+        sproutAnchor = worldPos(sprout) or sproutAnchor or (player.Character and player.Character:FindFirstChild("HumanoidRootPart") and player.Character.HumanoidRootPart.Position)
         s.currentStatus = "Росток: ставлю поливалку"
-        task.wait(0.25)
+        task.wait(0.15)
         if useSprinklerBuilder then pcall(useSprinklerBuilder) end
+        ensureHarvestToolEquipped()
 
         -- Фаза 1: Росток жив. Бегаем постоянно, машем инструментом, собираем токены
-        while alive() and sprout.Parent and findSprout() == sprout do
+        while alive() and isSproutAlive(sprout, sproutAnchor) do
             if isBackpackFull() then break end
             s.currentStatus = CONFIG.ENABLE_AUTO_DIG and "Росток: копаю и бегаю по полю" or "Росток: собираю токены"
-            collectTokensFor(8, function()
-                return not alive() or not sprout.Parent or findSprout() ~= sprout or isBackpackFull()
-            end, worldPos(sprout) or sproutAnchor)
-            task.wait(0.08)
+            collectTokensFor(6, function()
+                return not alive() or not isSproutAlive(sprout, sproutAnchor) or isBackpackFull()
+            end, sproutAnchor)
+            task.wait(0.05)
         end
 
         -- Фаза 2: Росток сломан! Лутаем оставшиеся ценные токены (игнорируя honey tokens)
@@ -2932,21 +2967,22 @@ function Solo:Start()
 
                     s.currentStatus = "Лечу к ростку: " .. (RARITY_LABEL[rar] or "спрут")
                     local sproutAnchor = worldPos(sprout)
-                    if moveToSprout(sprout) and sprout.Parent and findSprout() == sprout then
-                        sproutAnchor = worldPos(sprout) or sproutAnchor
+                    if moveToSprout(sprout) then
+                        sproutAnchor = worldPos(sprout) or sproutAnchor or (player.Character and player.Character:FindFirstChild("HumanoidRootPart") and player.Character.HumanoidRootPart.Position)
                         s.currentStatus = "Росток: ставлю поливалку"
-                        task.wait(0.25)
+                        task.wait(0.15)
                         if useSprinklerBuilder then pcall(useSprinklerBuilder) end
+                        ensureHarvestToolEquipped()
 
-                        -- Фаза 1: Росток жив. Бегает всегда, машет палкой, собирает токены
-                        while alive() and sprout.Parent and findSprout() == sprout do
+                        -- Фаза 1: Росток жив. Бегает всегда, машет палкой 100%, собирает токены
+                        while alive() and isSproutAlive(sprout, sproutAnchor) do
                             if CONFIG.CHECK_VICIOUS and findVicious() then break end
                             s.currentStatus = CONFIG.ENABLE_AUTO_DIG and "Росток: копаю и бегаю по полю" or "Росток: бегаю и собираю токены"
-                            collectTokensFor(8, function()
-                                return not alive() or not sprout.Parent or findSprout() ~= sprout
+                            collectTokensFor(6, function()
+                                return not alive() or not isSproutAlive(sprout, sproutAnchor)
                                     or (CONFIG.CHECK_VICIOUS and findVicious() ~= nil)
-                            end, worldPos(sprout) or sproutAnchor)
-                            task.wait(0.08)
+                            end, sproutAnchor)
+                            task.wait(0.05)
                         end
 
                         -- Фаза 2: Росток сломан! Лутаем оставшиеся ценные токены (игнорируя honey tokens)
@@ -3184,7 +3220,7 @@ new("TextLabel", {
 })
 new("TextLabel", {
     Size = UDim2.new(0, 220, 0, 25), Position = UDim2.new(0, 58, 0, 10),
-    BackgroundTransparency = 1, Text = "🐍 BSS Hopper v1.3.34",
+    BackgroundTransparency = 1, Text = "🐍 BSS Hopper v1.3.35",
     TextColor3 = C.text, Font = Enum.Font.GothamBold, TextSize = 22,
     TextXAlignment = Enum.TextXAlignment.Left, Parent = head,
 })
@@ -4243,7 +4279,7 @@ end
 trace("Запуск завершён")
 
 print("=====================================================")
-print("  BSS HOPPER v1.3.33 ЗАГРУЖЕН")
+print("  BSS HOPPER v1.3.35 ЗАГРУЖЕН")
 print("  Bypass  : " .. (_G.BSS_BYPASS_ACTIVE and "session_bypass.lua" or "встроенный"))
 print("  Тег     : " .. tostring(CONFIG.SELF_TAG))
 print("  Бот     : " .. tostring(CONFIG.API_URL))
