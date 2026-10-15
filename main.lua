@@ -1,6 +1,6 @@
 --[[
 ═══════════════════════════════════════════════════════════════════════
-  🐍 BSS HOPPER v1.3.35 Sprout AFK Fix, Instant Run & 100% Stick Swing
+  🐍 BSS HOPPER v1.3.36 No-Lag Ultra Smooth Movement Fix
 ═══════════════════════════════════════════════════════════════════════
   ЛКМ по змейке  → вкл / выкл
   ПКМ по змейке  → меню    |    F — меню    |    P — вкл/выкл
@@ -2106,13 +2106,16 @@ end
 
 local lastSwingAt = 0
 local function swingDigTool()
+    local now = os.clock()
+    if now - lastSwingAt < 0.15 then return end
+    lastSwingAt = now
+
     local char = player.Character
     if not char then return end
     local tool = ensureHarvestToolEquipped()
     if tool then
         pcall(function() tool:Activate() end)
     end
-    -- Эмуляция клика всеми методами для 100% махания палкой
     if type(mouse1click) == "function" then
         pcall(mouse1click)
     elseif type(mouse1press) == "function" and type(mouse1release) == "function" then
@@ -2122,20 +2125,6 @@ local function swingDigTool()
         end)
     end
     pcall(function()
-        local vim = game:GetService("VirtualInputManager")
-        if vim then
-            vim:SendMouseButtonEvent(0, 0, 0, true, game, 1)
-            vim:SendMouseButtonEvent(0, 0, 0, false, game, 1)
-        end
-    end)
-    pcall(function()
-        local vu = game:GetService("VirtualUser")
-        if vu then
-            vu:CaptureController()
-            vu:ClickButton1(Vector2.new(999, 999))
-        end
-    end)
-    pcall(function()
         local rep = game:GetService("ReplicatedStorage")
         local ev = rep:FindFirstChild("Events")
         if ev and ev:FindFirstChild("ToolCollect") then
@@ -2144,17 +2133,13 @@ local function swingDigTool()
     end)
 end
 
--- Непрерывный фоновый поток копания: 20 раз в секунду машет палкой
-task.spawn(function()
-    while true do
-        task.wait(0.05)
-        if alive() and tokenCollectorBusy then
-            pcall(swingDigTool)
-        end
-    end
-end)
-
+local TOKEN_CACHE, TOKEN_CACHE_AT = {}, 0
 local function findTokens()
+    local now = os.clock()
+    if now - TOKEN_CACHE_AT < 0.12 then
+        return TOKEN_CACHE
+    end
+    TOKEN_CACHE_AT = now
     local out = {}
     for _, folderName in ipairs(TOKEN_FOLDERS) do
         local folder = Workspace:FindFirstChild(folderName)
@@ -2176,6 +2161,7 @@ local function findTokens()
             end
         end
     end
+    TOKEN_CACHE = out
     return out
 end
 
@@ -2218,7 +2204,7 @@ collectTokensFor = function(maxSeconds, stopFn, fieldAnchor)
         patrolTarget, activeTokenObj = nil, nil
         lastPatrolPickAt = 0
 
-        -- Гарантированно находим физическую зону текущего поля
+        -- Находим физическую зону текущего поля
         local anchorZone = getActiveFlowerZone(fieldAnchor)
 
         while alive() and os.clock() - started < maxSeconds do
@@ -2229,7 +2215,7 @@ collectTokensFor = function(maxSeconds, stopFn, fieldAnchor)
             local root = char and char:FindFirstChild("HumanoidRootPart")
             local humanoid = char and char:FindFirstChildOfClass("Humanoid")
 
-            -- Персонаж умер: немедленный выход без телепортов
+            -- Персонаж умер: немедленный выход
             if not root or not humanoid or humanoid.Health <= 0 then
                 patrolTarget, activeTokenObj = nil, nil
                 break
@@ -2239,25 +2225,24 @@ collectTokensFor = function(maxSeconds, stopFn, fieldAnchor)
                 anchorZone = getActiveFlowerZone(root.Position)
             end
 
-            -- 100% автосвинг палкой
+            -- Автосвинг палкой (с лимитом вызовов)
             pcall(swingDigTool)
 
-            -- Границы поля: 6.5 студов запас от края
+            -- Безопасные границы поля
             local limitX, limitZ = 40, 40
             if anchorZone then
                 local half = anchorZone.Size * 0.5
-                limitX = math.max(6, half.X - 6.5)
-                limitZ = math.max(6, half.Z - 6.5)
+                limitX = math.max(10, half.X - 5.0)
+                limitZ = math.max(10, half.Z - 5.0)
             end
 
-            -- Поиск токенов строго внутри безопасной границы поля
+            -- Поиск токенов внутри поля
             local tokens = findTokens()
             local best, bestKey = nil, math.huge
             for _, token in ipairs(tokens) do
                 local inField = false
                 if anchorZone and token.obj and token.obj.Parent then
                     local lp = anchorZone.CFrame:PointToObjectSpace(token.pos)
-                    -- НИ ПРИ КАКИХ УСЛОВИЯХ НЕ ВЫБЕГАЕМ ЗА ПОЛЕ
                     if math.abs(lp.X) <= limitX and math.abs(lp.Z) <= limitZ then
                         inField = true
                     end
@@ -2267,10 +2252,6 @@ collectTokensFor = function(maxSeconds, stopFn, fieldAnchor)
 
                 if inField and token.priority <= 3 then
                     local d = (token.pos - root.Position).Magnitude
-                    -- Математический строгий приоритет:
-                    -- N1 = 0 + d
-                    -- N2 = 100,000 + d
-                    -- N3 = 200,000 + d
                     local score = 200000
                     if token.priority == 1 then
                         score = 0
@@ -2284,11 +2265,11 @@ collectTokensFor = function(maxSeconds, stopFn, fieldAnchor)
 
             -- Скорость бега
             local baseSpeed = 16 * (tonumber(CONFIG.WALK_SPEED_MULT) or 2.4)
-            local targetSpeed = math.max(baseSpeed, 70)
+            local targetSpeed = math.max(baseSpeed, 65)
             if best and best.priority == 1 then
-                targetSpeed = math.max(targetSpeed, 100)
+                targetSpeed = math.max(targetSpeed, 90)
             elseif best and best.priority == 2 then
-                targetSpeed = math.max(targetSpeed, 85)
+                targetSpeed = math.max(targetSpeed, 75)
             end
             if math.abs(humanoid.WalkSpeed - targetSpeed) > 1 then
                 humanoid.WalkSpeed = targetSpeed
@@ -2301,15 +2282,14 @@ collectTokensFor = function(maxSeconds, stopFn, fieldAnchor)
                 activeTokenObj = nil
                 local needNewPatrol = not patrolTarget 
                     or (root.Position - patrolTarget).Magnitude < 4
-                    or (os.clock() - lastPatrolPickAt > 0.8)
+                    or (os.clock() - lastPatrolPickAt > 1.2)
 
                 if needNewPatrol then
                     lastPatrolPickAt = os.clock()
                     if anchorZone then
                         local half = anchorZone.Size * 0.5
-                        -- Патруль строго внутри 65% безопасного центра поля
-                        local xSpan = (half.X - 10) * 0.65
-                        local zSpan = (half.Z - 10) * 0.65
+                        local xSpan = (half.X - 8) * 0.65
+                        local zSpan = (half.Z - 8) * 0.65
                         local localTarget = Vector3.new(
                             (math.random() * 2 - 1) * xSpan,
                             0,
@@ -2327,44 +2307,24 @@ collectTokensFor = function(maxSeconds, stopFn, fieldAnchor)
                 end
             end
 
-            -- ЖЕЛЕЗНЫЙ ЗАМОК ГРАНИЦЫ ПОЛЯ:
-            if anchorZone then
-                -- 1. Клампим цель движения строго внутрь поля
-                if patrolTarget then
-                    local lp = anchorZone.CFrame:PointToObjectSpace(patrolTarget)
-                    local safeX = math.clamp(lp.X, -limitX, limitX)
-                    local safeZ = math.clamp(lp.Z, -limitZ, limitZ)
-                    local safeWorld = anchorZone.CFrame:PointToWorldSpace(Vector3.new(safeX, lp.Y, safeZ))
-                    patrolTarget = Vector3.new(safeWorld.X, root.Position.Y, safeWorld.Z)
-                end
-
-                -- 2. Если физический персонаж оказался у границы поля (>= limitX):
-                local curLp = anchorZone.CFrame:PointToObjectSpace(root.Position)
-                if math.abs(curLp.X) >= limitX or math.abs(curLp.Z) >= limitZ then
-                    local clampedX = math.clamp(curLp.X, -limitX + 1.5, limitX - 1.5)
-                    local clampedZ = math.clamp(curLp.Z, -limitZ + 1.5, limitZ - 1.5)
-                    local clampedPos = anchorZone.CFrame:PointToWorldSpace(Vector3.new(clampedX, curLp.Y, clampedZ))
-                    pcall(function()
-                        root.CFrame = CFrame.new(clampedPos.X, root.Position.Y, clampedPos.Z)
-                        root.AssemblyLinearVelocity = Vector3.zero
-                    end)
-                    patrolTarget = anchorZone.Position
-                end
+            -- Ограничение цели строго в границы поля
+            if anchorZone and patrolTarget then
+                local lp = anchorZone.CFrame:PointToObjectSpace(patrolTarget)
+                local safeX = math.clamp(lp.X, -limitX, limitX)
+                local safeZ = math.clamp(lp.Z, -limitZ, limitZ)
+                local safeWorld = anchorZone.CFrame:PointToWorldSpace(Vector3.new(safeX, lp.Y, safeZ))
+                patrolTarget = Vector3.new(safeWorld.X, root.Position.Y, safeWorld.Z)
             end
 
-            -- БЕСКОНЕЧНЫЙ ЗАЖАТЫЙ W (непрерывный бег без остановки и торможений)
+            -- Непрерывный бег к цели (без ломающих CFrame телепортов!)
             if patrolTarget then
                 local delta = patrolTarget - root.Position
                 local flatDir = Vector3.new(delta.X, 0, delta.Z)
-                if flatDir.Magnitude > 0.3 then
-                    local dir = flatDir.Unit
-                    pcall(function()
-                        root.CFrame = CFrame.new(root.Position, root.Position + dir)
-                    end)
-                    pcall(function() humanoid:MoveTo(patrolTarget) end)
-                    pcall(function() humanoid:Move(dir, false) end)
+                if flatDir.Magnitude > 0.4 then
+                    humanoid:Move(flatDir.Unit, false)
+                    humanoid:MoveTo(patrolTarget)
                 else
-                    pcall(function() humanoid:Move(root.CFrame.LookVector, false) end)
+                    humanoid:Move(root.CFrame.LookVector, false)
                 end
             end
 
@@ -3220,7 +3180,7 @@ new("TextLabel", {
 })
 new("TextLabel", {
     Size = UDim2.new(0, 220, 0, 25), Position = UDim2.new(0, 58, 0, 10),
-    BackgroundTransparency = 1, Text = "🐍 BSS Hopper v1.3.35",
+    BackgroundTransparency = 1, Text = "🐍 BSS Hopper v1.3.36",
     TextColor3 = C.text, Font = Enum.Font.GothamBold, TextSize = 22,
     TextXAlignment = Enum.TextXAlignment.Left, Parent = head,
 })
@@ -4279,7 +4239,7 @@ end
 trace("Запуск завершён")
 
 print("=====================================================")
-print("  BSS HOPPER v1.3.35 ЗАГРУЖЕН")
+print("  BSS HOPPER v1.3.36 ЗАГРУЖЕН")
 print("  Bypass  : " .. (_G.BSS_BYPASS_ACTIVE and "session_bypass.lua" or "встроенный"))
 print("  Тег     : " .. tostring(CONFIG.SELF_TAG))
 print("  Бот     : " .. tostring(CONFIG.API_URL))
