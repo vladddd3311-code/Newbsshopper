@@ -1,6 +1,6 @@
 --[[
 ═══════════════════════════════════════════════════════════════════════
-  🐍 BSS HOPPER v1.3.44 Optimal Sprinkler Spacing & Safe Distance
+  🐍 BSS HOPPER v1.3.45 Sprinkler Delay & Hive Crash Fix
 ═══════════════════════════════════════════════════════════════════════
   ЛКМ по змейке  → вкл / выкл
   ПКМ по змейке  → меню    |    F — меню    |    P — вкл/выкл
@@ -1233,14 +1233,15 @@ local function markTeleport(j) pendingTarget = j; pendingAt = os.clock(); resetR
 local function clearTeleport() pendingTarget = nil; pendingAt = 0 end
 
 local function hopTo(jobId, placeId)
-    if not jobId or isFailed(jobId) then return false end
+    if not jobId then return false end
     lastAttemptId += 1
     lastTeleportAt = os.clock()
     markTeleport(jobId)
     flushSettings()
     if CONFIG.ENABLE_BYPASS then bypassNotify() end
+    local pid = tonumber(placeId) or tonumber(CONFIG.PLACE_ID) or 1537690962
     local ok = pcall(function()
-        TeleportService:TeleportToPlaceInstance(placeId or CONFIG.PLACE_ID, jobId, player)
+        TeleportService:TeleportToPlaceInstance(pid, jobId, player)
     end)
     if not ok then
         rememberFailure(jobId)
@@ -1262,21 +1263,27 @@ function hopRandom()
     markTeleport(nil)
     flushSettings()
     if CONFIG.ENABLE_BYPASS then bypassNotify() end
-    pcall(function() TeleportService:Teleport(CONFIG.PLACE_ID, player) end)
+    local pid = tonumber(CONFIG.PLACE_ID) or 1537690962
+    pcall(function() TeleportService:Teleport(pid, player) end)
 end
 
 task.spawn(function()
     while true do
         if not alive() then return end
-        task.wait(0.5)
+        task.wait(1)
         if pendingAt > 0 then
-            local timeout = 3 -- Таймаут перезахода/подключения: статично 3 секунды
+            -- Даем Roblox 20 секунд на установку соединения и загрузку нового сервера
+            local timeout = 20
             if os.clock() - pendingAt >= timeout then
                 local target = pendingTarget
                 clearTeleport()
                 if target then rememberFailure(target) end
                 if CONFIG.ENABLE_BYPASS then bypassRecover("connect_timeout") end
-                hopRandom()
+                if CONFIG.MODE ~= "looter" and lastMode ~= "looter" then
+                    hopRandom()
+                else
+                    log("Лутающий", "Таймаут подключения к серверу задачи, жду следующую...")
+                end
             end
         end
     end
@@ -1719,13 +1726,13 @@ local function claimHive()
 
         -- Летим прямо на платформу
         moveRootToPosition(root, standPos, 4)
-        task.wait(0.2)
+        task.wait(0.15)
 
         root = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
         hum = player.Character and player.Character:FindFirstChildOfClass("Humanoid")
         if not root or not hum or hum.Health <= 0 then return false end
 
-        -- Отключаем ноклип, восстанавливаем коллизию и физически встаем на платформу
+        -- Отключаем ноклип и физически встаем на платформу
         setFlightNoclip(false)
         pcall(function()
             root.CFrame = CFrame.new(standPos)
@@ -1734,125 +1741,54 @@ local function claimHive()
             hum:ChangeState(Enum.HumanoidStateType.Landed)
             hum:ChangeState(Enum.HumanoidStateType.Running)
         end)
-        task.wait(0.25)
+        task.wait(0.2)
 
-        -- Ищем ProximityPrompt для захвата улья
-        local prompt = nil
-        -- А. Внутри модели слота
-        for _, desc in ipairs(slot.model:GetDescendants()) do
-            if desc:IsA("ProximityPrompt") then
-                prompt = desc
-                break
-            end
-        end
-        -- Б. В радиусе 25 студов от платформы в Workspace
+        -- Ищем ProximityPrompt для захвата улья только внутри слота
+        local prompt = slot.platform:FindFirstChildWhichIsA("ProximityPrompt")
         if not prompt then
-            local okD, allDesc = pcall(function() return Workspace:GetDescendants() end)
-            if okD then
-                local bestD = 25
-                for _, desc in ipairs(allDesc) do
-                    if desc:IsA("ProximityPrompt") then
-                        local pPos = promptWorldPos(desc)
-                        if pPos then
-                            local d = (pPos - slot.pos).Magnitude
-                            if d < bestD then
-                                prompt = desc
-                                bestD = d
-                            end
-                        end
-                    end
-                end
-            end
+            prompt = slot.model:FindFirstChildWhichIsA("ProximityPrompt", true)
         end
 
-        log("Улей", prompt and "ProximityPrompt найден — активирую..." or "Активирую захват стойки всеми методами...")
+        log("Улей", prompt and "ProximityPrompt найден — активирую..." or "Активирую захват стойки...")
 
-        -- Пробуем захватить этот улей в течение 3.5 секунд
+        -- Пробуем захватить этот улей (до 1.5 секунд)
         local tryStart = os.clock()
-        while alive() and os.clock() - tryStart < 3.5 do
+        while alive() and os.clock() - tryStart < 1.5 do
             if findAssignedHiveSlot() then
                 log("Улей", "Улей успешно занят!")
                 return true
             end
 
-            -- 1. ProximityPrompt методы
+            -- 1. ProximityPrompt
             if prompt and prompt.Parent then
                 pcall(function()
                     prompt.Enabled = true
                     prompt.RequiresLineOfSight = false
-                    prompt.MaxActivationDistance = 9999
                     prompt.HoldDuration = 0
                 end)
                 if type(fireproximityprompt) == "function" then
                     pcall(fireproximityprompt, prompt, 0, true)
-                    pcall(fireproximityprompt, prompt, 1, true)
-                    pcall(fireproximityprompt, prompt)
                 end
-                pcall(function()
-                    prompt:InputHoldBegin()
-                    task.wait(0.12)
-                    prompt:InputHoldEnd()
-                end)
             end
 
-            -- 2. Нажатие клавиши 'E' через VirtualInputManager
+            -- 2. Клавиша 'E' через VirtualInputManager
             pcall(function()
                 local vim = game:GetService("VirtualInputManager")
                 if vim then
                     vim:SendKeyEvent(true, Enum.KeyCode.E, false, game)
-                    task.wait(0.15)
+                    task.wait(0.08)
                     vim:SendKeyEvent(false, Enum.KeyCode.E, false, game)
                 end
             end)
 
-            -- 3. VirtualUser клавиша 'E'
-            pcall(function()
-                local vu = game:GetService("VirtualUser")
-                if vu then
-                    vu:CaptureController()
-                    vu:SetKeyDown("0x65")
-                    task.wait(0.15)
-                    vu:SetKeyUp("0x65")
-                end
-            end)
-
-            -- 4. ClickDetector fallback
-            if type(fireclickdetector) == "function" then
-                for _, cd in ipairs(slot.model:GetDescendants()) do
-                    if cd:IsA("ClickDetector") then
-                        pcall(fireclickdetector, cd)
-                    end
-                end
-            end
-
-            -- 5. TouchInterest на платформе и всех частях модели
-            if type(firetouchinterest) == "function" and root then
-                for _, part in ipairs(slot.model:GetDescendants()) do
-                    if part:IsA("BasePart") then
-                        pcall(firetouchinterest, root, part, 0)
-                        pcall(firetouchinterest, root, part, 1)
-                    end
-                end
-            end
-
-            -- 6. RemoteEvents в ReplicatedStorage
+            -- 3. Безопасное событие ReplicatedStorage (только готовый RemoteEvent, без рекурсивного сканирования и без InvokeServer)
             pcall(function()
                 local rep = game:GetService("ReplicatedStorage")
-                local evFolder = rep:FindFirstChild("Events") or rep
-                for _, ev in ipairs(evFolder:GetDescendants()) do
-                    if ev:IsA("RemoteEvent") or ev:IsA("RemoteFunction") then
-                        local n = string.lower(ev.Name)
-                        if string.find(n, "claimhive", 1, true) 
-                           or string.find(n, "playerhivecommand", 1, true)
-                           or string.find(n, "claim", 1, true) then
-                            if ev:IsA("RemoteEvent") then
-                                pcall(function() ev:FireServer(slot.model) end)
-                                pcall(function() ev:FireServer(slot.platform) end)
-                            elseif ev:IsA("RemoteFunction") then
-                                pcall(function() ev:InvokeServer(slot.model) end)
-                                pcall(function() ev:InvokeServer(slot.platform) end)
-                            end
-                        end
+                local ev = rep:FindFirstChild("Events")
+                if ev then
+                    local claimEv = ev:FindFirstChild("ClaimHive") or ev:FindFirstChild("PlayerHiveCommand")
+                    if claimEv and claimEv:IsA("RemoteEvent") then
+                        claimEv:FireServer(slot.model)
                     end
                 end
             end)
@@ -2086,22 +2022,15 @@ local function makeHoney()
     -- Ждём ПОЛНОЙ разгрузки рюкзака (пыльца -> 0)
     local maxWait = tonumber(CONFIG.HONEY_MAX_WAIT) or 120
     local t0 = os.clock()
-    local lastActionAt = 0
+    local lastActionAt = os.clock()
+    local lastPollen = math.huge
 
     while alive() and (os.clock() - t0 < maxWait) do
-        -- Периодически удерживаем персонажа на платформе и обновляем активацию Make Honey
-        if os.clock() - lastActionAt > 2.0 then
-            lastActionAt = os.clock()
-            pcall(function()
-                root.CFrame = CFrame.new(hivePos + Vector3.new(0, 3.2, 0))
-                root.AssemblyLinearVelocity = Vector3.zero
-            end)
-            if not prompt then
-                local near = findPromptNearPosition(CONFIG.MY_HIVE_KEYWORD or "make honey", hivePos, 30)
-                if near then prompt = near.prompt end
-            end
-            triggerMakeHoneyAction(prompt)
-        end
+        -- Удерживаем персонажа на платформе улья
+        pcall(function()
+            root.CFrame = CFrame.new(hivePos + Vector3.new(0, 3.2, 0))
+            root.AssemblyLinearVelocity = Vector3.zero
+        end)
 
         local info = getBackpackPollen()
         if info then
@@ -2110,6 +2039,24 @@ local function makeHoney()
                 log("Honey", string.format("Рюкзак ПОЛНОСТЬЮ разгружен (0 / %d)! Возвращаюсь к фарму.", info.max))
                 task.wait(0.5)
                 return true
+            end
+
+            -- Проверяем, идет ли процесс переработки пыльцы в мед
+            local isConverting = (info.current < lastPollen)
+            lastPollen = info.current
+
+            -- Если процесс НЕ идет и прошло > 4 сек с прошлой попытки, только тогда повторяем нажатие
+            if not isConverting and (os.clock() - lastActionAt > 4.0) then
+                if not prompt then
+                    local near = findPromptNearPosition(CONFIG.MY_HIVE_KEYWORD or "make honey", hivePos, 30)
+                    if near then prompt = near.prompt end
+                end
+                -- Проверяем: если на промпте написано Stop Making Honey, значит процесс активен, нажимать НЕЛЬЗЯ!
+                local promptText = prompt and prompt.ActionText and string.lower(prompt.ActionText) or ""
+                if not string.find(promptText, "stop", 1, true) then
+                    lastActionAt = os.clock()
+                    triggerMakeHoneyAction(prompt)
+                end
             end
         else
             -- Если индикатор стал недоступен через 15 сек после начала, считаем разгрузку успешной
@@ -2665,6 +2612,9 @@ useSprinklerBuilder = function(fieldAnchor)
             equipTool(tool)
         end
 
+        -- Для того чтобы поливалка анкдшенулась/прошел откат сервера ждем 1.5 секунды
+        task.wait(1.5)
+
         -- 1. Вызов серверного RemoteEvent размещения поливалки из инвентаря
         pcall(function()
             local rep = game:GetService("ReplicatedStorage")
@@ -2687,7 +2637,7 @@ useSprinklerBuilder = function(fieldAnchor)
             pcall(mouse1click)
         end
 
-        task.wait(0.12)
+        task.wait(0.2)
         placed += 1
     end
 
@@ -3090,11 +3040,16 @@ function Looter:Start()
     stopAutoDig()
     self.thread = task.spawn(function()
         task.wait(2)
-        if ensureHiveClaimed() then s.hivesClaimed += 1 end
+        -- Улей занимаем ТОЛЬКО если есть росток или вициус
 
         if CONFIG.CHECK_VICIOUS then
             local v = findVicious()
             if v then
+                if not hasOwnHive() then
+                    s.currentStatus = "Vicious найден — занимаю улей"
+                    local claimOk, claimed = pcall(ensureHiveClaimed)
+                    if claimOk and claimed then s.hivesClaimed += 1 end
+                end
                 s.currentStatus = "Vicious — лечу"
                 pcall(function() fightVicious(v) end)
             end
@@ -3116,6 +3071,11 @@ function Looter:Start()
                 if CONFIG.CHECK_VICIOUS then
                     local v = findVicious()
                     if v then
+                        if not hasOwnHive() then
+                            s.currentStatus = "Vicious найден — занимаю улей"
+                            local claimOk, claimed = pcall(ensureHiveClaimed)
+                            if claimOk and claimed then s.hivesClaimed += 1 end
+                        end
                         s.currentStatus = "Vicious — лечу"
                         pcall(function() fightVicious(v) end)
                         return
@@ -3147,7 +3107,10 @@ function Looter:Start()
                     task.wait(tonumber(CONFIG.POLL_INTERVAL) or 3)
                     return
                 end
-                if taskData and not isFailed(taskData.jobId) then
+                if taskData then
+                    if failedServers[taskData.jobId] then
+                        failedServers[taskData.jobId] = nil
+                    end
                     s.tasksReceived += 1
                     s.lastTask = {
                         fieldName = taskData.isVicious and ("Vicious @ "..tostring(taskData.fieldName or "?"))
@@ -3161,7 +3124,7 @@ function Looter:Start()
                         task.wait(tonumber(CONFIG.POLL_INTERVAL) or 3)
                         return
                     end
-                    task.wait(15)
+                    task.wait(20)
                     self:returnTask(taskData, "timeout")
                     return
                 end
@@ -3536,7 +3499,7 @@ new("TextLabel", {
 })
 new("TextLabel", {
     Size = UDim2.new(0, 220, 0, 25), Position = UDim2.new(0, 58, 0, 10),
-    BackgroundTransparency = 1, Text = "🐍 BSS Hopper v1.3.44",
+    BackgroundTransparency = 1, Text = "🐍 BSS Hopper v1.3.45",
     TextColor3 = C.text, Font = Enum.Font.GothamBold, TextSize = 22,
     TextXAlignment = Enum.TextXAlignment.Left, Parent = head,
 })
@@ -4595,7 +4558,7 @@ end
 trace("Запуск завершён")
 
 print("=====================================================")
-print("  BSS HOPPER v1.3.44 ЗАГРУЖЕН")
+print("  BSS HOPPER v1.3.45 ЗАГРУЖЕН")
 print("  Bypass  : " .. (_G.BSS_BYPASS_ACTIVE and "session_bypass.lua" or "встроенный"))
 print("  Тег     : " .. tostring(CONFIG.SELF_TAG))
 print("  Бот     : " .. tostring(CONFIG.API_URL))
