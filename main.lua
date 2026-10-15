@@ -1,6 +1,6 @@
 --[[
 ═══════════════════════════════════════════════════════════════════════
-  🐍 BSS HOPPER v1.3.43 Static 3s Rejoin & Connect Watchdog
+  🐍 BSS HOPPER v1.3.44 Optimal Sprinkler Spacing & Safe Distance
 ═══════════════════════════════════════════════════════════════════════
   ЛКМ по змейке  → вкл / выкл
   ПКМ по змейке  → меню    |    F — меню    |    P — вкл/выкл
@@ -2619,18 +2619,23 @@ useSprinklerBuilder = function(fieldAnchor)
     if count == 1 then
         table.insert(targetOffsets, Vector3.new(0, 0, 0))
     elseif count == 2 then
-        local spanX = math.clamp(halfX * 0.44, 12, 22)
+        local maxX = math.max(17, halfX - 7)
+        local spanX = math.clamp(halfX * 0.65, 17, maxX)
         table.insert(targetOffsets, Vector3.new(-spanX, 0, 0))
         table.insert(targetOffsets, Vector3.new(spanX, 0, 0))
     elseif count == 3 then
-        local spanX = math.clamp(halfX * 0.44, 12, 22)
-        local spanZ = math.clamp(halfZ * 0.40, 10, 20)
+        local maxX = math.max(18, halfX - 7)
+        local maxZ = math.max(16, halfZ - 7)
+        local spanX = math.clamp(halfX * 0.65, 18, maxX)
+        local spanZ = math.clamp(halfZ * 0.60, 16, maxZ)
         table.insert(targetOffsets, Vector3.new(0, 0, spanZ))
-        table.insert(targetOffsets, Vector3.new(-spanX, 0, -spanZ * 0.75))
-        table.insert(targetOffsets, Vector3.new(spanX, 0, -spanZ * 0.75))
+        table.insert(targetOffsets, Vector3.new(-spanX, 0, -spanZ * 0.65))
+        table.insert(targetOffsets, Vector3.new(spanX, 0, -spanZ * 0.65))
     elseif count == 4 then
-        local spanX = math.clamp(halfX * 0.52, 14, 25)
-        local spanZ = math.clamp(halfZ * 0.52, 14, 25)
+        local maxX = math.max(17, halfX - 7)
+        local maxZ = math.max(17, halfZ - 7)
+        local spanX = math.clamp(halfX * 0.65, 17, maxX)
+        local spanZ = math.clamp(halfZ * 0.65, 17, maxZ)
         table.insert(targetOffsets, Vector3.new(-spanX, 0, spanZ))
         table.insert(targetOffsets, Vector3.new(spanX, 0, spanZ))
         table.insert(targetOffsets, Vector3.new(-spanX, 0, -spanZ))
@@ -2650,8 +2655,8 @@ useSprinklerBuilder = function(fieldAnchor)
         local goal = Vector3.new(worldTarget.X, root.Position.Y, worldTarget.Z)
 
         pcall(function() hum:MoveTo(goal) end)
-        local deadline = os.clock() + 0.45
-        while alive() and os.clock() < deadline and (root.Position - goal).Magnitude > 3.2 do
+        local deadline = os.clock() + 0.55
+        while alive() and os.clock() < deadline and (root.Position - goal).Magnitude > 2.0 do
             RunService.Heartbeat:Wait()
         end
 
@@ -3531,7 +3536,7 @@ new("TextLabel", {
 })
 new("TextLabel", {
     Size = UDim2.new(0, 220, 0, 25), Position = UDim2.new(0, 58, 0, 10),
-    BackgroundTransparency = 1, Text = "🐍 BSS Hopper v1.3.43",
+    BackgroundTransparency = 1, Text = "🐍 BSS Hopper v1.3.44",
     TextColor3 = C.text, Font = Enum.Font.GothamBold, TextSize = 22,
     TextXAlignment = Enum.TextXAlignment.Left, Parent = head,
 })
@@ -4590,7 +4595,7 @@ end
 trace("Запуск завершён")
 
 print("=====================================================")
-print("  BSS HOPPER v1.3.43 ЗАГРУЖЕН")
+print("  BSS HOPPER v1.3.44 ЗАГРУЖЕН")
 print("  Bypass  : " .. (_G.BSS_BYPASS_ACTIVE and "session_bypass.lua" or "встроенный"))
 print("  Тег     : " .. tostring(CONFIG.SELF_TAG))
 print("  Бот     : " .. tostring(CONFIG.API_URL))
