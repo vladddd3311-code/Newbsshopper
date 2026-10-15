@@ -1,6 +1,6 @@
 --[[
 ═══════════════════════════════════════════════════════════════════════
-  🐍 BSS HOPPER v1.3.40 Ultra FPS & Auto Make Honey (Full Unload)
+  🐍 BSS HOPPER v1.3.41 Field-Aware Sprinklers (1-4) & Auto Honey
 ═══════════════════════════════════════════════════════════════════════
   ЛКМ по змейке  → вкл / выкл
   ПКМ по змейке  → меню    |    F — меню    |    P — вкл/выкл
@@ -2563,50 +2563,119 @@ collectTokensFor = function(maxSeconds, stopFn, fieldAnchor)
     end
 end
 
-useSprinklerBuilder = function()
+useSprinklerBuilder = function(fieldAnchor)
     if not CONFIG.ENABLE_AUTO_SPRINKLER then return false end
     local count = math.clamp(math.floor(tonumber(CONFIG.SPRINKLER_COUNT) or 3), 1, 4)
-    local tool = findToolByKeyword(CONFIG.SPRINKLER_KEYWORD or "sprinkler")
-    if not tool then
-        log("Инструмент", "Sprinkler Builder не найден в Backpack/персонаже")
-        return false
-    end
+
     local char = player.Character
     local root = char and char:FindFirstChild("HumanoidRootPart")
     local hum = char and char:FindFirstChildOfClass("Humanoid")
-    if not root or not hum then return false end
-    if not equipTool(tool) then
-        log("Инструмент", "Не удалось экипировать Sprinkler Builder")
-        return false
-    end
-    local origin = root.Position
-    local look = root.CFrame.LookVector
-    local right = root.CFrame.RightVector
-    local offsets = {
-        Vector3.new(0,0,0), right * 9 + look * 5,
-        right * -9 + look * 5, look * -10,
-    }
-    local placed = 0
-    for i = 1, count do
-        if not alive() or not root.Parent or tool.Parent ~= char then break end
-        local offset = offsets[i]
-        if offset.Magnitude > 0 then
-            local goal = origin + offset
-            pcall(function() hum:MoveTo(Vector3.new(goal.X, root.Position.Y, goal.Z)) end)
-            local deadline = os.clock() + 0.35
-            while alive() and os.clock() < deadline and (root.Position - goal).Magnitude > 3 do
-                RunService.Heartbeat:Wait()
-            end
+    if not root or not hum or hum.Health <= 0 then return false end
+
+    -- Поиск инструмента Sprinkler Builder
+    local tool = findToolByKeyword(CONFIG.SPRINKLER_KEYWORD or "sprinkler")
+    if not tool then
+        local bp = player:FindFirstChildOfClass("Backpack")
+        if bp then
+            tool = bp:FindFirstChild("Sprinkler Builder") or bp:FindFirstChild("Sprinkler")
         end
-        pcall(function() tool:Activate() end)
-        task.wait(0.1)
+        if not tool and char then
+            tool = char:FindFirstChild("Sprinkler Builder") or char:FindFirstChild("Sprinkler")
+        end
+    end
+
+    -- Находим зону текущего поля для точного позиционирования поливалок
+    local anchorPos = fieldAnchor or root.Position
+    local zone = getActiveFlowerZone(anchorPos)
+    local center = zone and zone.Position or anchorPos
+    local halfX = zone and (zone.Size.X * 0.5) or 32
+    local halfZ = zone and (zone.Size.Z * 0.5) or 32
+
+    -- Формируем целевые точки размещения поливалок по правилам:
+    -- 1: по середине поля
+    -- 2: слева и справа с достаточным расстоянием друг от друга
+    -- 3: сверху 1, и 2 снизу слева и справа
+    -- 4: в 4 углах поля, но не под самый корень (с безопасным отступом)
+    local targetOffsets = {}
+    if count == 1 then
+        table.insert(targetOffsets, Vector3.new(0, 0, 0))
+    elseif count == 2 then
+        local spanX = math.clamp(halfX * 0.44, 12, 22)
+        table.insert(targetOffsets, Vector3.new(-spanX, 0, 0))
+        table.insert(targetOffsets, Vector3.new(spanX, 0, 0))
+    elseif count == 3 then
+        local spanX = math.clamp(halfX * 0.44, 12, 22)
+        local spanZ = math.clamp(halfZ * 0.40, 10, 20)
+        table.insert(targetOffsets, Vector3.new(0, 0, spanZ))
+        table.insert(targetOffsets, Vector3.new(-spanX, 0, -spanZ * 0.75))
+        table.insert(targetOffsets, Vector3.new(spanX, 0, -spanZ * 0.75))
+    elseif count == 4 then
+        local spanX = math.clamp(halfX * 0.52, 14, 25)
+        local spanZ = math.clamp(halfZ * 0.52, 14, 25)
+        table.insert(targetOffsets, Vector3.new(-spanX, 0, spanZ))
+        table.insert(targetOffsets, Vector3.new(spanX, 0, spanZ))
+        table.insert(targetOffsets, Vector3.new(-spanX, 0, -spanZ))
+        table.insert(targetOffsets, Vector3.new(spanX, 0, -spanZ))
+    end
+
+    local placed = 0
+    for i, offset in ipairs(targetOffsets) do
+        if not alive() or not root.Parent then break end
+
+        local worldTarget
+        if zone then
+            worldTarget = zone.CFrame:PointToWorldSpace(offset)
+        else
+            worldTarget = center + offset
+        end
+        local goal = Vector3.new(worldTarget.X, root.Position.Y, worldTarget.Z)
+
+        pcall(function() hum:MoveTo(goal) end)
+        local deadline = os.clock() + 0.45
+        while alive() and os.clock() < deadline and (root.Position - goal).Magnitude > 3.2 do
+            RunService.Heartbeat:Wait()
+        end
+
+        -- Экипировка Sprinkler Builder
+        if tool and tool.Parent ~= char then
+            equipTool(tool)
+        end
+
+        -- 1. Вызов серверного RemoteEvent размещения поливалки из инвентаря
+        pcall(function()
+            local rep = game:GetService("ReplicatedStorage")
+            local ev = rep:FindFirstChild("Events")
+            if ev then
+                local act = ev:FindFirstChild("PlayerActivesCommand")
+                if act and act:IsA("RemoteEvent") then
+                    act:FireServer({ Name = "Sprinkler Builder" })
+                end
+            end
+        end)
+
+        -- 2. Активация инструмента в руках
+        if tool and tool.Parent == char then
+            pcall(function() tool:Activate() end)
+        end
+
+        -- 3. Клик мыши
+        if type(mouse1click) == "function" then
+            pcall(mouse1click)
+        end
+
+        task.wait(0.12)
         placed += 1
     end
-    log("Инструмент", "Sprinkler Builder: попыток размещения " .. tostring(placed) .. "/" .. tostring(count))
+
+    log("Инструмент", string.format("Sprinkler Builder: размещено %d/%d (режим: %d поливалки)", placed, count, count))
+
     -- Синхронное снятие лейки и немедленное вооружение палкой
     pcall(function() hum:UnequipTools() end)
     local bp = player:FindFirstChildOfClass("Backpack")
-    if bp then pcall(function() tool.Parent = bp end) end
+    if bp and tool and tool.Parent == char then
+        pcall(function() tool.Parent = bp end)
+    end
+    task.wait(0.05)
     ensureHarvestToolEquipped()
     return placed > 0
 end
@@ -2898,7 +2967,7 @@ function Looter:harvest()
         sproutAnchor = worldPos(sprout) or sproutAnchor or (player.Character and player.Character:FindFirstChild("HumanoidRootPart") and player.Character.HumanoidRootPart.Position)
         s.currentStatus = "Росток: ставлю поливалку"
         task.wait(0.15)
-        if useSprinklerBuilder then pcall(useSprinklerBuilder) end
+        if useSprinklerBuilder then pcall(useSprinklerBuilder, sproutAnchor) end
         ensureHarvestToolEquipped()
 
         -- Фаза 1: Росток жив. Бегаем постоянно, машем инструментом, собираем токены
@@ -3174,7 +3243,7 @@ function Solo:Start()
                         sproutAnchor = worldPos(sprout) or sproutAnchor or (player.Character and player.Character:FindFirstChild("HumanoidRootPart") and player.Character.HumanoidRootPart.Position)
                         s.currentStatus = "Росток: ставлю поливалку"
                         task.wait(0.15)
-                        if useSprinklerBuilder then pcall(useSprinklerBuilder) end
+                        if useSprinklerBuilder then pcall(useSprinklerBuilder, sproutAnchor) end
                         ensureHarvestToolEquipped()
 
                         -- Фаза 1: Росток жив. Бегает всегда, машет палкой 100%, собирает токены
@@ -3443,7 +3512,7 @@ new("TextLabel", {
 })
 new("TextLabel", {
     Size = UDim2.new(0, 220, 0, 25), Position = UDim2.new(0, 58, 0, 10),
-    BackgroundTransparency = 1, Text = "🐍 BSS Hopper v1.3.40",
+    BackgroundTransparency = 1, Text = "🐍 BSS Hopper v1.3.41",
     TextColor3 = C.text, Font = Enum.Font.GothamBold, TextSize = 22,
     TextXAlignment = Enum.TextXAlignment.Left, Parent = head,
 })
@@ -4502,7 +4571,7 @@ end
 trace("Запуск завершён")
 
 print("=====================================================")
-print("  BSS HOPPER v1.3.40 ЗАГРУЖЕН")
+print("  BSS HOPPER v1.3.41 ЗАГРУЖЕН")
 print("  Bypass  : " .. (_G.BSS_BYPASS_ACTIVE and "session_bypass.lua" or "встроенный"))
 print("  Тег     : " .. tostring(CONFIG.SELF_TAG))
 print("  Бот     : " .. tostring(CONFIG.API_URL))
