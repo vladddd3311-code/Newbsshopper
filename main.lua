@@ -1,6 +1,6 @@
 --[[
 ═══════════════════════════════════════════════════════════════════════
-  🐍 BSS HOPPER v1.3.38 Instant Token Switch & Zero Delay
+  🐍 BSS HOPPER v1.3.40 Ultra FPS & Auto Make Honey (Full Unload)
 ═══════════════════════════════════════════════════════════════════════
   ЛКМ по змейке  → вкл / выкл
   ПКМ по змейке  → меню    |    F — меню    |    P — вкл/выкл
@@ -458,13 +458,15 @@ local function isSproutAlive(sprout, anchorPos)
     return false
 end
 
+local function _rawWorldPos(obj)
+    if obj:IsA("BasePart") then return obj.Position end
+    if obj:IsA("Model") then return obj:GetPivot().Position end
+    return nil
+end
+
 local function worldPos(obj)
     if not obj then return nil end
-    local ok, p = pcall(function()
-        if obj:IsA("BasePart") then return obj.Position end
-        if obj:IsA("Model") then return obj:GetPivot().Position end
-        return nil
-    end)
+    local ok, p = pcall(_rawWorldPos, obj)
     if ok and p then return p end
     return nil
 end
@@ -1859,84 +1861,244 @@ end
 local function stripCommas(s) return (tostring(s):gsub(",", "")) end
 
 local function getBackpackPollen()
+    -- 1. Самый точный метод: CoreStats игрока в BSS (напрямую от сервера)
+    local okCore, info = pcall(function()
+        local cs = player:FindFirstChild("CoreStats")
+        if cs then
+            local pol = cs:FindFirstChild("Pollen")
+            local cap = cs:FindFirstChild("Capacity")
+            if pol and cap and tonumber(cap.Value) and cap.Value > 0 then
+                local c = tonumber(pol.Value) or 0
+                local m = tonumber(cap.Value)
+                return { current = c, max = m, ratio = c / m }
+            end
+        end
+        return nil
+    end)
+    if okCore and info then return info end
+
+    -- 2. Второй метод: прямое чтение Pollen Meter (Meter2) в PlayerGui
     local pg = player:FindFirstChildOfClass("PlayerGui")
     if not pg then return nil end
-    local ok, descendants = pcall(function() return pg:GetDescendants() end)
-    if not ok then return nil end
-    local bestInfo, bestMax = nil, 0
-    for _, d in ipairs(descendants) do
-        if d:IsA("TextLabel") then
-            local txt = tostring(d.Text or "")
-            local a, b = string.match(txt, "([%d,]+)%s*/%s*([%d,]+)")
-            if a and b then
-                local cur = tonumber(stripCommas(a))
-                local max = tonumber(stripCommas(b))
-                if cur and max and max > 0 and max > bestMax then
-                    bestMax = max
-                    bestInfo = { current=cur, max=max, ratio=cur/max }
+
+    local sg = pg:FindFirstChild("ScreenGui")
+    if sg then
+        local meter2 = sg:FindFirstChild("Meter2") or sg:FindFirstChild("PollenMeter")
+        if meter2 then
+            for _, d in ipairs(meter2:GetDescendants()) do
+                if d:IsA("TextLabel") then
+                    local a, b = string.match(d.Text or "", "([%d,]+)%s*/%s*([%d,]+)")
+                    if a and b then
+                        local c = tonumber(stripCommas(a))
+                        local m = tonumber(stripCommas(b))
+                        if c and m and m > 0 then
+                            return { current = c, max = m, ratio = c / m }
+                        end
+                    end
                 end
             end
         end
     end
-    return bestInfo
+
+    -- 3. Fallback: поиск по всем TextLabel в PlayerGui с фильтром по Pollen/Meter2
+    local best = nil
+    local okDesc, descendants = pcall(function() return pg:GetDescendants() end)
+    if okDesc and descendants then
+        for _, d in ipairs(descendants) do
+            if d:IsA("TextLabel") then
+                local txt = tostring(d.Text or "")
+                local a, b = string.match(txt, "([%d,]+)%s*/%s*([%d,]+)")
+                if a and b then
+                    local c = tonumber(stripCommas(a))
+                    local m = tonumber(stripCommas(b))
+                    if c and m and m > 0 then
+                        local pName = string.lower(d.Name)
+                        local parentName = d.Parent and string.lower(d.Parent.Name) or ""
+                        local gparentName = d.Parent and d.Parent.Parent and string.lower(d.Parent.Parent.Name) or ""
+                        local isPollen = string.find(pName, "pollen", 1, true) or string.find(pName, "meter2", 1, true)
+                            or string.find(parentName, "pollen", 1, true) or string.find(parentName, "meter2", 1, true)
+                            or string.find(gparentName, "pollen", 1, true) or string.find(gparentName, "meter2", 1, true)
+                        if not isPollen and d.Parent then
+                            for _, sib in ipairs(d.Parent:GetChildren()) do
+                                if sib:IsA("TextLabel") and string.find(string.lower(sib.Text or ""), "pollen", 1, true) then
+                                    isPollen = true
+                                    break
+                                end
+                            end
+                        end
+                        if isPollen then
+                            return { current = c, max = m, ratio = c / m }
+                        end
+                        if not best and m <= 100000000 then
+                            best = { current = c, max = m, ratio = c / m }
+                        end
+                    end
+                end
+            end
+        end
+    end
+    return best
 end
 
 local function isBackpackFull()
     local info = getBackpackPollen()
     if not info then return false end
-    return info.ratio >= (tonumber(CONFIG.BACKPACK_FILL_THRESHOLD) or 0.95)
+    local threshold = tonumber(CONFIG.BACKPACK_FILL_THRESHOLD) or 0.95
+    return info.current >= info.max or info.ratio >= threshold
 end
 
 local useSprinklerBuilder
 local collectTokensFor
 
+local function triggerMakeHoneyAction(prompt)
+    if prompt and prompt.Parent then
+        pcall(function()
+            prompt.Enabled = true
+            prompt.RequiresLineOfSight = false
+            prompt.MaxActivationDistance = 9999
+            prompt.HoldDuration = 0
+        end)
+        if type(fireproximityprompt) == "function" then
+            pcall(fireproximityprompt, prompt, 0, true)
+            pcall(fireproximityprompt, prompt, 1, true)
+            pcall(fireproximityprompt, prompt)
+        end
+        pcall(function()
+            prompt:InputHoldBegin()
+            task.wait(0.12)
+            prompt:InputHoldEnd()
+        end)
+    end
+
+    -- Нажатие клавиши 'E' (Make Honey) через VirtualInputManager
+    pcall(function()
+        local vim = game:GetService("VirtualInputManager")
+        if vim then
+            vim:SendKeyEvent(true, Enum.KeyCode.E, false, game)
+            task.wait(0.15)
+            vim:SendKeyEvent(false, Enum.KeyCode.E, false, game)
+        end
+    end)
+
+    -- VirtualUser 'E'
+    pcall(function()
+        local vu = game:GetService("VirtualUser")
+        if vu then
+            vu:CaptureController()
+            vu:SetKeyDown("0x65")
+            task.wait(0.15)
+            vu:SetKeyUp("0x65")
+        end
+    end)
+
+    -- RemoteEvent в ReplicatedStorage
+    pcall(function()
+        local rep = game:GetService("ReplicatedStorage")
+        local ev = rep:FindFirstChild("Events")
+        if ev then
+            local cmd = ev:FindFirstChild("PlayerHiveCommand") or ev:FindFirstChild("MakeHoney")
+            if cmd and cmd:IsA("RemoteEvent") then
+                cmd:FireServer("MakeHoney")
+            end
+        end
+    end)
+end
+
 local function makeHoney()
-    local s = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
-    if not s then return false end
+    local char = player.Character
+    local root = char and char:FindFirstChild("HumanoidRootPart")
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+    if not root or not hum or hum.Health <= 0 then return false end
+
+    -- Проверяем наличие своего улья
+    if not hasOwnHive() then
+        log("Honey", "Улей не назначен — занимаю свободный улей...")
+        pcall(ensureHiveClaimed)
+    end
+
     local hive = findMyHive()
-    if not hive then
-        log("Honey", "Улей 'Make Honey' не найден")
+    local slot = findAssignedHiveSlot()
+    local hivePos = (hive and hive.pos) or (slot and slot.pos)
+    if not hivePos then
+        log("Honey", "Позиция своего улья не найдена")
         return false
     end
-    log("Honey", "Лечу к улью")
-    moveRootToPosition(s, hive.pos + Vector3.new(0, 4, 0), 10)
 
-    local prompt = hive.prompt
+    log("Honey", "Рюкзак полон! Лечу к улью на разгрузку...")
+    -- Подлетаем к платформе улья
+    moveRootToPosition(root, hivePos + Vector3.new(0, 3.5, 0), 10)
+
+    -- Отключаем ноклип и встаем ровно на платформу
+    setFlightNoclip(false)
+    pcall(function()
+        root.CFrame = CFrame.new(hivePos + Vector3.new(0, 3.2, 0))
+        root.AssemblyLinearVelocity = Vector3.zero
+        root.AssemblyAngularVelocity = Vector3.zero
+        hum:ChangeState(Enum.HumanoidStateType.Landed)
+        hum:ChangeState(Enum.HumanoidStateType.Running)
+    end)
+    task.wait(0.3)
+
+    -- Ищем Prompt "Make Honey"
+    local prompt = (hive and hive.prompt)
     if not prompt then
-        local t0 = os.clock()
-        while os.clock() - t0 < 8 do
-            task.wait(0.3)
-            local h = findMyHive()
-            if h and h.prompt then prompt = h.prompt; break end
-            local owned = findAssignedHiveSlot()
-            if owned then
-                local near = findPromptNearPosition(CONFIG.MY_HIVE_KEYWORD or "make honey", owned.pos, 35)
-                if near then prompt = near.prompt; break end
+        local near = findPromptNearPosition(CONFIG.MY_HIVE_KEYWORD or "make honey", hivePos, 30)
+        if near then prompt = near.prompt end
+    end
+    if not prompt and slot and slot.model then
+        for _, desc in ipairs(slot.model:GetDescendants()) do
+            if desc:IsA("ProximityPrompt") then
+                prompt = desc
+                break
             end
         end
     end
-    if not prompt then
-        log("Honey", "Prompt 'Make Honey' не найден")
-        return false
-    end
 
-    local maxWait = tonumber(CONFIG.HONEY_MAX_WAIT) or 45
+    -- Нажимаем Make Honey
+    log("Honey", "Активирую Make Honey (клавиша E)...")
+    triggerMakeHoneyAction(prompt)
+
+    -- Ждём ПОЛНОЙ разгрузки рюкзака (пыльца -> 0)
+    local maxWait = tonumber(CONFIG.HONEY_MAX_WAIT) or 120
     local t0 = os.clock()
-    local lastActivation = 0
-    while alive() and os.clock() - t0 < maxWait do
-        if os.clock() - lastActivation > 1.2 then
-            lastActivation = os.clock()
-            activatePrompt(prompt)
+    local lastActionAt = 0
+
+    while alive() and (os.clock() - t0 < maxWait) do
+        -- Периодически удерживаем персонажа на платформе и обновляем активацию Make Honey
+        if os.clock() - lastActionAt > 2.0 then
+            lastActionAt = os.clock()
+            pcall(function()
+                root.CFrame = CFrame.new(hivePos + Vector3.new(0, 3.2, 0))
+                root.AssemblyLinearVelocity = Vector3.zero
+            end)
+            if not prompt then
+                local near = findPromptNearPosition(CONFIG.MY_HIVE_KEYWORD or "make honey", hivePos, 30)
+                if near then prompt = near.prompt end
+            end
+            triggerMakeHoneyAction(prompt)
         end
+
         local info = getBackpackPollen()
-        if info and info.ratio < 0.1 then
-            log("Honey", string.format("Рюкзак опустошён (%d/%d)", info.current, info.max))
-            return true
+        if info then
+            -- Полная разгрузка: пыльцы 0 (или менее 0.5% от объема)
+            if info.current <= 0 or info.ratio <= 0.005 then
+                log("Honey", string.format("Рюкзак ПОЛНОСТЬЮ разгружен (0 / %d)! Возвращаюсь к фарму.", info.max))
+                task.wait(0.5)
+                return true
+            end
+        else
+            -- Если индикатор стал недоступен через 15 сек после начала, считаем разгрузку успешной
+            if os.clock() - t0 > 15 then
+                log("Honey", "Индикатор пыльцы пуст, разгрузка завершена")
+                return true
+            end
         end
+
         task.wait(0.4)
     end
-    log("Honey", "Make Honey завершён по таймауту")
-    return false
+
+    log("Honey", "Разгрузка завершена по истечению времени")
+    return true
 end
 
 local TOKEN_P1 = {
@@ -2063,11 +2225,20 @@ local function equipTool(tool)
     return tool.Parent == char
 end
 
+local cachedHarvestTool = nil
+local lastToolCheckAt = 0
+
 local function ensureHarvestToolEquipped()
     local char = player.Character
     if not char then return nil end
     local hum = char:FindFirstChildOfClass("Humanoid")
     if not hum then return nil end
+
+    local now = os.clock()
+    if cachedHarvestTool and cachedHarvestTool.Parent == char and (now - lastToolCheckAt < 0.8) then
+        return cachedHarvestTool
+    end
+    lastToolCheckAt = now
 
     -- 1. Если в руках осталась лейка/поливалка — СНИМАЕМ ЕЁ!
     for _, item in ipairs(char:GetChildren()) do
@@ -2082,6 +2253,7 @@ local function ensureHarvestToolEquipped()
     -- 2. Если в руках уже палка/инструмент сбора — возвращаем её
     for _, item in ipairs(char:GetChildren()) do
         if item:IsA("Tool") and not string.find(string.lower(item.Name), "sprinkler", 1, true) then
+            cachedHarvestTool = item
             return item
         end
     end
@@ -2093,6 +2265,7 @@ local function ensureHarvestToolEquipped()
             if item:IsA("Tool") and not string.find(string.lower(item.Name), "sprinkler", 1, true) then
                 pcall(function() hum:EquipTool(item) end)
                 if item.Parent ~= char then pcall(function() item.Parent = char end) end
+                cachedHarvestTool = item
                 return item
             end
         end
@@ -2102,6 +2275,20 @@ end
 
 local function findHarvestTool()
     return ensureHarvestToolEquipped()
+end
+
+local toolCollectRemote = nil
+local lastRemoteCheckAt = 0
+local function getToolCollectRemote()
+    if toolCollectRemote and toolCollectRemote.Parent then return toolCollectRemote end
+    local now = os.clock()
+    if now - lastRemoteCheckAt < 1.0 then return nil end
+    lastRemoteCheckAt = now
+    local ok, ev = pcall(function() return game:GetService("ReplicatedStorage"):FindFirstChild("Events") end)
+    if ok and ev then
+        toolCollectRemote = ev:FindFirstChild("ToolCollect")
+    end
+    return toolCollectRemote
 end
 
 local lastSwingAt = 0
@@ -2124,39 +2311,65 @@ local function swingDigTool()
             mouse1release()
         end)
     end
-    pcall(function()
-        local rep = game:GetService("ReplicatedStorage")
-        local ev = rep:FindFirstChild("Events")
-        if ev and ev:FindFirstChild("ToolCollect") then
-            ev.ToolCollect:FireServer()
-        end
-    end)
+    local ev = getToolCollectRemote()
+    if ev then
+        pcall(function() ev:FireServer() end)
+    end
 end
 
 local TOKEN_CACHE, TOKEN_CACHE_AT = {}, 0
 local collectedTokens = setmetatable({}, { __mode = "k" })
-local function findTokens()
+local function findFieldTokens(anchorZone, limitX, limitZ, fieldAnchor)
     local now = os.clock()
-    if now - TOKEN_CACHE_AT < 0.02 then
+    if now - TOKEN_CACHE_AT < 0.08 then
         return TOKEN_CACHE
     end
     TOKEN_CACHE_AT = now
+
     local out = {}
+    local zonePos = anchorZone and anchorZone.Position
+    local maxRadiusSq = 55 * 55
+    if anchorZone then
+        local maxR = math.max(anchorZone.Size.X, anchorZone.Size.Z) * 0.5 + 2
+        maxRadiusSq = maxR * maxR
+    end
+
     for _, folderName in ipairs(TOKEN_FOLDERS) do
         local folder = Workspace:FindFirstChild(folderName)
         if folder then
             local ok, items = pcall(function() return folder:GetChildren() end)
             if ok and items then
                 for _, obj in ipairs(items) do
-                    local pos = worldPos(obj)
-                    if pos then
-                        local prio = getTokenPriorityForObj(obj)
-                        out[#out+1] = {
-                            obj = obj,
-                            name = TOKEN_NAME_CACHE[obj] or "token",
-                            pos = pos,
-                            priority = prio,
-                        }
+                    if not collectedTokens[obj] then
+                        local pos = worldPos(obj)
+                        if pos then
+                            local inField = false
+                            if anchorZone and zonePos then
+                                local dx = pos.X - zonePos.X
+                                local dz = pos.Z - zonePos.Z
+                                if (dx * dx + dz * dz) <= maxRadiusSq then
+                                    local lp = anchorZone.CFrame:PointToObjectSpace(pos)
+                                    if math.abs(lp.X) <= limitX and math.abs(lp.Z) <= limitZ then
+                                        inField = true
+                                    end
+                                end
+                            elseif fieldAnchor then
+                                local dx = pos.X - fieldAnchor.X
+                                local dz = pos.Z - fieldAnchor.Z
+                                inField = (dx * dx + dz * dz) <= 1764
+                            end
+
+                            if inField then
+                                local prio = getTokenPriorityForObj(obj)
+                                if prio <= 3 then
+                                    out[#out+1] = {
+                                        obj = obj,
+                                        pos = pos,
+                                        priority = prio,
+                                    }
+                                end
+                            end
+                        end
                     end
                 end
             end
@@ -2207,6 +2420,15 @@ collectTokensFor = function(maxSeconds, stopFn, fieldAnchor)
 
         -- Находим физическую зону текущего поля
         local anchorZone = getActiveFlowerZone(fieldAnchor)
+        local limitX, limitZ = 40, 40
+        local function refreshZoneLimits()
+            if anchorZone then
+                local half = anchorZone.Size * 0.5
+                limitX = math.max(6, half.X - 5.0)
+                limitZ = math.max(6, half.Z - 5.0)
+            end
+        end
+        refreshZoneLimits()
 
         while alive() and os.clock() - started < maxSeconds do
             if collectorTokenGen ~= myGen then break end
@@ -2224,62 +2446,50 @@ collectTokensFor = function(maxSeconds, stopFn, fieldAnchor)
 
             if not anchorZone then
                 anchorZone = getActiveFlowerZone(root.Position)
+                refreshZoneLimits()
             end
 
             -- Автосвинг палкой (с лимитом вызовов)
             pcall(swingDigTool)
 
-            -- Безопасные границы поля: строгий фильтр (только внутри поля)
-            local limitX, limitZ = 40, 40
-            if anchorZone then
-                local half = anchorZone.Size * 0.5
-                limitX = math.max(6, half.X - 5.0)
-                limitZ = math.max(6, half.Z - 5.0)
-            end
-
             local rootPos = root.Position
             -- Мгновенно исключаем только что взятый токен, не дожидаясь пока BSS его удалит
             if activeTokenObj then
-                if not activeTokenObj.Parent then
+                if not activeTokenObj.Parent or collectedTokens[activeTokenObj] then
                     activeTokenObj = nil
                 else
                     local p = worldPos(activeTokenObj)
-                    if p and (Vector3.new(p.X, 0, p.Z) - Vector3.new(rootPos.X, 0, rootPos.Z)).Magnitude <= 4.2 then
-                        collectedTokens[activeTokenObj] = true
+                    if p then
+                        local dx = p.X - rootPos.X
+                        local dz = p.Z - rootPos.Z
+                        if (dx * dx + dz * dz) <= 18.0 then
+                            collectedTokens[activeTokenObj] = true
+                            activeTokenObj = nil
+                        end
+                    else
                         activeTokenObj = nil
                     end
                 end
             end
 
-            -- Поиск токенов СТРОГО внутри границ поля (токены за полем ПОЛНОСТЬЮ игнорируются)
-            local tokens = findTokens()
+            -- Поиск токенов СТРОГО внутри границ поля (токены за полем ПОЛНОСТЬЮ отсеяны в findFieldTokens)
+            local tokens = findFieldTokens(anchorZone, limitX, limitZ, fieldAnchor)
             local best, bestKey = nil, math.huge
             for _, token in ipairs(tokens) do
-                if token.obj and token.obj.Parent and not collectedTokens[token.obj] then
-                    local horizDist = (Vector3.new(token.pos.X, 0, token.pos.Z) - Vector3.new(rootPos.X, 0, rootPos.Z)).Magnitude
-                    if horizDist <= 3.8 then
+                local tobj = token.obj
+                if tobj and tobj.Parent and not collectedTokens[tobj] then
+                    local dx = token.pos.X - rootPos.X
+                    local dz = token.pos.Z - rootPos.Z
+                    local distSq = dx * dx + dz * dz
+                    if distSq <= 14.44 then
                         -- Персонаж уже коснулся токена: помечаем собранным, не ждем пока BSS его удалит!
-                        collectedTokens[token.obj] = true
+                        collectedTokens[tobj] = true
                     else
-                        local inField = false
-                        if anchorZone then
-                            local lp = anchorZone.CFrame:PointToObjectSpace(token.pos)
-                            if math.abs(lp.X) <= limitX and math.abs(lp.Z) <= limitZ then
-                                inField = true
-                            end
-                        elseif fieldAnchor then
-                            inField = (Vector3.new(token.pos.X, 0, token.pos.Z) - Vector3.new(fieldAnchor.X, 0, fieldAnchor.Z)).Magnitude <= 42
-                        end
-
-                        if inField and token.priority <= 3 then
-                            local score = 200000
-                            if token.priority == 1 then
-                                score = 0
-                            elseif token.priority == 2 then
-                                score = 100000
-                            end
-                            local key = score + horizDist
-                            if key < bestKey then best, bestKey = token, key end
+                        local score = (token.priority == 1 and 0) or (token.priority == 2 and 100000) or 200000
+                        local key = score + distSq
+                        if key < bestKey then
+                            best = token
+                            bestKey = key
                         end
                     end
                 end
@@ -2693,7 +2903,13 @@ function Looter:harvest()
 
         -- Фаза 1: Росток жив. Бегаем постоянно, машем инструментом, собираем токены
         while alive() and isSproutAlive(sprout, sproutAnchor) do
-            if isBackpackFull() then break end
+            if isBackpackFull() then
+                s.currentStatus = "Рюкзак полный — делаю Honey"
+                pcall(makeHoney)
+                if not alive() or not isSproutAlive(sprout, sproutAnchor) then break end
+                s.currentStatus = "Возвращаюсь к ростку"
+                moveToSprout(sprout)
+            end
             s.currentStatus = CONFIG.ENABLE_AUTO_DIG and "Росток: копаю и бегаю по полю" or "Росток: собираю токены"
             collectTokensFor(6, function()
                 return not alive() or not isSproutAlive(sprout, sproutAnchor) or isBackpackFull()
@@ -2702,11 +2918,17 @@ function Looter:harvest()
         end
 
         -- Фаза 2: Росток сломан! Лутаем оставшиеся ценные токены (игнорируя honey tokens)
-        if alive() and sproutAnchor and not isBackpackFull() then
-            s.currentStatus = "Росток сломан — собираю ценные токены..."
-            collectTokensFor(tonumber(CONFIG.BROKEN_WAIT) or 20, function()
-                return not alive() or isBackpackFull()
-            end, sproutAnchor)
+        if alive() and sproutAnchor then
+            if isBackpackFull() then
+                s.currentStatus = "Рюкзак полный — делаю Honey"
+                pcall(makeHoney)
+            end
+            if alive() and not isBackpackFull() then
+                s.currentStatus = "Росток сломан — собираю ценные токены..."
+                collectTokensFor(tonumber(CONFIG.BROKEN_WAIT) or 20, function()
+                    return not alive() or isBackpackFull()
+                end, sproutAnchor)
+            end
         end
     end
 
@@ -2928,6 +3150,12 @@ function Solo:Start()
                     return
                 end
 
+                -- Проверка рюкзака перед поиском целей
+                if isBackpackFull() then
+                    s.currentStatus = "Рюкзак полный — делаю Honey"
+                    pcall(makeHoney)
+                end
+
                 local sprout = CONFIG.CHECK_SPROUTS and findSprout() or nil
                 if sprout then
                     s.sproutsFound += 1
@@ -2951,10 +3179,18 @@ function Solo:Start()
 
                         -- Фаза 1: Росток жив. Бегает всегда, машет палкой 100%, собирает токены
                         while alive() and isSproutAlive(sprout, sproutAnchor) do
+                            if isBackpackFull() then
+                                s.currentStatus = "Рюкзак полный — делаю Honey"
+                                pcall(makeHoney)
+                                if not alive() or not isSproutAlive(sprout, sproutAnchor) then break end
+                                s.currentStatus = "Возвращаюсь к ростку"
+                                moveToSprout(sprout)
+                            end
                             if CONFIG.CHECK_VICIOUS and findVicious() then break end
                             s.currentStatus = CONFIG.ENABLE_AUTO_DIG and "Росток: копаю и бегаю по полю" or "Росток: бегаю и собираю токены"
                             collectTokensFor(6, function()
                                 return not alive() or not isSproutAlive(sprout, sproutAnchor)
+                                    or isBackpackFull()
                                     or (CONFIG.CHECK_VICIOUS and findVicious() ~= nil)
                             end, sproutAnchor)
                             task.wait(0.05)
@@ -2962,11 +3198,23 @@ function Solo:Start()
 
                         -- Фаза 2: Росток сломан! Лутаем оставшиеся ценные токены (игнорируя honey tokens)
                         if alive() and sproutAnchor and not (CONFIG.CHECK_VICIOUS and findVicious()) then
-                            s.currentStatus = "Росток сломан — собираю ценные токены..."
-                            collectTokensFor(tonumber(CONFIG.BROKEN_WAIT) or 20, function()
-                                return not alive() or (CONFIG.CHECK_VICIOUS and findVicious() ~= nil)
-                            end, sproutAnchor)
+                            if isBackpackFull() then
+                                s.currentStatus = "Рюкзак полный — делаю Honey"
+                                pcall(makeHoney)
+                            end
+                            if alive() and not isBackpackFull() then
+                                s.currentStatus = "Росток сломан — собираю ценные токены..."
+                                collectTokensFor(tonumber(CONFIG.BROKEN_WAIT) or 20, function()
+                                    return not alive() or isBackpackFull() or (CONFIG.CHECK_VICIOUS and findVicious() ~= nil)
+                                end, sproutAnchor)
+                            end
                         end
+                    end
+
+                    -- Разгрузка перед переходом на следующий сервер
+                    if isBackpackFull() then
+                        s.currentStatus = "Рюкзак полный — делаю Honey перед переходом"
+                        pcall(makeHoney)
                     end
 
                     -- Фаза 3: Росток залутан! Переход на следующий сервер
@@ -3195,7 +3443,7 @@ new("TextLabel", {
 })
 new("TextLabel", {
     Size = UDim2.new(0, 220, 0, 25), Position = UDim2.new(0, 58, 0, 10),
-    BackgroundTransparency = 1, Text = "🐍 BSS Hopper v1.3.38",
+    BackgroundTransparency = 1, Text = "🐍 BSS Hopper v1.3.40",
     TextColor3 = C.text, Font = Enum.Font.GothamBold, TextSize = 22,
     TextXAlignment = Enum.TextXAlignment.Left, Parent = head,
 })
@@ -4254,7 +4502,7 @@ end
 trace("Запуск завершён")
 
 print("=====================================================")
-print("  BSS HOPPER v1.3.38 ЗАГРУЖЕН")
+print("  BSS HOPPER v1.3.40 ЗАГРУЖЕН")
 print("  Bypass  : " .. (_G.BSS_BYPASS_ACTIVE and "session_bypass.lua" or "встроенный"))
 print("  Тег     : " .. tostring(CONFIG.SELF_TAG))
 print("  Бот     : " .. tostring(CONFIG.API_URL))
