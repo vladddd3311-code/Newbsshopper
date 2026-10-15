@@ -1,6 +1,6 @@
 --[[
 ═══════════════════════════════════════════════════════════════════════
-  🐍 BSS HOPPER v1.3.47 Strict Target Hive Claim & Cache Fix
+  🐍 BSS HOPPER v1.3.48 Harvest Sprout First Before Bot Poll
 ═══════════════════════════════════════════════════════════════════════
   ЛКМ по змейке  → вкл / выкл
   ПКМ по змейке  → меню    |    F — меню    |    P — вкл/выкл
@@ -1547,9 +1547,27 @@ local function findLootableSprout()
         if folder and folder.Parent then
             consider(folder)
             local ok, descendants = pcall(function() return folder:GetDescendants() end)
-            if ok then
+            if ok and descendants then
                 for _, child in ipairs(descendants) do consider(child) end
             end
+        end
+    end
+    -- Прямой fallback по Workspace
+    local h = Workspace:FindFirstChild("Happenings")
+    if h then
+        local hs = h:FindFirstChild("Sprouts")
+        if hs then
+            local okH, hDesc = pcall(function() return hs:GetDescendants() end)
+            if okH and hDesc then
+                for _, child in ipairs(hDesc) do consider(child) end
+            end
+        end
+    end
+    local ws = Workspace:FindFirstChild("Sprouts")
+    if ws then
+        local okW, wDesc = pcall(function() return ws:GetDescendants() end)
+        if okW and wDesc then
+            for _, child in ipairs(wDesc) do consider(child) end
         end
     end
     return best
@@ -3050,7 +3068,47 @@ function Looter:Start()
 
     stopAutoDig()
     self.thread = task.spawn(function()
-        s.currentStatus = "Подключаюсь к боту..."
+        -- 1. Сначала при заходе на сервер обязательно ищем и лутаем росток/вициус на ЭТОМ сервере!
+        s.currentStatus = "Проверяю сервер на росток / вициус..."
+
+        -- Даем до 8 секунд на полную прогрузку мира и появление цели
+        for checkSec = 1, 8 do
+            if not alive() then return end
+
+            if CONFIG.CHECK_SPROUTS then
+                local sprout = findLootableSprout()
+                if sprout then
+                    s.currentStatus = "Росток найден — начинаю лутать!"
+                    pcall(function() self:harvest() end)
+                    break
+                end
+            end
+
+            if CONFIG.CHECK_VICIOUS then
+                local v = findVicious()
+                if v then
+                    s.currentStatus = "Vicious найден — начинаю бой!"
+                    pcall(function() fightVicious(v) end)
+                    break
+                end
+            end
+
+            if CONFIG.CHECK_PUFFSHROOMS and #findEligiblePuffshrooms() > 0 then
+                pcall(function() self:harvestPuffshrooms() end)
+                break
+            end
+
+            task.wait(1)
+        end
+
+        -- Если рюкзак заполнился во время сбора ростка — разгружаем на улье
+        if isBackpackFull() then
+            s.currentStatus = "Рюкзак полный — делаю Honey"
+            pcall(makeHoney)
+        end
+
+        -- 2. ТОЛЬКО ПОСЛЕ ТОГО как росток залутан — подключаемся к боту за новой задачей!
+        s.currentStatus = "Росток залутан — подключаюсь к боту..."
         task.wait(1.5)
 
         local taskAttempts = {}
@@ -3060,23 +3118,21 @@ function Looter:Start()
             local ok, err = pcall(function()
                 s.serversChecked += 1
 
+                -- Проверка локальных целей (если новый росток вырос прямо на этом сервере пока ждали)
+                if CONFIG.CHECK_SPROUTS and findLootableSprout() then
+                    s.currentStatus = "Новый росток на сервере — лутаю!"
+                    pcall(function() self:harvest() end)
+                    if isBackpackFull() then pcall(makeHoney) end
+                    return
+                end
+
                 if CONFIG.CHECK_VICIOUS then
                     local v = findVicious()
                     if v then
-                        s.currentStatus = "Vicious — лечу"
+                        s.currentStatus = "Vicious на сервере — лечу!"
                         pcall(function() fightVicious(v) end)
                         return
                     end
-                end
-
-                if CONFIG.CHECK_PUFFSHROOMS and #findEligiblePuffshrooms() > 0 then
-                    pcall(function() self:harvestPuffshrooms() end)
-                    return
-                end
-
-                if CONFIG.CHECK_SPROUTS and findLootableSprout() then
-                    pcall(function() self:harvest() end)
-                    return
                 end
 
                 if isBackpackFull() then
@@ -3085,26 +3141,39 @@ function Looter:Start()
                     return
                 end
 
+                -- Опрашиваем бота о новых задачах от Ищущего
+                s.currentStatus = "Жду новую задачу от Ищущего..."
                 local taskData, skipReason = self:fetchNextVicious()
                 if not taskData and not skipReason and CONFIG.CHECK_SPROUTS then
                     taskData, skipReason = self:fetchNext()
                 end
+
                 if skipReason then
                     s.currentStatus = skipReason
                     task.wait(tonumber(CONFIG.POLL_INTERVAL) or 3)
                     return
                 end
+
                 if taskData and taskData.jobId then
                     local targetJob = normalizeJobId(taskData.jobId)
                     local currentJob = normalizeJobId(game.JobId)
 
+                    -- Если бот выдал сервер, на котором мы УЖЕ находимся
                     if targetJob ~= "" and targetJob == currentJob then
-                        s.currentStatus = "Уже на сервере задачи — ищу цель..."
+                        s.currentStatus = "Сервер задачи — ищу цель..."
                         local found = false
-                        for _ = 1, 6 do
+                        for _ = 1, 8 do
                             if not alive() then return end
-                            if CONFIG.CHECK_VICIOUS and findVicious() then found = true; break end
-                            if CONFIG.CHECK_SPROUTS and findLootableSprout() then found = true; break end
+                            if CONFIG.CHECK_SPROUTS and findLootableSprout() then
+                                pcall(function() self:harvest() end)
+                                found = true
+                                break
+                            end
+                            if CONFIG.CHECK_VICIOUS and findVicious() then
+                                pcall(function() fightVicious(findVicious()) end)
+                                found = true
+                                break
+                            end
                             task.wait(1)
                         end
                         if not found then
@@ -3114,6 +3183,7 @@ function Looter:Start()
                         return
                     end
 
+                    -- Ограничение повторов недоступных серверов
                     local attempts = (taskAttempts[taskData.jobId] or 0) + 1
                     taskAttempts[taskData.jobId] = attempts
                     if attempts > 2 then
@@ -3512,7 +3582,7 @@ new("TextLabel", {
 })
 new("TextLabel", {
     Size = UDim2.new(0, 220, 0, 25), Position = UDim2.new(0, 58, 0, 10),
-    BackgroundTransparency = 1, Text = "🐍 BSS Hopper v1.3.47",
+    BackgroundTransparency = 1, Text = "🐍 BSS Hopper v1.3.48",
     TextColor3 = C.text, Font = Enum.Font.GothamBold, TextSize = 22,
     TextXAlignment = Enum.TextXAlignment.Left, Parent = head,
 })
@@ -4571,7 +4641,7 @@ end
 trace("Запуск завершён")
 
 print("=====================================================")
-print("  BSS HOPPER v1.3.47 ЗАГРУЖЕН")
+print("  BSS HOPPER v1.3.48 ЗАГРУЖЕН")
 print("  Bypass  : " .. (_G.BSS_BYPASS_ACTIVE and "session_bypass.lua" or "встроенный"))
 print("  Тег     : " .. tostring(CONFIG.SELF_TAG))
 print("  Бот     : " .. tostring(CONFIG.API_URL))
