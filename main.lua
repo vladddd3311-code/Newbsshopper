@@ -1,6 +1,6 @@
 --[[
 ═══════════════════════════════════════════════════════════════════════
-  🐍 BSS HOPPER v1.3.42 Static Fly (100) & Walk (90)
+  🐍 BSS HOPPER v1.3.43 Static 3s Rejoin & Connect Watchdog
 ═══════════════════════════════════════════════════════════════════════
   ЛКМ по змейке  → вкл / выкл
   ПКМ по змейке  → меню    |    F — меню    |    P — вкл/выкл
@@ -136,7 +136,7 @@ local CONFIG = {
 
     HOP_DELAY = 3, POLL_INTERVAL = 3, BROKEN_WAIT = 20,
     INITIAL_CHECK = 1, REPORT_DELAY = 2.5,
-    CONNECT_TIMEOUT = 20, MAX_ATTEMPTS = 3, FAILED_TTL = 180,
+    CONNECT_TIMEOUT = 3, MAX_ATTEMPTS = 3, FAILED_TTL = 180,
 
     DEBUG_SPROUT = true, CHECK_VICIOUS = true, CHECK_SPROUTS = true,
     AUTO_START = true,
@@ -1268,9 +1268,9 @@ end
 task.spawn(function()
     while true do
         if not alive() then return end
-        task.wait(1)
+        task.wait(0.5)
         if pendingAt > 0 then
-            local timeout = tonumber(CONFIG.CONNECT_TIMEOUT) or 20
+            local timeout = 3 -- Таймаут перезахода/подключения: статично 3 секунды
             if os.clock() - pendingAt >= timeout then
                 local target = pendingTarget
                 clearTeleport()
@@ -1300,7 +1300,7 @@ local MAX_REJOIN_TRIES = 5
 local function rejoinRetry(code)
     rejoinTries += 1
     local attempt = rejoinTries
-    task.wait(3 + attempt * 2)
+    task.wait(3) -- Таймаут перезахода: статично 3 секунды
     if CONFIG.ENABLE_BYPASS then bypassRecover("code_" .. tostring(code)) end
     if attempt >= MAX_REJOIN_TRIES then
         rejoinTries = 0; clearTeleport(); hopRandom(); return
@@ -1313,12 +1313,39 @@ local function handleTeleportFailure(reason)
     if teleportLock then return end
     teleportLock = true
     clearTeleport()
-    task.wait(2)
+    task.wait(3) -- Таймаут перезахода: статично 3 секунды
     if CONFIG.ENABLE_BYPASS then bypassRecover(tostring(reason)) end
     if attemptCounter >= (tonumber(CONFIG.MAX_ATTEMPTS) or 3) then clearFailures() end
     rejoinSame()
     teleportLock = false
 end
+
+-- Автоматический перезаход при дисконнекте (ErrorPrompt) ровно через 3 секунды
+task.spawn(function()
+    pcall(function()
+        local robloxPromptGui = CoreGui:WaitForChild("RobloxPromptGui", 5)
+        if robloxPromptGui then
+            local promptOverlay = robloxPromptGui:WaitForChild("promptOverlay", 5)
+            if promptOverlay then
+                promptOverlay.ChildAdded:Connect(function(child)
+                    if child.Name == "ErrorPrompt" then
+                        log("Watchdog", "Обнаружен экран ошибки/дисконнекта. Перезаход через 3 секунды...")
+                        task.wait(3)
+                        clearTeleport()
+                        rejoinSame()
+                    end
+                end)
+                local existing = promptOverlay:FindFirstChild("ErrorPrompt")
+                if existing then
+                    log("Watchdog", "Обнаружен экран ошибки. Перезаход через 3 секунды...")
+                    task.wait(3)
+                    clearTeleport()
+                    rejoinSame()
+                end
+            end
+        end
+    end)
+end)
 
 local function safeConnect(obj, signal, fn, name)
     local ok = pcall(function() trackConn(obj[signal]:Connect(fn)) end)
@@ -3504,7 +3531,7 @@ new("TextLabel", {
 })
 new("TextLabel", {
     Size = UDim2.new(0, 220, 0, 25), Position = UDim2.new(0, 58, 0, 10),
-    BackgroundTransparency = 1, Text = "🐍 BSS Hopper v1.3.42",
+    BackgroundTransparency = 1, Text = "🐍 BSS Hopper v1.3.43",
     TextColor3 = C.text, Font = Enum.Font.GothamBold, TextSize = 22,
     TextXAlignment = Enum.TextXAlignment.Left, Parent = head,
 })
@@ -4017,7 +4044,7 @@ section("ТАЙМИНГИ", 20).Parent = pageSettings
 local fHop = makeField(pageSettings, "ЗАДЕРЖКА ХОПА (сек)", CONFIG.HOP_DELAY, "3", 21)
 local fPoll = makeField(pageSettings, "ОПРОС БОТА (сек)", CONFIG.POLL_INTERVAL, "3", 22)
 local fWait = makeField(pageSettings, "ЖДАТЬ СЛОМАННОГО СПРУТА (сек)", CONFIG.BROKEN_WAIT, "20", 23)
-local fConn = makeField(pageSettings, "ТАЙМАУТ ПОДКЛЮЧЕНИЯ (сек)", CONFIG.CONNECT_TIMEOUT, "20", 24)
+local fConn = makeField(pageSettings, "ТАЙМАУТ ПОДКЛЮЧЕНИЯ (сек)", CONFIG.CONNECT_TIMEOUT, "3", 24)
 local fPlace = makeField(pageSettings, "PLACE ID", CONFIG.PLACE_ID, "1537690962", 25)
 
 section("СКОРОСТЬ", 30).Parent = pageSettings
@@ -4055,7 +4082,7 @@ local function applySettings()
     CONFIG.HOP_DELAY = num(fHop.Text, 3)
     CONFIG.POLL_INTERVAL = num(fPoll.Text, 3)
     CONFIG.BROKEN_WAIT = num(fWait.Text, 20)
-    CONFIG.CONNECT_TIMEOUT = num(fConn.Text, 20)
+    CONFIG.CONNECT_TIMEOUT = num(fConn.Text, 3)
     CONFIG.PLACE_ID = (fPlace.Text ~= "" and fPlace.Text) or CONFIG.PLACE_ID
     CONFIG.WALK_SPEED_MULT = num(fWalk.Text, 2.4)
     CONFIG.FLY_SPEED = math.clamp(num(fFly.Text, 100), 50, 150)
@@ -4563,7 +4590,7 @@ end
 trace("Запуск завершён")
 
 print("=====================================================")
-print("  BSS HOPPER v1.3.42 ЗАГРУЖЕН")
+print("  BSS HOPPER v1.3.43 ЗАГРУЖЕН")
 print("  Bypass  : " .. (_G.BSS_BYPASS_ACTIVE and "session_bypass.lua" or "встроенный"))
 print("  Тег     : " .. tostring(CONFIG.SELF_TAG))
 print("  Бот     : " .. tostring(CONFIG.API_URL))
