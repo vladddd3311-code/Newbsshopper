@@ -1,6 +1,6 @@
 --[[
 ═══════════════════════════════════════════════════════════════════════
-  🐍 BSS HOPPER v1.3.41 Field-Aware Sprinklers (1-4) & Auto Honey
+  🐍 BSS HOPPER v1.3.42 Static Fly (100) & Walk (90)
 ═══════════════════════════════════════════════════════════════════════
   ЛКМ по змейке  → вкл / выкл
   ПКМ по змейке  → меню    |    F — меню    |    P — вкл/выкл
@@ -141,7 +141,7 @@ local CONFIG = {
     DEBUG_SPROUT = true, CHECK_VICIOUS = true, CHECK_SPROUTS = true,
     AUTO_START = true,
 
-    WALK_SPEED_MULT = 2.4, FLY_SPEED = 100, JUMP_POWER = 60,
+    WALK_SPEED_MULT = 5.625, FLY_SPEED = 100, JUMP_POWER = 60,
 
     BACKPACK_FILL_THRESHOLD = 0.95, HONEY_MAX_WAIT = 45,
 
@@ -569,7 +569,7 @@ local function moveRootToPosition(root, destination, maxDuration)
         return true
     end
 
-    local speed = math.clamp(tonumber(CONFIG.FLY_SPEED) or 100, 50, 150)
+    local speed = 100 -- Статичная скорость полета: 100 studs/s
     local duration = math.clamp(distance / speed, 0.25, maxDuration or 10)
     local direction = offset.Unit
     local targetCFrame = CFrame.new(destination, destination + direction)
@@ -664,12 +664,12 @@ end
 -- ══════════════════════════════════════════════════════════════════════
 --  СКОРОСТЬ
 -- ══════════════════════════════════════════════════════════════════════
-local BASE_WALK = 16
+local STATIC_SPEED = 90
 local function applyWalkSpeed()
     local char = player.Character
     local hum = char and char:FindFirstChildOfClass("Humanoid")
     if hum then
-        hum.WalkSpeed = BASE_WALK * (tonumber(CONFIG.WALK_SPEED_MULT) or 2.4)
+        hum.WalkSpeed = STATIC_SPEED
         hum.JumpPower = tonumber(CONFIG.JUMP_POWER) or 60
         hum.UseJumpPower = true
     end
@@ -684,14 +684,12 @@ task.spawn(function()
             applyWalkSpeed(); task.wait(0.4)
         end
     end))
-    -- Keep speed locked every frame so token buffs/tool equip/game scripts do not
-    -- cause a visible one-second drop back to the default speed.
+    -- Фиксируем скорость статично на 90 каждый кадр
     while alive() do
         RunService.Heartbeat:Wait()
         local hum = player.Character and player.Character:FindFirstChildOfClass("Humanoid")
         if hum and hum.Health > 0 then
-            local target = BASE_WALK * (tonumber(CONFIG.WALK_SPEED_MULT) or 2.4)
-            if math.abs(hum.WalkSpeed - target) > 0.05 then hum.WalkSpeed = target end
+            if math.abs(hum.WalkSpeed - STATIC_SPEED) > 0.05 then hum.WalkSpeed = STATIC_SPEED end
         end
     end
 end)
@@ -1133,7 +1131,7 @@ local function fightVicious(vicious)
         local goal = smoothedTarget + Vector3.new(0, hoverHeight, 0)
         local delta = goal - root.Position
         local distance = delta.Magnitude
-        local speed = math.clamp(tonumber(CONFIG.FLY_SPEED) or 100, 50, 150)
+        local speed = 100 -- Статичная скорость полета: 100 studs/s
 
         local desiredVelocity = Vector3.zero
         if distance > 1.8 then
@@ -2495,15 +2493,9 @@ collectTokensFor = function(maxSeconds, stopFn, fieldAnchor)
                 end
             end
 
-            -- Скорость бега
-            local baseSpeed = 16 * (tonumber(CONFIG.WALK_SPEED_MULT) or 2.4)
-            local targetSpeed = math.max(baseSpeed, 65)
-            if best and best.priority == 1 then
-                targetSpeed = math.max(targetSpeed, 90)
-            elseif best and best.priority == 2 then
-                targetSpeed = math.max(targetSpeed, 75)
-            end
-            if math.abs(humanoid.WalkSpeed - targetSpeed) > 1 then
+            -- Скорость бега: статично 90
+            local targetSpeed = 90
+            if math.abs(humanoid.WalkSpeed - targetSpeed) > 0.05 then
                 humanoid.WalkSpeed = targetSpeed
             end
 
@@ -3512,7 +3504,7 @@ new("TextLabel", {
 })
 new("TextLabel", {
     Size = UDim2.new(0, 220, 0, 25), Position = UDim2.new(0, 58, 0, 10),
-    BackgroundTransparency = 1, Text = "🐍 BSS Hopper v1.3.41",
+    BackgroundTransparency = 1, Text = "🐍 BSS Hopper v1.3.42",
     TextColor3 = C.text, Font = Enum.Font.GothamBold, TextSize = 22,
     TextXAlignment = Enum.TextXAlignment.Left, Parent = head,
 })
@@ -4571,7 +4563,7 @@ end
 trace("Запуск завершён")
 
 print("=====================================================")
-print("  BSS HOPPER v1.3.41 ЗАГРУЖЕН")
+print("  BSS HOPPER v1.3.42 ЗАГРУЖЕН")
 print("  Bypass  : " .. (_G.BSS_BYPASS_ACTIVE and "session_bypass.lua" or "встроенный"))
 print("  Тег     : " .. tostring(CONFIG.SELF_TAG))
 print("  Бот     : " .. tostring(CONFIG.API_URL))
