@@ -1914,21 +1914,24 @@ local function makeHoney()
 end
 
 local TOKEN_P1 = {
-    "glitter", "glue", "extract", "star jelly", "magic bean",
+    "glitter", "glue", "extract", "star jelly", "magic bean", "bean",
     "royal jelly", "atomic treat", "star treat", "neonberry",
-    "moon charm", "whirligig", "egg", "field dice", "smoothie",
-    "micro-converter", "oil", "enzymes", "tropical drink",
-    "gumdrop", "gumdrops",
+    "moon charm", "whirligig", "egg", "dice", "smoothie",
+    "converter", "micro-converter", "oil", "enzymes", "tropical drink",
+    "gumdrop", "gumdrops", "gingerbread", "snowflake", "festive",
+    "box frog", "night bell"
 }
 local TOKEN_P2 = {
-    "strawberry", "blueberry", "pineapple", "sunflower seed",
-    "coconut", "bitterberry", "treat", "ticket", "pollen",
+    "strawberry", "blueberry", "pineapple", "sunflower", "seed",
+    "coconut", "bitterberry", "treat", "ticket", "ant pass", "pollen"
 }
 
 local function isHoneyToken(low)
     if string.find(low, "honey", 1, true) then return true end
-    -- Идентификаторы ассетов текстур медовых токенов (медовые монетки BSS)
+    -- Все известные ID текстур медовых монет BSS
     if string.find(low, "1629547638", 1, true) or string.find(low, "2028607990", 1, true)
+       or string.find(low, "1471850677", 1, true) or string.find(low, "1471849394", 1, true)
+       or string.find(low, "1471844391", 1, true) or string.find(low, "1472135114", 1, true)
        or string.find(low, "honeytoken", 1, true) or string.find(low, "honeydrop", 1, true) then
         return true
     end
@@ -1937,17 +1940,17 @@ end
 
 local function tokenPriority(name)
     local low = string.lower(tostring(name or ""))
-    -- Медовые токены: низший приоритет 99 (подбираются только попутно, не бежим за ними)
+    -- Медовые токены: приоритет 99 (игнорируются, подбираются только наступая на них)
     if isHoneyToken(low) then return 99 end
-    -- N1: Супер редкие предметы (Glue, Blue Extract, Glitter, Star Jelly и т.д.)
+    -- N1: Супер редкие предметы (Glue, Blue Extract, Glitter, Star Jelly, Magic Beans и т.д.)
     for _, w in ipairs(TOKEN_P1) do
         if string.find(low, w, 1, true) then return 1 end
     end
-    -- N2: Фрукты, ресурсы (Blueberry, Strawberry, Seeds, Treats, Tickets и т.д.)
+    -- N2: Фрукты, семена, билеты (Blueberry, Strawberry, Seeds, Treats, Tickets)
     for _, w in ipairs(TOKEN_P2) do
         if string.find(low, w, 1, true) then return 2 end
     end
-    -- N3: Все остальные полезные токены (абилки, бусты, баффы, бомбы)
+    -- N3: Все остальные токены на поле (способности пчёл, бомбы, бусты, баффы)
     return 3
 end
 
@@ -1962,13 +1965,20 @@ local function resolveTokenName(obj)
             if tex ~= "" then table.insert(parts, tex) end
         end
     end
+    -- Атрибуты BSS токенов
+    local okAttr, attrs = pcall(function() return obj:GetAttributes() end)
+    if okAttr and attrs then
+        for k, v in pairs(attrs) do
+            table.insert(parts, tostring(k) .. " " .. tostring(v))
+        end
+    end
     local combined = string.lower(table.concat(parts, " "))
 
-    -- 1. Сначала проверяем N1 (редкие предметы: glitter, glue, extract...)
+    -- 1. Сначала N1 (glue, blue extract, glitter, star jelly...)
     for _, w in ipairs(TOKEN_P1) do
         if string.find(combined, w, 1, true) then return w end
     end
-    -- 2. Затем N2 (фрукты, билеты, семена...)
+    -- 2. Затем N2 (blueberry, strawberry, pineapple, seeds, tickets...)
     for _, w in ipairs(TOKEN_P2) do
         if string.find(combined, w, 1, true) then return w end
     end
@@ -2008,21 +2018,20 @@ local function equipTool(tool)
 end
 
 local function findHarvestTool()
-    local keywords = {"scooper", "shovel", "rake", "dipper", "staff", "wand", "collector", "tool"}
-    for _, keyword in ipairs(keywords) do
-        local found = findToolByKeyword(keyword)
-        if found and not string.find(string.lower(found.Name), "sprinkler", 1, true) then return found end
-    end
     local char = player.Character
     if char then
         for _, item in ipairs(char:GetChildren()) do
-            if item:IsA("Tool") and not string.find(string.lower(item.Name), "sprinkler", 1, true) then return item end
+            if item:IsA("Tool") and not string.find(string.lower(item.Name), "sprinkler", 1, true) then
+                return item
+            end
         end
     end
-    local backpack = player:FindFirstChildOfClass("Backpack")
-    if backpack then
-        for _, item in ipairs(backpack:GetChildren()) do
-            if item:IsA("Tool") and not string.find(string.lower(item.Name), "sprinkler", 1, true) then return item end
+    local bp = player:FindFirstChildOfClass("Backpack")
+    if bp then
+        for _, item in ipairs(bp:GetChildren()) do
+            if item:IsA("Tool") and not string.find(string.lower(item.Name), "sprinkler", 1, true) then
+                return item
+            end
         end
     end
     return nil
@@ -2030,8 +2039,6 @@ end
 
 local lastSwingAt = 0
 local function swingDigTool()
-    if os.clock() - lastSwingAt < 0.08 then return end
-    lastSwingAt = os.clock()
     local char = player.Character
     if not char then return end
     local tool = findHarvestTool()
@@ -2043,6 +2050,15 @@ local function swingDigTool()
         end
         pcall(function() tool:Activate() end)
     end
+    -- Вызов RemoteEvent сбора пыльцы
+    pcall(function()
+        local rep = game:GetService("ReplicatedStorage")
+        local ev = rep:FindFirstChild("Events")
+        if ev and ev:FindFirstChild("ToolCollect") then
+            ev.ToolCollect:FireServer()
+        end
+    end)
+    -- Клик VirtualUser
     pcall(function()
         local vu = game:GetService("VirtualUser")
         if vu then
@@ -2139,40 +2155,52 @@ collectTokensFor = function(maxSeconds, stopFn, fieldAnchor)
                 break
             end
 
-            -- Непрерывный автосвинг палкой
+            -- Непрерывный взмах палкой на каждом кадре
             swingDigTool()
 
-            -- Мгновенный поиск токенов без задержек кэша
+            -- Мгновенный поиск токенов без кэша
             local tokens = findTokens(true)
             local best, bestKey = nil, math.huge
             for _, token in ipairs(tokens) do
-                local inField = true
+                local inField = false
                 if anchorZone then
                     if token.obj and token.obj.Parent then
                         local lp = anchorZone.CFrame:PointToObjectSpace(token.pos)
                         local half = anchorZone.Size * 0.5
-                        inField = math.abs(lp.X) <= half.X + 8 and math.abs(lp.Z) <= half.Z + 8
-                    else
-                        inField = false
+                        -- СТРОГО ВНУТРИ ПОЛЯ: запас 3 студа от края, чтобы никогда не выбегал за поле
+                        if math.abs(lp.X) <= half.X - 3 and math.abs(lp.Z) <= half.Z - 3 then
+                            inField = true
+                        end
                     end
                 elseif anchor then
-                    inField = (token.pos - anchor).Magnitude <= 140
+                    inField = (token.pos - anchor).Magnitude <= 80
                 end
-                local d = (token.pos - root.Position).Magnitude
-                if inField and d <= 120 and token.priority <= 3 then
-                    -- Жесткий приоритет: N1 (10000) > N2 (20000) > N3 (30000)
-                    local key = token.priority * 10000 + d
+
+                if inField and token.priority <= 3 then
+                    local d = (token.pos - root.Position).Magnitude
+                    -- МАТЕМАТИЧЕСКИЙ ЖЁСТКИЙ ПРИОРИТЕТ:
+                    -- N1 (редкие: glue, extract, glitter...) = 0 + d
+                    -- N2 (фрукты, семена, билеты...) = 100,000 + d
+                    -- N3 (остальные токены поля) = 200,000 + d
+                    -- N1 ВСЕГДА выбирается раньше N2 и N3 независимо от расстояния!
+                    local score = 200000
+                    if token.priority == 1 then
+                        score = 0
+                    elseif token.priority == 2 then
+                        score = 100000
+                    end
+                    local key = score + d
                     if key < bestKey then best, bestKey = token, key end
                 end
             end
 
-            -- Высокая скорость бега: разгон до 70-100 studs/s для моментального сбора
+            -- Высокая скорость бега: разгон до 75-100 studs/s
             local baseSpeed = 16 * (tonumber(CONFIG.WALK_SPEED_MULT) or 2.4)
-            local targetSpeed = math.max(baseSpeed, 65)
+            local targetSpeed = math.max(baseSpeed, 70)
             if best and best.priority == 1 then
-                targetSpeed = math.max(targetSpeed, 95)
+                targetSpeed = math.max(targetSpeed, 105)
             elseif best and best.priority == 2 then
-                targetSpeed = math.max(targetSpeed, 75)
+                targetSpeed = math.max(targetSpeed, 85)
             end
             if math.abs(humanoid.WalkSpeed - targetSpeed) > 1 then
                 humanoid.WalkSpeed = targetSpeed
@@ -2181,24 +2209,21 @@ collectTokensFor = function(maxSeconds, stopFn, fieldAnchor)
             if best then
                 activeTokenObj = best.obj
                 patrolTarget = Vector3.new(best.pos.X, root.Position.Y, best.pos.Z)
-                pcall(function() humanoid:MoveTo(patrolTarget) end)
             else
                 activeTokenObj = nil
                 local needNewPatrol = not patrolTarget 
                     or (root.Position - patrolTarget).Magnitude < 4
-                    or (os.clock() - lastPatrolPickAt > 1.2)
+                    or (os.clock() - lastPatrolPickAt > 1.0)
 
                 if needNewPatrol then
                     lastPatrolPickAt = os.clock()
                     if anchorZone then
                         local half = anchorZone.Size * 0.5
-                        local region = string.lower(tostring(CONFIG.FARM_REGION or "center"))
-                        local xMin, xMax = -half.X * 0.45, half.X * 0.45
-                        local zSpan = half.Z * 0.45
-                        if region == "left" then xMin, xMax = -half.X * 0.70, -half.X * 0.20
-                        elseif region == "right" then xMin, xMax = half.X * 0.20, half.X * 0.70 end
+                        -- Патрулирование строго внутри безопасной зоны (в пределах 60% от центра поля)
+                        local xSpan = (half.X - 8) * 0.70
+                        local zSpan = (half.Z - 8) * 0.70
                         local localTarget = Vector3.new(
-                            xMin + math.random() * (xMax - xMin),
+                            (math.random() * 2 - 1) * xSpan,
                             0,
                             (math.random() * 2 - 1) * zSpan
                         )
@@ -2206,19 +2231,42 @@ collectTokensFor = function(maxSeconds, stopFn, fieldAnchor)
                         patrolTarget = Vector3.new(worldPoint.X, root.Position.Y, worldPoint.Z)
                     elseif anchor then
                         local angle = math.random() * math.pi * 2
-                        local dist = math.random(8, 25)
+                        local dist = math.random(5, 20)
                         patrolTarget = Vector3.new(anchor.X + math.cos(angle) * dist, root.Position.Y, anchor.Z + math.sin(angle) * dist)
                     else
-                        local forward = root.CFrame.LookVector
-                        patrolTarget = root.Position + Vector3.new(forward.X, 0, forward.Z) * 15
+                        patrolTarget = root.Position
                     end
-                    pcall(function() humanoid:MoveTo(patrolTarget) end)
-                else
-                    pcall(function() humanoid:MoveTo(patrolTarget) end)
                 end
             end
 
-            -- Мгновенная покадровая обработка (без задержек 0.12s)
+            -- ОГРАНИЧЕНИЕ ГРАНИЦ ПОЛЯ: гарантируем, что цель никогда не находится за границей поля
+            if anchorZone and patrolTarget then
+                local lp = anchorZone.CFrame:PointToObjectSpace(patrolTarget)
+                local half = anchorZone.Size * 0.5
+                local clampedX = math.clamp(lp.X, -half.X + 4, half.X - 4)
+                local clampedZ = math.clamp(lp.Z, -half.Z + 4, half.Z - 4)
+                local safeWorld = anchorZone.CFrame:PointToWorldSpace(Vector3.new(clampedX, lp.Y, clampedZ))
+                patrolTarget = Vector3.new(safeWorld.X, root.Position.Y, safeWorld.Z)
+
+                -- Если сам аватар оказался у самого края поля, мгновенно разворачиваем его к центру поля!
+                local curLp = anchorZone.CFrame:PointToObjectSpace(root.Position)
+                if math.abs(curLp.X) >= half.X - 3.5 or math.abs(curLp.Z) >= half.Z - 3.5 then
+                    patrolTarget = anchorZone.Position
+                end
+            end
+
+            -- БЕСКОНЕЧНЫЙ ЗАЖАТЫЙ W (непрерывный бег без остановки и пауз)
+            if patrolTarget then
+                local delta = patrolTarget - root.Position
+                local flatDir = Vector3.new(delta.X, 0, delta.Z)
+                if flatDir.Magnitude > 0.4 then
+                    humanoid:Move(flatDir.Unit, false)
+                else
+                    humanoid:Move(root.CFrame.LookVector, false)
+                end
+            end
+
+            -- Покадровая непрерывная работа (0мс задержки)
             RunService.Heartbeat:Wait()
         end
     end
