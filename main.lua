@@ -1,6 +1,6 @@
 --[[
 ═══════════════════════════════════════════════════════════════════════
-  🐍 BSS HOPPER v1.3.45 Sprinkler Delay & Hive Crash Fix
+  🐍 BSS HOPPER v1.3.46 Looter Loop & Hive Claim Fix
 ═══════════════════════════════════════════════════════════════════════
   ЛКМ по змейке  → вкл / выкл
   ПКМ по змейке  → меню    |    F — меню    |    P — вкл/выкл
@@ -469,6 +469,11 @@ local function worldPos(obj)
     local ok, p = pcall(_rawWorldPos, obj)
     if ok and p then return p end
     return nil
+end
+
+local function normalizeJobId(id)
+    if type(id) ~= "string" then return "" end
+    return string.lower(id):gsub("[{}]", ""):gsub("%s+", "")
 end
 
 local RunService = game:GetService("RunService")
@@ -949,23 +954,16 @@ local function findViciousSpikeInAllowedFields()
     if p then table.insert(searchRoots, p) end
     local m = Workspace:FindFirstChild("Monsters")
     if m then table.insert(searchRoots, m) end
-    table.insert(searchRoots, Workspace)
+    local h = Workspace:FindFirstChild("Happenings")
+    if h then table.insert(searchRoots, h) end
 
     for _, root in ipairs(searchRoots) do
-        local ok, children = pcall(function()
-            if root == Workspace then
-                return root:GetChildren()
-            else
-                return root:GetDescendants()
-            end
-        end)
+        local ok, children = pcall(function() return root:GetDescendants() end)
         if ok and children then
             for _, obj in ipairs(children) do
                 if not isPlayerBee(obj) then
                     local name = string.lower(tostring(obj.Name or ""))
-                    local isSpike = string.find(name, "spike", 1, true)
-                        or string.find(name, "stinger", 1, true)
-                        or string.find(name, "thorn", 1, true)
+                    local isSpike = (name == "spike") or string.find(name, "vicious", 1, true)
                     if isSpike then
                         local pos = worldPos(obj)
                         if pos then
@@ -1903,7 +1901,8 @@ end
 
 local function isBackpackFull()
     local info = getBackpackPollen()
-    if not info then return false end
+    if not info or not info.max or info.max <= 0 then return false end
+    if not info.current or info.current <= 0 then return false end
     local threshold = tonumber(CONFIG.BACKPACK_FILL_THRESHOLD) or 0.95
     return info.current >= info.max or info.ratio >= threshold
 end
@@ -2989,7 +2988,6 @@ function Looter:fetchNextVicious()
     local ok2, data = pcall(function() return HttpService:JSONDecode(res) end)
     if not ok2 or not data then return nil, "плохой JSON" end
     if data.empty or not data.jobId then return nil, nil end
-    if data.jobId == game.JobId then return nil, nil end
     data.isVicious = true
     return data, nil
 end
@@ -3002,7 +3000,6 @@ function Looter:fetchNext()
     local ok2, data = pcall(function() return HttpService:JSONDecode(res) end)
     if not ok2 or not data then return nil, "плохой JSON" end
     if data.empty or not data.jobId then return nil, nil end
-    if data.jobId == game.JobId then return nil, "уже здесь" end
     return data, nil
 end
 
@@ -3039,29 +3036,10 @@ function Looter:Start()
 
     stopAutoDig()
     self.thread = task.spawn(function()
-        task.wait(2)
-        -- Улей занимаем ТОЛЬКО если есть росток или вициус
-
-        if CONFIG.CHECK_VICIOUS then
-            local v = findVicious()
-            if v then
-                if not hasOwnHive() then
-                    s.currentStatus = "Vicious найден — занимаю улей"
-                    local claimOk, claimed = pcall(ensureHiveClaimed)
-                    if claimOk and claimed then s.hivesClaimed += 1 end
-                end
-                s.currentStatus = "Vicious — лечу"
-                pcall(function() fightVicious(v) end)
-            end
-        end
-        if CONFIG.CHECK_PUFFSHROOMS and #findEligiblePuffshrooms() > 0 then
-            pcall(function() self:harvestPuffshrooms() end)
-        end
-        if CONFIG.CHECK_SPROUTS and findLootableSprout() then
-            pcall(function() self:harvest() end)
-        end
-
         s.currentStatus = "Подключаюсь к боту..."
+        task.wait(1.5)
+
+        local taskAttempts = {}
 
         while true do
             if not alive() then return end
@@ -3107,10 +3085,36 @@ function Looter:Start()
                     task.wait(tonumber(CONFIG.POLL_INTERVAL) or 3)
                     return
                 end
-                if taskData then
-                    if failedServers[taskData.jobId] then
-                        failedServers[taskData.jobId] = nil
+                if taskData and taskData.jobId then
+                    local targetJob = normalizeJobId(taskData.jobId)
+                    local currentJob = normalizeJobId(game.JobId)
+
+                    if targetJob ~= "" and targetJob == currentJob then
+                        s.currentStatus = "Уже на сервере задачи — ищу цель..."
+                        local found = false
+                        for _ = 1, 6 do
+                            if not alive() then return end
+                            if CONFIG.CHECK_VICIOUS and findVicious() then found = true; break end
+                            if CONFIG.CHECK_SPROUTS and findLootableSprout() then found = true; break end
+                            task.wait(1)
+                        end
+                        if not found then
+                            self:returnTask(taskData, "not_found")
+                            task.wait(tonumber(CONFIG.POLL_INTERVAL) or 3)
+                        end
+                        return
                     end
+
+                    local attempts = (taskAttempts[taskData.jobId] or 0) + 1
+                    taskAttempts[taskData.jobId] = attempts
+                    if attempts > 2 then
+                        log("Лутающий", "Сервер задачи недоступен (попыток: " .. tostring(attempts) .. "), пропускаю")
+                        rememberFailure(taskData.jobId)
+                        self:returnTask(taskData, "unreachable")
+                        task.wait(tonumber(CONFIG.POLL_INTERVAL) or 3)
+                        return
+                    end
+
                     s.tasksReceived += 1
                     s.lastTask = {
                         fieldName = taskData.isVicious and ("Vicious @ "..tostring(taskData.fieldName or "?"))
@@ -3124,7 +3128,7 @@ function Looter:Start()
                         task.wait(tonumber(CONFIG.POLL_INTERVAL) or 3)
                         return
                     end
-                    task.wait(20)
+                    task.wait(25)
                     self:returnTask(taskData, "timeout")
                     return
                 end
@@ -3136,7 +3140,7 @@ function Looter:Start()
             end)
             if not ok then
                 log("Лутающий", "Ошибка: " .. tostring(err))
-                task.wait(5)
+                task.wait(3)
             end
         end
     end)
@@ -3499,7 +3503,7 @@ new("TextLabel", {
 })
 new("TextLabel", {
     Size = UDim2.new(0, 220, 0, 25), Position = UDim2.new(0, 58, 0, 10),
-    BackgroundTransparency = 1, Text = "🐍 BSS Hopper v1.3.45",
+    BackgroundTransparency = 1, Text = "🐍 BSS Hopper v1.3.46",
     TextColor3 = C.text, Font = Enum.Font.GothamBold, TextSize = 22,
     TextXAlignment = Enum.TextXAlignment.Left, Parent = head,
 })
@@ -4558,7 +4562,7 @@ end
 trace("Запуск завершён")
 
 print("=====================================================")
-print("  BSS HOPPER v1.3.45 ЗАГРУЖЕН")
+print("  BSS HOPPER v1.3.46 ЗАГРУЖЕН")
 print("  Bypass  : " .. (_G.BSS_BYPASS_ACTIVE and "session_bypass.lua" or "встроенный"))
 print("  Тег     : " .. tostring(CONFIG.SELF_TAG))
 print("  Бот     : " .. tostring(CONFIG.API_URL))
