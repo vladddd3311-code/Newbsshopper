@@ -2635,23 +2635,95 @@ local function makeHoney()
     task.wait(0.2)
 
     -- Ищем Prompt "Make Honey"
-    local activePrompt = prompt or (hive and hive.prompt) or (slot and slot.prompt)
-    if not activePrompt then
-        local near = findPromptNearPosition(CONFIG.MY_HIVE_KEYWORD or "make honey", hivePos, 35)
-        if near then activePrompt = near.prompt end
-    end
-    if not activePrompt and slot and slot.model then
-        for _, desc in ipairs(slot.model:GetDescendants()) do
-            if desc:IsA("ProximityPrompt") then
-                activePrompt = desc
-                break
+    local function findNearbyMakeHoneyPrompt()
+        local active = nil
+        local charRoot = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
+        local myPos = charRoot and charRoot.Position or hivePos
+        for _, p in ipairs(Workspace:GetDescendants()) do
+            if p:IsA("ProximityPrompt") then
+                local pPos = promptWorldPos(p)
+                if pPos and (pPos - myPos).Magnitude <= 28 then
+                    local act = string.lower(tostring(p.ActionText or ""))
+                    local objT = string.lower(tostring(p.ObjectText or ""))
+                    if string.find(act, "make", 1, true) or string.find(act, "honey", 1, true)
+                        or string.find(objT, "make", 1, true) or string.find(objT, "honey", 1, true) then
+                        return p
+                    end
+                    if not active then active = p end
+                end
             end
         end
+        return active or prompt or (hive and hive.prompt) or (slot and slot.prompt)
     end
 
-    -- Нажимаем Make Honey
-    log("Honey", "Активирую Make Honey (клавиша E)...")
-    triggerMakeHoneyAction(activePrompt)
+    local activePrompt = findNearbyMakeHoneyPrompt()
+
+    -- Принцип Claim Hive: активная серия нажатий клавиши E и активации ProximityPrompt
+    log("Honey", "Активирую Make Honey (серия по принципу Claim Hive)...")
+    local tryHoneyStart = os.clock()
+    while alive() and os.clock() - tryHoneyStart < 2.5 do
+        pcall(function()
+            root.CFrame = CFrame.new(hivePos + Vector3.new(0, 3.2, 0))
+            root.AssemblyLinearVelocity = Vector3.zero
+        end)
+
+        activePrompt = activePrompt or findNearbyMakeHoneyPrompt()
+        if activePrompt and activePrompt.Parent then
+            pcall(function()
+                activePrompt.Enabled = true
+                activePrompt.RequiresLineOfSight = false
+                activePrompt.MaxActivationDistance = 9999
+                activePrompt.HoldDuration = 0
+            end)
+            if type(fireproximityprompt) == "function" then
+                pcall(fireproximityprompt, activePrompt, 0, true)
+                pcall(fireproximityprompt, activePrompt)
+            end
+            pcall(function()
+                activePrompt:InputHoldBegin()
+                task.wait(0.06)
+                activePrompt:InputHoldEnd()
+            end)
+        end
+
+        pcall(function()
+            local vim = game:GetService("VirtualInputManager")
+            if vim then
+                vim:SendKeyEvent(true, Enum.KeyCode.E, false, game)
+                task.wait(0.08)
+                vim:SendKeyEvent(false, Enum.KeyCode.E, false, game)
+            end
+        end)
+
+        pcall(function()
+            local vu = game:GetService("VirtualUser")
+            if vu then
+                vu:CaptureController()
+                vu:SetKeyDown("0x65")
+                task.wait(0.08)
+                vu:SetKeyUp("0x65")
+            end
+        end)
+
+        pcall(function()
+            local rep = game:GetService("ReplicatedStorage")
+            local ev = rep:FindFirstChild("Events")
+            if ev then
+                local cmd = ev:FindFirstChild("PlayerHiveCommand") or ev:FindFirstChild("MakeHoney")
+                if cmd and cmd:IsA("RemoteEvent") then
+                    cmd:FireServer("MakeHoney")
+                end
+            end
+        end)
+
+        local checkPollen = getBackpackPollen()
+        if checkPollen and checkPollen.current and checkPollen.current < (info.current or math.huge) then
+            log("Honey", "Процесс конвертации успешно запущен!")
+            break
+        end
+
+        task.wait(0.25)
+    end
 
     -- Ждём ПОЛНОЙ разгрузки рюкзака (пыльца -> 0)
     local maxWait = tonumber(CONFIG.HONEY_MAX_WAIT) or 120
@@ -2679,17 +2751,40 @@ local function makeHoney()
             local isConverting = (currentInfo.current < lastPollen)
             lastPollen = currentInfo.current
 
-            -- Если процесс НЕ идет и прошло > 2 сек с прошлой попытки, повторяем нажатие
-            if not isConverting and (os.clock() - lastActionAt > 2.0) then
-                if not activePrompt then
-                    local p2, _ = findMyHivePromptAndPos()
-                    if p2 then activePrompt = p2 end
+            -- Если процесс НЕ идет и прошло > 1.8 сек с прошлой попытки, повторяем активацию
+            if not isConverting and (os.clock() - lastActionAt > 1.8) then
+                lastActionAt = os.clock()
+                activePrompt = findNearbyMakeHoneyPrompt()
+                if activePrompt and activePrompt.Parent then
+                    pcall(function()
+                        activePrompt.Enabled = true
+                        activePrompt.RequiresLineOfSight = false
+                        activePrompt.MaxActivationDistance = 9999
+                        activePrompt.HoldDuration = 0
+                    end)
+                    if type(fireproximityprompt) == "function" then
+                        pcall(fireproximityprompt, activePrompt, 0, true)
+                        pcall(fireproximityprompt, activePrompt)
+                    end
                 end
-                local promptText = activePrompt and activePrompt.ActionText and string.lower(activePrompt.ActionText) or ""
-                if not string.find(promptText, "stop", 1, true) then
-                    lastActionAt = os.clock()
-                    triggerMakeHoneyAction(activePrompt)
-                end
+                pcall(function()
+                    local vim = game:GetService("VirtualInputManager")
+                    if vim then
+                        vim:SendKeyEvent(true, Enum.KeyCode.E, false, game)
+                        task.wait(0.08)
+                        vim:SendKeyEvent(false, Enum.KeyCode.E, false, game)
+                    end
+                end)
+                pcall(function()
+                    local rep = game:GetService("ReplicatedStorage")
+                    local ev = rep:FindFirstChild("Events")
+                    if ev then
+                        local cmd = ev:FindFirstChild("PlayerHiveCommand") or ev:FindFirstChild("MakeHoney")
+                        if cmd and cmd:IsA("RemoteEvent") then
+                            cmd:FireServer("MakeHoney")
+                        end
+                    end
+                end)
             end
         else
             if os.clock() - t0 > 15 then
@@ -2698,7 +2793,7 @@ local function makeHoney()
             end
         end
 
-        task.wait(0.3)
+        task.wait(0.25)
     end
 
     log("Honey", "Разгрузка завершена")
