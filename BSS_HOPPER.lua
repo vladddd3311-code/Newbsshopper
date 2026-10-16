@@ -976,9 +976,9 @@ function setFlightNoclip(enabled)
         if character then
             for _, part in ipairs(character:GetDescendants()) do
                 if part:IsA("BasePart") then
-                    local name = part.Name
-                    -- Restore collision for torso, head, etc. so character doesn't fall through the floor!
-                    if name == "UpperTorso" or name == "LowerTorso" or name == "Torso" or name == "Head" or name == "HumanoidRootPart" then
+                    if part.Name == "HumanoidRootPart" then
+                        pcall(function() part.CanCollide = false end)
+                    else
                         pcall(function() part.CanCollide = true end)
                     end
                 end
@@ -1007,10 +1007,34 @@ function stopFlightNow()
     if hum then pcall(function() hum:Move(Vector3.zero, false) end) end
 end
 
--- Raycast down to find the exact top surface of the field
+function getFieldForPos(pos, maxExtra)
+    if not pos then return nil end
+    local zones = Workspace:FindFirstChild("FlowerZones")
+    if not zones then return nil end
+    maxExtra = maxExtra or 18
+    local ok, children = pcall(function() return zones:GetChildren() end)
+    if not ok or not children then return nil end
+    for _, zone in ipairs(children) do
+        if zone:IsA("BasePart") then
+            local lp = zone.CFrame:PointToObjectSpace(pos)
+            local half = zone.Size * 0.5
+            if math.abs(lp.X) <= half.X + maxExtra
+                and math.abs(lp.Z) <= half.Z + maxExtra
+                and math.abs(lp.Y) <= 80 then
+                return zone.Name, zone
+            end
+        end
+    end
+    return nil
+end
+
+-- Raycast down to find the exact top surface of the field (с защитой от проваливания под поле)
 function getGroundPos(pos)
     if not pos then return pos end
     local ground = pos + Vector3.new(0, 3.2, 0)
+    local zName, zone = getFieldForPos(pos, 35)
+    local minAllowedY = (zone and (zone.Position.Y + (zone.Size.Y * 0.5))) or (pos.Y - 1.0)
+
     local ok, hit = pcall(function()
         local rayParams = RaycastParams.new()
         rayParams.FilterType = RaycastFilterType.Exclude
@@ -1019,11 +1043,18 @@ function getGroundPos(pos)
         local happens = Workspace:FindFirstChild("Happenings")
         if happens then table.insert(filterList, happens) end
         rayParams.FilterDescendantsInstances = filterList
-        local origin = Vector3.new(pos.X, pos.Y + 45, pos.Z)
-        return Workspace:Raycast(origin, Vector3.new(0, -110, 0), rayParams)
+        local origin = Vector3.new(pos.X, math.max(pos.Y + 45, minAllowedY + 45), pos.Z)
+        return Workspace:Raycast(origin, Vector3.new(0, -90, 0), rayParams)
     end)
     if ok and hit and hit.Position then
-        ground = hit.Position + Vector3.new(0, 3.2, 0)
+        -- Не позволяем приземляться под поле в пещеру/пустоту
+        if hit.Position.Y >= minAllowedY - 2.5 then
+            ground = hit.Position + Vector3.new(0, 3.2, 0)
+        else
+            ground = Vector3.new(pos.X, minAllowedY + 3.2, pos.Z)
+        end
+    else
+        ground = Vector3.new(pos.X, minAllowedY + 3.2, pos.Z)
     end
     return ground
 end
@@ -1032,6 +1063,16 @@ end
 function moveRootToPosition(root, destination, maxDuration)
     if not root or not root.Parent or typeof(destination) ~= "Vector3" then return false end
     flightStopRequested = false
+
+    -- Защита от полета под текстуры: проверяем, не направлена ли цель под поле
+    local zName, zone = getFieldForPos(destination, 35)
+    if zone then
+        local minSurfaceY = zone.Position.Y + (zone.Size.Y * 0.5) + 3.2
+        if destination.Y < zone.Position.Y - 1.5 then
+            destination = Vector3.new(destination.X, minSurfaceY, destination.Z)
+        end
+    end
+
     setFlightNoclip(true)
     local startPos = root.Position
     local offset = destination - startPos
@@ -1123,6 +1164,32 @@ function waitForRespawn(timeout)
     local c = player.Character
     return c, c and c:FindFirstChild("HumanoidRootPart"), c and c:FindFirstChildOfClass("Humanoid")
 end
+
+
+-- ПОСТОЯННАЯ ФОНОВАЯ ЗАЩИТА ОТ ПРОВАЛИВАНИЯ ПОД ПОЛЕ
+task.spawn(function()
+    while true do
+        if not alive() then return end
+        task.wait(0.5)
+        pcall(function()
+            local char = player.Character
+            local root = char and char:FindFirstChild("HumanoidRootPart")
+            if root and root.Parent and lastActiveTargetPos then
+                local zName, zone = getFieldForPos(lastActiveTargetPos, 40)
+                if zone then
+                    local minZoneY = zone.Position.Y - 2.5
+                    if root.Position.Y < minZoneY and (Vector3.new(root.Position.X, zone.Position.Y, root.Position.Z) - zone.Position).Magnitude < (zone.Size.Magnitude * 0.65) then
+                        root.AssemblyLinearVelocity = Vector3.zero
+                        root.AssemblyAngularVelocity = Vector3.zero
+                        local surfaceY = zone.Position.Y + (zone.Size.Y * 0.5) + 3.5
+                        root.CFrame = CFrame.new(root.Position.X, surfaceY, root.Position.Z)
+                        setFlightNoclip(false)
+                    end
+                end
+            end
+        end)
+    end
+end)
 
 function moveToSprout(sprout)
     if not sprout then return false end
@@ -1817,17 +1884,98 @@ safeConnect(Players, "PlayerAdded", function(newPlr)
     end
 end, "friend_evacuate")
 
-function getServerList(cursor)
-    local pid = tonumber(CONFIG.PLACE_ID) or (game and game.PlaceId) or 1537690962
-    local url = "https://games.roblox.com/v1/games/" .. tostring(pid) .. "/servers/Public?sortOrder=Asc&limit=100"
-    if cursor and cursor ~= "" then
-        url = url .. "&cursor=" .. tostring(cursor)
+local serverPoolCache = {}
+local lastServerFetchAt = 0
+
+local function robustHttpGet(url)
+    local req = (syn and syn.request) or (http and http.request) or http_request or request
+    if req then
+        local ok, res = pcall(function()
+            return req({
+                Url = url,
+                Method = "GET",
+                Headers = {
+                    ["User-Agent"] = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Roblox/WinInet",
+                    ["Accept"] = "application/json",
+                },
+            })
+        end)
+        if ok and res and (res.StatusCode == 200 or res.Status == 200) and res.Body and res.Body ~= "" then
+            return res.Body
+        end
     end
     local ok, res = pcall(function() return game:HttpGet(url) end)
-    if not ok or not res or res == "" then return nil, nil end
-    local ok2, data = pcall(function() return HttpService:JSONDecode(res) end)
-    if not ok2 or not data or not data.data then return nil, nil end
-    return data.data, data.nextPageCursor
+    if ok and res and res ~= "" then
+        return res
+    end
+    return nil
+end
+
+function getServerList(cursor)
+    local pid = tonumber(CONFIG.PLACE_ID) or (game and game.PlaceId) or 1537690962
+    local now = os.clock()
+
+    -- Если есть недавний кэш и нет курсора, отдаем кэш
+    if (not cursor or cursor == "") and #serverPoolCache > 10 and (now - lastServerFetchAt < 20) then
+        return serverPoolCache, nil
+    end
+
+    local urls = {
+        "https://games.roblox.com/v1/games/" .. tostring(pid) .. "/servers/Public?sortOrder=Asc&limit=25",
+        "https://games.roblox.com/v1/games/" .. tostring(pid) .. "/servers/Public?limit=25",
+        "https://games.roblox.com/v1/games/" .. tostring(pid) .. "/servers/Public?sortOrder=Asc&limit=50",
+    }
+    if cursor and cursor ~= "" then
+        urls = {
+            "https://games.roblox.com/v1/games/" .. tostring(pid) .. "/servers/Public?sortOrder=Asc&limit=25&cursor=" .. tostring(cursor),
+            "https://games.roblox.com/v1/games/" .. tostring(pid) .. "/servers/Public?limit=25&cursor=" .. tostring(cursor),
+        }
+    end
+
+    local data = nil
+    for _, url in ipairs(urls) do
+        local raw = robustHttpGet(url)
+        if raw and raw ~= "" then
+            local okDec, decoded = pcall(function() return HttpService:JSONDecode(raw) end)
+            if okDec and decoded and decoded.data and type(decoded.data) == "table" and #decoded.data > 0 then
+                data = decoded
+                break
+            end
+        end
+        task.wait(0.2)
+    end
+
+    if data and data.data then
+        lastServerFetchAt = now
+        -- Пополняем persistent serverPoolCache
+        for _, s in ipairs(data.data) do
+            if s and s.id then
+                local exists = false
+                for _, ex in ipairs(serverPoolCache) do
+                    if ex.id == s.id then
+                        ex.playing = s.playing or ex.playing
+                        ex.maxPlayers = s.maxPlayers or ex.maxPlayers
+                        exists = true
+                        break
+                    end
+                end
+                if not exists then
+                    table.insert(serverPoolCache, s)
+                end
+            end
+        end
+        while #serverPoolCache > 150 do
+            table.remove(serverPoolCache, 1)
+        end
+        return data.data, data.nextPageCursor
+    end
+
+    -- Если запрос к API заблокирован 429 или дал ошибку, возвращаем серверы из пула!
+    if #serverPoolCache > 0 then
+        return serverPoolCache, nil
+    end
+
+    return nil, nil
 end
 
 -- ══════════════════════════════════════════════════════════════════════
@@ -2053,40 +2201,49 @@ function hopRandom()
 
     local candidates = getCandidateServers()
     if candidates and #candidates > 0 then
-        for i = 1, math.min(4, #candidates) do
+        for i = 1, math.min(5, #candidates) do
             local target = candidates[i]
             if hopTo(target) then return true end
-            task.wait(0.25)
+            task.wait(0.3)
         end
     end
 
-    -- Если кандидаты в списке сбоев — очищаем временные ошибки и пробуем снова
+    -- Если кандидаты временно сбоили — очищаем временные ошибки и пробуем снова
     clearFailures()
     candidates = getCandidateServers()
     if candidates and #candidates > 0 then
-        for i = 1, math.min(4, #candidates) do
+        for i = 1, math.min(5, #candidates) do
             local target = candidates[i]
             if hopTo(target) then return true end
-            task.wait(0.25)
+            task.wait(0.3)
         end
     end
 
-    -- Резервный поиск любого живого сервера с открытыми слотами (>= 2 игроков и < maxPlayers)
+    -- Резервный поиск любого живого сервера из кэша / API
     log("Телепорт", "Резервный перебор живых серверов...")
-    local servers = getServerList()
-    if servers then
+    local servers = getServerList() or serverPoolCache
+    if servers and #servers > 0 then
         updateFriendsList()
         for _, s in ipairs(servers) do
             local sid = tostring(s.id or "")
             local p = tonumber(s.playing) or 0
             local maxP = tonumber(s.maxPlayers) or 6
-            if sid ~= game.JobId and p >= 2 and p < maxP
+            if sid ~= "" and sid ~= game.JobId and p >= 2 and p < maxP
                 and (CONFIG.AVOID_FRIENDS == false or not friendJobIds[sid]) then
                 if hopTo(sid) then return true end
+                task.wait(0.2)
             end
         end
     end
-    return false
+
+    -- Абсолютный резерв: если все конкретные JobId отклонены Roblox'ом,
+    -- используем стандартный TeleportService, чтобы не зависать бесконечно на одном сервере!
+    log("Телепорт", "Аварийный резерв: переход через TeleportService...")
+    armTeleportPersistence()
+    if CONFIG.ENABLE_BYPASS then bypassNotify() end
+    local pid = tonumber(CONFIG.PLACE_ID) or (game and game.PlaceId) or 1537690962
+    local ok = pcall(function() TeleportService:Teleport(pid, player) end)
+    return ok
 end
 
 -- СТОРОЖЕВОЙ ТАЙМЕР ЗАВИСШЕГО ПОДКЛЮЧЕНИЯ (ЗАЩИТА ОТ БЕСКОНЕЧНОЙ ЗАГРУЗКИ)
@@ -3931,6 +4088,19 @@ collectTokensFor = function(maxSeconds, stopFn, fieldAnchor)
                 task.wait(0.3)
             end
 
+            -- АКТИВНАЯ ЗАЩИТА: Защита от проваливания под поле (под текстуры)
+            if anchorZone and root then
+                local minFieldY = anchorZone.Position.Y - 2.0
+                if root.Position.Y < minFieldY then
+                    log("Защита", "Персонаж провалился под поле! Мгновенный подъем на поверхность поля...")
+                    local safeY = anchorZone.Position.Y + (anchorZone.Size.Y * 0.5) + 3.5
+                    root.AssemblyLinearVelocity = Vector3.zero
+                    root.AssemblyAngularVelocity = Vector3.zero
+                    root.CFrame = CFrame.new(root.Position.X, safeY, root.Position.Z)
+                    setFlightNoclip(false)
+                end
+            end
+
 
 
             if not anchorZone then
@@ -4011,7 +4181,7 @@ collectTokensFor = function(maxSeconds, stopFn, fieldAnchor)
                     log("Token", string.format("⚡ Бегу за приоритетным токеном: %s (P1) на расстоянии %.1f studs!", tName, math.sqrt(bestKey)))
                 end
                 activeTokenObj = best.obj
-                patrolTarget = Vector3.new(best.pos.X, root.Position.Y, best.pos.Z)
+                patrolTarget = Vector3.new(best.pos.X, (anchorZone and (anchorZone.Position.Y + 3.2)) or root.Position.Y, best.pos.Z)
             else
                 activeTokenObj = nil
                 local needNewPatrol = not patrolTarget 
@@ -4030,11 +4200,11 @@ collectTokensFor = function(maxSeconds, stopFn, fieldAnchor)
                             (math.random() * 2 - 1) * zSpan
                         )
                         local worldPoint = anchorZone.CFrame:PointToWorldSpace(localTarget)
-                        patrolTarget = Vector3.new(worldPoint.X, root.Position.Y, worldPoint.Z)
+                        patrolTarget = Vector3.new(worldPoint.X, (anchorZone and (anchorZone.Position.Y + 3.2)) or root.Position.Y, worldPoint.Z)
                     elseif fieldAnchor then
                         local angle = math.random() * math.pi * 2
                         local dist = math.random(5, 18)
-                        patrolTarget = Vector3.new(fieldAnchor.X + math.cos(angle) * dist, root.Position.Y, fieldAnchor.Z + math.sin(angle) * dist)
+                        patrolTarget = Vector3.new(fieldAnchor.X + math.cos(angle) * dist, (anchorZone and (anchorZone.Position.Y + 3.2)) or root.Position.Y, fieldAnchor.Z + math.sin(angle) * dist)
                     else
                         patrolTarget = root.Position
                     end
@@ -4048,7 +4218,7 @@ collectTokensFor = function(maxSeconds, stopFn, fieldAnchor)
                 local safeX = math.clamp(lp.X, -limitX, limitX)
                 local safeZ = math.clamp(lp.Z, -limitZ, limitZ)
                 local safeWorld = anchorZone.CFrame:PointToWorldSpace(Vector3.new(safeX, lp.Y, safeZ))
-                patrolTarget = Vector3.new(safeWorld.X, root.Position.Y, safeWorld.Z)
+                patrolTarget = Vector3.new(safeWorld.X, (anchorZone and (anchorZone.Position.Y + 3.2)) or root.Position.Y, safeWorld.Z)
             end
 
             -- Защита от вылета с поля: если персонажа оттолкнуло монстром или способностью за пределы клумбы
@@ -4975,8 +5145,13 @@ function Solo:Start()
                     if alive() then
                         s.hops += 1
                         s.currentStatus = "Телепортируюсь на новый сервер..."
-                        hopRandom()
-                        task.wait(6)
+                        local hopped = hopRandom()
+                        if not hopped then
+                            s.currentStatus = "Ожидание свободного сервера..."
+                            task.wait(6)
+                        else
+                            task.wait(8)
+                        end
                         return
                     end
                     return
@@ -5157,8 +5332,13 @@ function Solo:Start()
                 if alive() then
                     s.hops += 1
                     s.currentStatus = "Телепортируюсь на новый сервер..."
-                    hopRandom()
-                    task.wait(6)
+                    local hopped = hopRandom()
+                    if not hopped then
+                        s.currentStatus = "Ожидание свободного сервера..."
+                        task.wait(6)
+                    else
+                        task.wait(8)
+                    end
                     return
                 end
             end)
@@ -5369,7 +5549,7 @@ new("TextLabel", {
 })
 new("TextLabel", {
     Size = UDim2.new(0, 220, 0, 25), Position = UDim2.new(0, 58, 0, 10),
-    BackgroundTransparency = 1, Text = "BSS Hopper v1.3.69",
+    BackgroundTransparency = 1, Text = "BSS Hopper v1.3.70",
     TextColor3 = C.text, Font = Enum.Font.GothamBold, TextSize = 22,
     TextXAlignment = Enum.TextXAlignment.Left, Parent = head,
 })
