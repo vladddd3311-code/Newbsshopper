@@ -1964,6 +1964,7 @@ end
 -- Кэш назначенного улья (сохраняется на всё время пребывания на текущем сервере + файл)
 local cachedHiveSlot = nil
 local cachedHivePos = nil
+_G.BSS_CLAIMED_HIVE_POS = nil
 
 function saveMyHivePos(pos)
     if not pos or typeof(pos) ~= "Vector3" then return end
@@ -2088,19 +2089,12 @@ function getHivePlatformRecords()
 end
 
 function findAssignedHiveSlot()
-    -- 0. Кэш своего улья: если на этом сервере позиция уже известна, используем её мгновенно
+    -- 0. Кэш своего улья: если на этом сервере позиция уже проверена и закреплена
     if cachedHiveSlot and cachedHiveSlot.pos then
         return cachedHiveSlot
     end
-    if cachedHivePos then
-        return { pos = cachedHivePos, model = nil, platform = nil, prompt = nil }
-    end
-    if _G.BSS_CLAIMED_HIVE_POS then
-        cachedHivePos = _G.BSS_CLAIMED_HIVE_POS
-        return { pos = cachedHivePos, model = nil, platform = nil, prompt = nil }
-    end
 
-    -- 1. Сначала проверяем прямой prompt "Make Honey"
+    -- 1. Сначала проверяем прямой prompt "Make Honey" (он есть ТОЛЬКО у занятого нами улья)
     local prompt, promptPos = findMyHivePromptAndPos()
     if prompt and promptPos then
         cachedHivePos = promptPos
@@ -2265,16 +2259,13 @@ function claimHive()
     local root = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
     local hum = player.Character and player.Character:FindFirstChildOfClass("Humanoid")
     if not root or not hum or hum.Health <= 0 then return false end
-    local saved = loadSavedHivePos()
-    if saved then
-        log("Улей", "Свой улей уже сохранен")
-        return true
-    end
+
+    -- Если улей уже РЕАЛЬНО занят нами на текущем сервере
     local assigned = findAssignedHiveSlot()
-    if assigned then
+    if assigned and assigned.pos then
         cachedHiveSlot = assigned
         saveMyHivePos(assigned.pos)
-        log("Улей", "Свой улей уже назначен")
+        log("Улей", "Свой улей уже занят на этом сервере")
         return true
     end
 
@@ -2692,15 +2683,10 @@ function makeHoney()
 
     local activePrompt = findNearbyMakeHoneyPrompt()
 
-    -- Принцип Claim Hive: активная серия нажатий клавиши E и активации ProximityPrompt
-    log("Honey", "Активирую Make Honey (серия по принципу Claim Hive)...")
-    local tryHoneyStart = os.clock()
-    while alive() and os.clock() - tryHoneyStart < 2.5 do
-        pcall(function()
-            root.CFrame = CFrame.new(hivePos + Vector3.new(0, 3.2, 0))
-            root.AssemblyLinearVelocity = Vector3.zero
-        end)
+    -- Постоянное включение и удержание Make Honey без отжатия до полной расконвертации
+    log("Honey", "Включаю Make Honey (постоянное удержание до 0 пыльцы)...")
 
+    local function engageMakeHoney()
         activePrompt = activePrompt or findNearbyMakeHoneyPrompt()
         if activePrompt and activePrompt.Parent then
             pcall(function()
@@ -2715,30 +2701,21 @@ function makeHoney()
             end
             pcall(function()
                 activePrompt:InputHoldBegin()
-                task.wait(0.06)
-                activePrompt:InputHoldEnd()
             end)
         end
-
         pcall(function()
             local vim = game:GetService("VirtualInputManager")
             if vim then
                 vim:SendKeyEvent(true, Enum.KeyCode.E, false, game)
-                task.wait(0.08)
-                vim:SendKeyEvent(false, Enum.KeyCode.E, false, game)
             end
         end)
-
         pcall(function()
             local vu = game:GetService("VirtualUser")
             if vu then
                 vu:CaptureController()
                 vu:SetKeyDown("0x65")
-                task.wait(0.08)
-                vu:SetKeyUp("0x65")
             end
         end)
-
         pcall(function()
             local rep = game:GetService("ReplicatedStorage")
             local ev = rep:FindFirstChild("Events")
@@ -2749,88 +2726,72 @@ function makeHoney()
                 end
             end
         end)
-
-        local checkPollen = getBackpackPollen()
-        if checkPollen and checkPollen.current and checkPollen.current < (info.current or math.huge) then
-            log("Honey", "Процесс конвертации успешно запущен!")
-            break
-        end
-
-        task.wait(0.25)
     end
 
-    -- Ждём ПОЛНОЙ разгрузки рюкзака (пыльца -> 0)
+    local function releaseMakeHoney()
+        pcall(function()
+            local vim = game:GetService("VirtualInputManager")
+            if vim then
+                vim:SendKeyEvent(false, Enum.KeyCode.E, false, game)
+            end
+        end)
+        pcall(function()
+            local vu = game:GetService("VirtualUser")
+            if vu then
+                vu:SetKeyUp("0x65")
+            end
+        end)
+        if activePrompt and activePrompt.Parent then
+            pcall(function()
+                activePrompt:InputHoldEnd()
+            end)
+        end
+    end
+
+    -- Первичная активация Make Honey
+    engageMakeHoney()
+
+    -- Ждём ПОЛНОЙ разгрузки рюкзака (пыльца -> 0), НЕ отжимая Make Honey!
     local maxWait = tonumber(CONFIG.HONEY_MAX_WAIT) or 120
     local t0 = os.clock()
-    local lastActionAt = os.clock()
-    local lastPollen = math.huge
+    local lastEngageAt = os.clock()
 
     while alive() and (os.clock() - t0 < maxWait) do
-        -- Удерживаем персонажа на платформе улья
+        -- Удерживаем персонажа точно на платформе улья
         pcall(function()
             root.CFrame = CFrame.new(hivePos + Vector3.new(0, 3.2, 0))
             root.AssemblyLinearVelocity = Vector3.zero
         end)
 
+        -- Каждые 0.4 сек повторно укрепляем удержание (InputHoldBegin + KeyDown)
+        if os.clock() - lastEngageAt >= 0.4 then
+            lastEngageAt = os.clock()
+            engageMakeHoney()
+        end
+
         local currentInfo = getBackpackPollen()
         if currentInfo then
             -- Полная разгрузка: пыльцы 0 (или менее 1% от объема)
             if currentInfo.current <= 0 or currentInfo.ratio <= 0.01 then
-                log("Honey", string.format("Рюкзак ПОЛНОСТЬЮ разгружен (0 / %d)! Возвращаюсь к фарму.", currentInfo.max))
-                task.wait(0.5)
+                releaseMakeHoney()
+                log("Honey", string.format("Рюкзак ПОЛНОСТЬЮ разгружен (0 / %d)! Отжимаю Make Honey и возвращаюсь к фарму.", currentInfo.max))
+                task.wait(0.3)
                 return true
-            end
-
-            -- Проверяем, идет ли процесс переработки пыльцы в мед
-            local isConverting = (currentInfo.current < lastPollen)
-            lastPollen = currentInfo.current
-
-            -- Если процесс НЕ идет и прошло > 1.8 сек с прошлой попытки, повторяем активацию
-            if not isConverting and (os.clock() - lastActionAt > 1.8) then
-                lastActionAt = os.clock()
-                activePrompt = findNearbyMakeHoneyPrompt()
-                if activePrompt and activePrompt.Parent then
-                    pcall(function()
-                        activePrompt.Enabled = true
-                        activePrompt.RequiresLineOfSight = false
-                        activePrompt.MaxActivationDistance = 9999
-                        activePrompt.HoldDuration = 0
-                    end)
-                    if type(fireproximityprompt) == "function" then
-                        pcall(fireproximityprompt, activePrompt, 0, true)
-                        pcall(fireproximityprompt, activePrompt)
-                    end
-                end
-                pcall(function()
-                    local vim = game:GetService("VirtualInputManager")
-                    if vim then
-                        vim:SendKeyEvent(true, Enum.KeyCode.E, false, game)
-                        task.wait(0.08)
-                        vim:SendKeyEvent(false, Enum.KeyCode.E, false, game)
-                    end
-                end)
-                pcall(function()
-                    local rep = game:GetService("ReplicatedStorage")
-                    local ev = rep:FindFirstChild("Events")
-                    if ev then
-                        local cmd = ev:FindFirstChild("PlayerHiveCommand") or ev:FindFirstChild("MakeHoney")
-                        if cmd and cmd:IsA("RemoteEvent") then
-                            cmd:FireServer("MakeHoney")
-                        end
-                    end
-                end)
             end
         else
             if os.clock() - t0 > 15 then
+                releaseMakeHoney()
                 log("Honey", "Индикатор пыльцы пуст, разгрузка завершена")
                 return true
             end
         end
 
-        task.wait(0.25)
+        task.wait(0.1)
     end
 
-    log("Honey", "Разгрузка завершена")
+    -- В случае таймаута отпускаем
+    releaseMakeHoney()
+    log("Honey", "Разгрузка завершена по таймауту")
     return true
 end
 
@@ -3507,8 +3468,14 @@ function stopAutoDig()
 end
 
 function hasOwnHive()
-    if cachedHivePos or _G.BSS_CLAIMED_HIVE_POS then return true end
-    return findAssignedHiveSlot() ~= nil
+    if cachedHiveSlot and cachedHiveSlot.pos then return true end
+    local slot = findAssignedHiveSlot()
+    if slot and slot.pos then
+        cachedHiveSlot = slot
+        saveMyHivePos(slot.pos)
+        return true
+    end
+    return false
 end
 
 function ensureHiveClaimed()
@@ -4494,7 +4461,7 @@ new("TextLabel", {
 })
 new("TextLabel", {
     Size = UDim2.new(0, 220, 0, 25), Position = UDim2.new(0, 58, 0, 10),
-    BackgroundTransparency = 1, Text = "BSS Hopper v1.3.56",
+    BackgroundTransparency = 1, Text = "BSS Hopper v1.3.58",
     TextColor3 = C.text, Font = Enum.Font.GothamBold, TextSize = 22,
     TextXAlignment = Enum.TextXAlignment.Left, Parent = head,
 })
