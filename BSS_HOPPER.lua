@@ -814,10 +814,18 @@ function moveToSprout(sprout)
     if not sprout then return false end
     local targetPos = worldPos(sprout)
     if not targetPos then return false end
-    local root = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
-    if not root then return false end
+    lastActiveTargetPos = targetPos
+    local char = player.Character
+    local root = char and char:FindFirstChild("HumanoidRootPart")
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+    if not root or not hum or hum.Health <= 0 then
+        local newChar = player.Character or player.CharacterAdded:Wait()
+        root = newChar:WaitForChild("HumanoidRootPart", 6)
+        hum = newChar:WaitForChild("Humanoid", 6)
+        if not root or not hum then return false end
+    end
     local safeLanding = getGroundPos(targetPos)
-    local ok = moveRootToPosition(root, safeLanding, 8)
+    local ok = moveRootToPosition(root, safeLanding, 10)
     return ok or ((root.Position - safeLanding).Magnitude < 25)
 end
 
@@ -866,6 +874,8 @@ end
 --  СКОРОСТЬ
 -- ══════════════════════════════════════════════════════════════════════
 local STATIC_SPEED = 90
+lastActiveTargetPos = nil
+
 function applyWalkSpeed()
     local char = player.Character
     local hum = char and char:FindFirstChildOfClass("Humanoid")
@@ -878,11 +888,26 @@ end
 
 task.spawn(function()
     applyWalkSpeed()
-    trackConn(player.CharacterAdded:Connect(function()
-        task.wait(0.3)
-        for _ = 1, 12 do
+    trackConn(player.CharacterAdded:Connect(function(newChar)
+        task.wait(0.35)
+        applyWalkSpeed()
+        local newRoot = newChar:WaitForChild("HumanoidRootPart", 6)
+        local newHum = newChar:WaitForChild("Humanoid", 6)
+        if newRoot and newHum and lastActiveTargetPos and typeof(lastActiveTargetPos) == "Vector3" then
+            local dist = (newRoot.Position - lastActiveTargetPos).Magnitude
+            if dist > 45 and alive() and Hopper.Mode and Hopper.currentKey ~= "off" then
+                log("Смерть", string.format("Персонаж возродился после гибели! Лечу обратно на рабочую позицию (%.0f ст.)...", dist))
+                task.spawn(function()
+                    task.wait(0.2)
+                    local ground = getGroundPos(lastActiveTargetPos)
+                    moveRootToPosition(newRoot, ground, 10)
+                end)
+            end
+        end
+        for _ = 1, 10 do
             if not alive() then return end
-            applyWalkSpeed(); task.wait(0.4)
+            applyWalkSpeed()
+            task.wait(0.4)
         end
     end))
     -- Фиксируем скорость статично на 90 каждый кадр
@@ -1325,12 +1350,26 @@ function fightVicious(vicious)
         end
         if not targetPos then task.wait(0.1); continue end
 
+        lastActiveTargetPos = targetPos
         local character = player.Character
         local hum = character and character:FindFirstChildOfClass("Humanoid")
         local root = character and character:FindFirstChild("HumanoidRootPart")
         if not root or not hum or hum.Health <= 0 then
             task.wait(0.25)
             continue
+        end
+
+        -- Если персонаж возродился далеко от Вициуса (> 50 стадс) — летим сквозь стены на скорости обратно!
+        if (targetPos - root.Position).Magnitude > 50 then
+            log("Vicious", "Персонаж возродился далеко от Вициуса. Лечу обратно сквозь стены...")
+            moveRootToPosition(root, targetPos + Vector3.new(0, hoverHeight, 0), 8)
+            character = player.Character
+            hum = character and character:FindFirstChildOfClass("Humanoid")
+            root = character and character:FindFirstChild("HumanoidRootPart")
+            if not root or not hum or hum.Health <= 0 then
+                task.wait(0.25)
+                continue
+            end
         end
 
         local dt = RunService.Heartbeat:Wait()
@@ -3174,6 +3213,7 @@ collectTokensFor = function(maxSeconds, stopFn, fieldAnchor)
     collectorTokenGen = collectorTokenGen + 1
     local myGen = collectorTokenGen
     tokenCollectorBusy = true
+    if fieldAnchor then lastActiveTargetPos = fieldAnchor end
 
     local function runLoop()
         local started = os.clock()
@@ -3200,10 +3240,32 @@ collectTokensFor = function(maxSeconds, stopFn, fieldAnchor)
             local root = char and char:FindFirstChild("HumanoidRootPart")
             local humanoid = char and char:FindFirstChildOfClass("Humanoid")
 
-            -- Персонаж умер: немедленный выход
+            -- Персонаж умер: ждем респавна и летим обратно на поле!
             if not root or not humanoid or humanoid.Health <= 0 then
                 patrolTarget, activeTokenObj = nil, nil
+                task.wait(0.4)
+                local newChar = player.Character or player.CharacterAdded:Wait()
+                local newRoot = newChar:WaitForChild("HumanoidRootPart", 6)
+                local newHum = newChar:WaitForChild("Humanoid", 6)
+                if newRoot and newHum and newHum.Health > 0 and fieldAnchor then
+                    log("Смерть", "Возрождение во время сбора токенов. Лечу обратно на поле...")
+                    moveRootToPosition(newRoot, getGroundPos(fieldAnchor), 10)
+                end
                 break
+            end
+
+            -- Если персонаж оказался далеко от поля (например, после смерти на спавне) — ЛЕТИМ ОБРАТНО, А НЕ БЕЖИМ!
+            if fieldAnchor then
+                local dx = fieldAnchor.X - root.Position.X
+                local dz = fieldAnchor.Z - root.Position.Z
+                if (dx * dx + dz * dz) > 2025 then -- дистанция > 45 стадс
+                    log("Навигация", "Персонаж далеко от поля после смерти. Лечу обратно на поле...")
+                    moveRootToPosition(root, getGroundPos(fieldAnchor), 10)
+                    char = player.Character
+                    root = char and char:FindFirstChild("HumanoidRootPart")
+                    humanoid = char and char:FindFirstChildOfClass("Humanoid")
+                    if not root or not humanoid or humanoid.Health <= 0 then break end
+                end
             end
 
             if not anchorZone then
@@ -3754,6 +3816,23 @@ function Looter:harvest()
 
     -- Фаза 1: Росток жив. Бегаем постоянно, машем инструментом, собираем токены
     while alive() and isSproutAlive(sprout, sproutAnchor) do
+        local char = player.Character
+        local root = char and char:FindFirstChild("HumanoidRootPart")
+        local hum = char and char:FindFirstChildOfClass("Humanoid")
+        if not root or not hum or hum.Health <= 0 then
+            s.currentStatus = "Персонаж погиб — жду возрождения..."
+            local newChar = player.CharacterAdded:Wait()
+            local newRoot = newChar:WaitForChild("HumanoidRootPart", 6)
+            task.wait(0.3)
+            if newRoot and sprout and isSproutAlive(sprout, sproutAnchor) then
+                s.currentStatus = "Возвращаюсь к ростку после смерти..."
+                moveToSprout(sprout)
+            end
+        elseif sproutAnchor and (root.Position - sproutAnchor).Magnitude > 50 then
+            s.currentStatus = "Лечу обратно к ростку..."
+            moveToSprout(sprout)
+        end
+
         if isBackpackFull() then
             stopAutoDig()
             tokenCollectorBusy = false
@@ -3776,6 +3855,20 @@ function Looter:harvest()
 
     -- Фаза 2: Росток сломан! Лутаем оставшиеся ценные токены (игнорируя honey tokens)
     if alive() and sproutAnchor then
+        local char = player.Character
+        local root = char and char:FindFirstChild("HumanoidRootPart")
+        local hum = char and char:FindFirstChildOfClass("Humanoid")
+        if not root or not hum or hum.Health <= 0 then
+            local newChar = player.CharacterAdded:Wait()
+            local newRoot = newChar:WaitForChild("HumanoidRootPart", 6)
+            task.wait(0.3)
+            if newRoot and sproutAnchor then
+                moveRootToPosition(newRoot, getGroundPos(sproutAnchor), 10)
+            end
+        elseif root and (root.Position - sproutAnchor).Magnitude > 50 then
+            moveRootToPosition(root, getGroundPos(sproutAnchor), 10)
+        end
+
         if isBackpackFull() then
             stopAutoDig()
             tokenCollectorBusy = false
@@ -4173,6 +4266,23 @@ function Solo:Start()
 
                         -- Фаза 1: Росток жив. Бегает всегда, машет палкой 100%, собирает токены
                         while alive() and isSproutAlive(sprout, sproutAnchor) do
+                            local char = player.Character
+                            local root = char and char:FindFirstChild("HumanoidRootPart")
+                            local hum = char and char:FindFirstChildOfClass("Humanoid")
+                            if not root or not hum or hum.Health <= 0 then
+                                s.currentStatus = "Персонаж погиб — жду возрождения..."
+                                local newChar = player.CharacterAdded:Wait()
+                                local newRoot = newChar:WaitForChild("HumanoidRootPart", 6)
+                                task.wait(0.3)
+                                if newRoot and sprout and isSproutAlive(sprout, sproutAnchor) then
+                                    s.currentStatus = "Возвращаюсь к ростку после смерти..."
+                                    moveToSprout(sprout)
+                                end
+                            elseif sproutAnchor and (root.Position - sproutAnchor).Magnitude > 50 then
+                                s.currentStatus = "Лечу обратно к ростку..."
+                                moveToSprout(sprout)
+                            end
+
                             if isBackpackFull() then
                                 stopAutoDig()
                                 tokenCollectorBusy = false
@@ -4198,6 +4308,20 @@ function Solo:Start()
 
                         -- Фаза 2: Росток сломан! Лутаем оставшиеся ценные токены (игнорируя honey tokens)
                         if alive() and sproutAnchor and not (CONFIG.CHECK_VICIOUS and findVicious()) then
+                            local char = player.Character
+                            local root = char and char:FindFirstChild("HumanoidRootPart")
+                            local hum = char and char:FindFirstChildOfClass("Humanoid")
+                            if not root or not hum or hum.Health <= 0 then
+                                local newChar = player.CharacterAdded:Wait()
+                                local newRoot = newChar:WaitForChild("HumanoidRootPart", 6)
+                                task.wait(0.3)
+                                if newRoot and sproutAnchor then
+                                    moveRootToPosition(newRoot, getGroundPos(sproutAnchor), 10)
+                                end
+                            elseif root and (root.Position - sproutAnchor).Magnitude > 50 then
+                                moveRootToPosition(root, getGroundPos(sproutAnchor), 10)
+                            end
+
                             if isBackpackFull() then
                                 stopAutoDig()
                                 tokenCollectorBusy = false
@@ -4461,7 +4585,7 @@ new("TextLabel", {
 })
 new("TextLabel", {
     Size = UDim2.new(0, 220, 0, 25), Position = UDim2.new(0, 58, 0, 10),
-    BackgroundTransparency = 1, Text = "BSS Hopper v1.3.58",
+    BackgroundTransparency = 1, Text = "BSS Hopper v1.3.59",
     TextColor3 = C.text, Font = Enum.Font.GothamBold, TextSize = 22,
     TextXAlignment = Enum.TextXAlignment.Left, Parent = head,
 })
