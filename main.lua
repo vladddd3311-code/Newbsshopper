@@ -205,30 +205,8 @@ pcall(function()
                 end)
                 return nil
             end
-            if method == "Teleport" or method == "TeleportToPlaceInstance" or method == "teleport" then
-                armTeleportPersistence()
-            end
             return oldNamecall(self, ...)
         end)
-    end
-end)
-
-pcall(function()
-    if hookfunction and TeleportService then
-        if TeleportService.Teleport then
-            local oldTP
-            oldTP = hookfunction(TeleportService.Teleport, function(self, ...)
-                armTeleportPersistence()
-                return oldTP(self, ...)
-            end)
-        end
-        if TeleportService.TeleportToPlaceInstance then
-            local oldTPInstance
-            oldTPInstance = hookfunction(TeleportService.TeleportToPlaceInstance, function(self, ...)
-                armTeleportPersistence()
-                return oldTPInstance(self, ...)
-            end)
-        end
     end
 end)
 
@@ -2044,7 +2022,9 @@ local function getHivePlatformRecords()
                 or model:FindFirstChild("Owner")
                 or model:FindFirstChildWhichIsA("ObjectValue")
                 or model:FindFirstChildWhichIsA("StringValue")
-            local platform = model:FindFirstChild("Platform")
+            local platform = model:FindFirstChild("Circle")
+                or model:FindFirstChild("Circle2")
+                or model:FindFirstChild("Platform")
                 or model:FindFirstChild("Pad")
                 or model:FindFirstChildWhichIsA("BasePart")
             if platform and platform:IsA("BasePart") then
@@ -2121,7 +2101,7 @@ local function slotIsFree(slot)
     if not slot then return false end
     if slot.playerRef and slot.playerRef.Value == nil then return true end
     if slot.model then
-        for _, d in ipairs(slot.model:GetChildren()) do
+        for _, d in ipairs(slot.model:GetDescendants()) do
             if d:IsA("ProximityPrompt") then
                 local txt = string.lower(tostring(d.ActionText or ""))
                 if string.find(txt, "claim", 1, true) or string.find(txt, "занять", 1, true) then
@@ -2453,10 +2433,15 @@ local function makeHoney()
         return true
     end
 
-    -- Проверяем наличие своего улья
+    -- Проверяем наличие своего улья (СТРОГО: без своего улья мед не делаем!)
     if not hasOwnHive() then
-        log("Honey", "Улей не назначен — занимаю свободный улей...")
-        pcall(ensureHiveClaimed)
+        log("Honey", "Улей не назначен — сначала занимаю свободный улей...")
+        ensureHiveClaimed()
+        task.wait(0.5)
+        if not hasOwnHive() then
+            log("Honey", "Улей ещё не занят, конвертация невозможна")
+            return false
+        end
     end
 
     local hive = findMyHive()
@@ -2465,24 +2450,14 @@ local function makeHoney()
     local hivePos = (hive and hive.pos) or (slot and slot.pos) or promptPos
 
     if not hivePos then
-        log("Honey", "Позиция своего улья не найдена, пробую захватить свободный...")
-        ensureHiveClaimed()
+        log("Honey", "Позиция своего улья не найдена, пробую обновить...")
         slot = findAssignedHiveSlot()
         prompt, promptPos = findMyHivePromptAndPos()
         hivePos = (slot and slot.pos) or promptPos
     end
 
     if not hivePos then
-        -- Fallback: летим к любой свободной платформе улья
-        local pads = findYellowHivePads()
-        if #pads > 0 then
-            table.sort(pads, function(a, b) return (a.pos - root.Position).Magnitude < (b.pos - root.Position).Magnitude end)
-            hivePos = pads[1].pos
-        end
-    end
-
-    if not hivePos then
-        log("Honey", "Позиция своего улья не найдена!")
+        log("Honey", "Позиция своего улья не определена!")
         return false
     end
 
@@ -3709,9 +3684,15 @@ function Looter:Start()
                 while isBackpackFull() and alive() do
                     stopAutoDig()
                     tokenCollectorBusy = false
-                    s.currentStatus = "Рюкзак полный — делаю Honey на улье..."
-                    makeHoney()
-                    task.wait(1)
+                    if not hasOwnHive() then
+                        s.currentStatus = "Рюкзак полон — занимаю свободный улей..."
+                        ensureHiveClaimed()
+                        task.wait(1)
+                    else
+                        s.currentStatus = "Рюкзак полный — делаю Honey на улье..."
+                        makeHoney()
+                        task.wait(1)
+                    end
                 end
 
                 -- Опрашиваем бота о новых задачах от Ищущего
@@ -3809,7 +3790,9 @@ function Looter:Start()
                 task.wait(hopWait)
                 if alive() then
                     s.teleports += 1
+                    s.currentStatus = "Телепортируюсь на новый сервер..."
                     hopRandom()
+                    task.wait(6)
                     return
                 end
             end)
@@ -3889,9 +3872,15 @@ function Solo:Start()
 
                 -- Проверка рюкзака перед поиском целей
                 while isBackpackFull() and alive() do
-                    s.currentStatus = "Рюкзак полный — делаю Honey на улье..."
-                    makeHoney()
-                    task.wait(1)
+                    if not hasOwnHive() then
+                        s.currentStatus = "Рюкзак полон — занимаю свободный улей..."
+                        ensureHiveClaimed()
+                        task.wait(1)
+                    else
+                        s.currentStatus = "Рюкзак полный — делаю Honey на улье..."
+                        makeHoney()
+                        task.wait(1)
+                    end
                 end
 
                 local sprout = CONFIG.CHECK_SPROUTS and findSprout() or nil
@@ -3919,9 +3908,15 @@ function Solo:Start()
                         while alive() and isSproutAlive(sprout, sproutAnchor) do
                             if isBackpackFull() then
                                 while isBackpackFull() and alive() do
-                                    s.currentStatus = "Рюкзак полный — делаю Honey на улье..."
-                                    makeHoney()
-                                    task.wait(1)
+                                    if not hasOwnHive() then
+                                        s.currentStatus = "Рюкзак полон — занимаю свободный улей..."
+                                        ensureHiveClaimed()
+                                        task.wait(1)
+                                    else
+                                        s.currentStatus = "Рюкзак полный — делаю Honey на улье..."
+                                        makeHoney()
+                                        task.wait(1)
+                                    end
                                 end
                                 if not alive() or not isSproutAlive(sprout, sproutAnchor) then break end
                                 s.currentStatus = "Возвращаюсь к ростку"
@@ -3940,9 +3935,15 @@ function Solo:Start()
                         -- Фаза 2: Росток сломан! Лутаем оставшиеся ценные токены (игнорируя honey tokens)
                         if alive() and sproutAnchor and not (CONFIG.CHECK_VICIOUS and findVicious()) then
                             while isBackpackFull() and alive() do
-                                s.currentStatus = "Рюкзак полный — делаю Honey"
-                                makeHoney()
-                                task.wait(1)
+                                if not hasOwnHive() then
+                                    s.currentStatus = "Рюкзак полон — занимаю свободный улей..."
+                                    ensureHiveClaimed()
+                                    task.wait(1)
+                                else
+                                    s.currentStatus = "Рюкзак полный — делаю Honey"
+                                    makeHoney()
+                                    task.wait(1)
+                                end
                             end
                             if alive() and not isBackpackFull() then
                                 s.currentStatus = "Росток сломан — собираю ценные токены..."
@@ -3955,9 +3956,15 @@ function Solo:Start()
 
                     -- Разгрузка перед переходом на следующий сервер
                     while isBackpackFull() and alive() do
-                        s.currentStatus = "Рюкзак полный — делаю Honey перед переходом"
-                        makeHoney()
-                        task.wait(1)
+                        if not hasOwnHive() then
+                            s.currentStatus = "Рюкзак полон — занимаю свободный улей..."
+                            ensureHiveClaimed()
+                            task.wait(1)
+                        else
+                            s.currentStatus = "Рюкзак полный — делаю Honey перед переходом"
+                            makeHoney()
+                            task.wait(1)
+                        end
                     end
 
                     -- Фаза 3: Росток залутан! Переход на следующий сервер
@@ -3966,7 +3973,9 @@ function Solo:Start()
                     task.wait(hopWait)
                     if alive() then
                         s.hops += 1
+                        s.currentStatus = "Телепортируюсь на новый сервер..."
                         hopRandom()
+                        task.wait(6)
                         return
                     end
                 end
@@ -3977,7 +3986,9 @@ function Solo:Start()
                 task.wait(hopWait)
                 if alive() then
                     s.hops += 1
+                    s.currentStatus = "Телепортируюсь на новый сервер..."
                     hopRandom()
+                    task.wait(6)
                     return
                 end
             end)
