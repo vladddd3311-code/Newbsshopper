@@ -1490,8 +1490,7 @@ function sendTelegramMessage(text)
     local url = string.format("https://api.telegram.org/bot%s/sendMessage", token)
     local body = {
         chat_id = chatId,
-        text = "🐝 *BSS Hopper*
-" .. tostring(text),
+        text = "🐝 *BSS Hopper*\n" .. tostring(text),
         parse_mode = "Markdown",
     }
     task.spawn(function()
@@ -5956,7 +5955,7 @@ new("TextLabel", {
 })
 new("TextLabel", {
     Size = UDim2.new(0, 220, 0, 25), Position = UDim2.new(0, 58, 0, 10),
-    BackgroundTransparency = 1, Text = "BSS Hopper v1.3.72",
+    BackgroundTransparency = 1, Text = "BSS Hopper v1.3.73",
     TextColor3 = C.text, Font = Enum.Font.GothamBold, TextSize = 22,
     TextXAlignment = Enum.TextXAlignment.Left, Parent = head,
 })
@@ -7227,6 +7226,9 @@ syncGuiWithConfig = function()
         if applyWalkSpeed then applyWalkSpeed() end
         if applyAntiLag then applyAntiLag(CONFIG.ANTI_LAG) end
         if applySuperOptimization then applySuperOptimization(CONFIG.SUPER_OPTIMIZE) end
+        if fDisc and CONFIG.DISCORD_WEBHOOK_URL ~= nil then fDisc.Text = tostring(CONFIG.DISCORD_WEBHOOK_URL) end
+        if fTgToken and CONFIG.TELEGRAM_BOT_TOKEN ~= nil then fTgToken.Text = tostring(CONFIG.TELEGRAM_BOT_TOKEN) end
+        if fTgChat and CONFIG.TELEGRAM_CHAT_ID ~= nil then fTgChat.Text = tostring(CONFIG.TELEGRAM_CHAT_ID) end
         if refreshConfigButtons then refreshConfigButtons() end
         if refreshBindsList then refreshBindsList() end
     end)
@@ -7239,6 +7241,8 @@ local pages = {
     configs = PAGE_CONFIGS,
     vicious = PAGE_VICIOUS,
     puffshrooms = PAGE_PUFF,
+    windy_meteors = PAGE_WINDY,
+    webhooks = PAGE_WEBHOOKS,
 }
 
 local settingsOpen = false
