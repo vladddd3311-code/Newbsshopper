@@ -312,6 +312,16 @@ local CONFIG = {
 
     PUFF_MIN_LEVEL_COMMON=0, PUFF_MIN_LEVEL_RARE=0,
     PUFF_MIN_LEVEL_EPIC=0, PUFF_MIN_LEVEL_LEGENDARY=0, PUFF_MIN_LEVEL_MYTHIC=0,
+    PUFF_MIN_LEVEL = 1,
+    PUFF_MAX_LEVEL = 20,
+    PUFF_AUTO_BOOST_EPIC = true,
+    CHECK_METEORS = true,
+    CHECK_WINDY = true,
+    AUTO_HARVEST_PLANTERS = true,
+    DISCORD_WEBHOOK_URL = "",
+    TELEGRAM_BOT_TOKEN = "",
+    TELEGRAM_CHAT_ID = "",
+    SMOOTH_MOVEMENT = true,
 
     -- Burst-сбор, фильтрация серверов и кастомные приоритеты токенов
     BURST_LOOT_ENABLED = true,
@@ -1439,13 +1449,294 @@ function findPuffshrooms()
     return results
 end
 
+
+-- ══════════════════════════════════════════════════════════════════════
+--  ВЕБХУКИ DISCORD & TELEGRAM
+-- ══════════════════════════════════════════════════════════════════════
+function sendDiscordWebhook(title, description, colorHex)
+    local url = CONFIG.DISCORD_WEBHOOK_URL
+    if not url or url == "" then return end
+    local color = tonumber(colorHex or "00f5a0", 16) or 3447003
+    local body = {
+        embeds = {
+            {
+                title = "🐝 " .. tostring(title),
+                description = tostring(description),
+                color = color,
+                footer = { text = "BSS Hopper • " .. os.date("%X") },
+                timestamp = DateTime.now():ToIsoDate(),
+            }
+        }
+    }
+    task.spawn(function()
+        local raw = HttpService:JSONEncode(body)
+        local req = (syn and syn.request) or (http and http.request) or http_request or request
+        if req then
+            pcall(function()
+                req({
+                    Url = url, Method = "POST",
+                    Headers = { ["Content-Type"] = "application/json" },
+                    Body = raw
+                })
+            end)
+        end
+    end)
+end
+
+function sendTelegramMessage(text)
+    local token = CONFIG.TELEGRAM_BOT_TOKEN
+    local chatId = CONFIG.TELEGRAM_CHAT_ID
+    if not token or token == "" or not chatId or chatId == "" then return end
+    local url = string.format("https://api.telegram.org/bot%s/sendMessage", token)
+    local body = {
+        chat_id = chatId,
+        text = "🐝 *BSS Hopper*
+" .. tostring(text),
+        parse_mode = "Markdown",
+    }
+    task.spawn(function()
+        local raw = HttpService:JSONEncode(body)
+        local req = (syn and syn.request) or (http and http.request) or http_request or request
+        if req then
+            pcall(function()
+                req({
+                    Url = url, Method = "POST",
+                    Headers = { ["Content-Type"] = "application/json" },
+                    Body = raw
+                })
+            end)
+        end
+    end)
+end
+
+function notifyAllWebhooks(title, text, colorHex)
+    sendDiscordWebhook(title, text, colorHex)
+    sendTelegramMessage("*" .. tostring(title) .. "*\n" .. tostring(text))
+end
+
+-- ══════════════════════════════════════════════════════════════════════
+--  АВТО-БУСТЫ ИЗ ИНВЕНТАРЯ ДЛЯ EPIC+ ГРИБОВ
+-- ══════════════════════════════════════════════════════════════════════
+local BOOST_ITEM_NAMES = {
+    "Glitter", "Red Extract", "Blue Extract", "Oil",
+    "Enzymes", "Glue", "Tropical Drink", "Purple Potion", "Super Smoothie"
+}
+local lastBoostUsedAt = {}
+
+function autoUseBoostItems()
+    local rep = game:GetService("ReplicatedStorage")
+    local ev = rep:FindFirstChild("Events")
+    local act = ev and ev:FindFirstChild("PlayerActivesCommand")
+    if not act then return end
+
+    local now = os.clock()
+    for _, item in ipairs(BOOST_ITEM_NAMES) do
+        if not lastBoostUsedAt[item] or (now - lastBoostUsedAt[item] > 70) then
+            pcall(function()
+                act:FireServer({ Name = item })
+            end)
+            lastBoostUsedAt[item] = now
+            log("Бусты", "⚡ Использован бафф: " .. tostring(item))
+            task.wait(0.12)
+        end
+    end
+end
+
+-- ══════════════════════════════════════════════════════════════════════
+--  БОЙ С PUFFSHROOMS (ОРБИТАЛЬНАЯ АТАКА + 10 СЕК ЛУТА)
+-- ══════════════════════════════════════════════════════════════════════
+function fightPuffshroom(puffRoot, rarity, level)
+    if not puffRoot or not puffRoot.Parent then return false end
+    local pName = RARITY_LABEL[rarity] or rarity or "гриб"
+    log("Puffshrooms", string.format("Начинаю бой с грибом: %s (Уровень: %d)...", pName, level or 1))
+
+    -- Авто-использование бустов из инвентаря для Epic, Legendary, Mythic грибов
+    if (rarity == "epic" or rarity == "legendary" or rarity == "mythic") and CONFIG.PUFF_AUTO_BOOST_EPIC ~= false then
+        autoUseBoostItems()
+        notifyAllWebhooks("Редкий гриб!", string.format("Найден гриб %s (Уровень %d)! Прожаты боевые бусты.", pName, level or 1), "ff00bb")
+    end
+
+    local anchor = worldPos(puffRoot)
+    local started = os.clock()
+    local orbitAngle = 0
+
+    while alive() and puffRoot.Parent and os.clock() - started < 95 do
+        local root = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
+        if not root then task.wait(0.3); continue end
+
+        anchor = worldPos(puffRoot) or anchor
+        if not anchor then break end
+
+        -- Бег по плотной орбите (радиус 6 studs) вокруг ножки гриба
+        orbitAngle = orbitAngle + 0.35
+        local orbitPos = anchor + Vector3.new(math.cos(orbitAngle) * 6, 2.5, math.sin(orbitAngle) * 6)
+        local safePos = getGroundPos(orbitPos)
+
+        moveRootToPosition(root, safePos, 0.25)
+        pcall(swingDigTool)
+
+        -- Микро-сбор спор и токенов вокруг гриба
+        collectTokensFor(0.8, function()
+            return not alive() or not puffRoot.Parent
+        end, anchor)
+
+        task.wait(0.04)
+    end
+
+    -- Фаза 2: Гриб сломан! Ровно 10 секунд турбо-сбора лута
+    log("Puffshrooms", "Гриб сломан! Турбо-сбор спор и наград ровно 10 секунд...")
+    local lootStart = os.clock()
+    isBurstLootActive = true
+    collectTokensFor(10, function()
+        return not alive() or (os.clock() - lootStart >= 10)
+    end, anchor)
+    isBurstLootActive = false
+
+    notifyAllWebhooks("Гриб повержен!", string.format("Гриб %s (Уровень %d) успешно сломан и залутан!", pName, level or 1), "00f5a0")
+    return true
+end
+
+-- ══════════════════════════════════════════════════════════════════════
+--  WINDY BEE (БОЙ В ОБЛАКЕ С УВОРОТОМ ОТ ТОРНАДО)
+-- ══════════════════════════════════════════════════════════════════════
+function findWindyBee()
+    local npcFolder = Workspace:FindFirstChild("NPCBees")
+    if not npcFolder then return nil end
+    for _, bee in ipairs(npcFolder:GetChildren()) do
+        local n = string.lower(bee.Name)
+        if string.find(n, "windy", 1, true) then
+            return bee
+        end
+    end
+    return nil
+end
+
+function fightWindyBee(windy)
+    if not windy or not windy.Parent then return false end
+    log("Windy", "Найдена дикая Windy Bee! Взлетаю в облако...")
+    notifyAllWebhooks("Windy Bee!", "Обнаружена дикая Windy Bee! Начинаю атаку в облаке...", "00e5ff")
+    local started = os.clock()
+    setFlightNoclip(true)
+
+    while alive() and windy.Parent and os.clock() - started < 360 do
+        local root = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
+        local hum = player.Character and player.Character:FindFirstChildOfClass("Humanoid")
+        if not root or not hum or hum.Health <= 0 then task.wait(0.5); continue end
+
+        local targetPos = worldPos(windy)
+        if not targetPos then break end
+
+        -- Интеллектуальный уворот от торнадо
+        local tornadoes = Workspace:FindFirstChild("Tornadoes") or Workspace:FindFirstChild("Happenings")
+        local dodgeOffset = Vector3.zero
+        if tornadoes then
+            for _, torn in ipairs(tornadoes:GetChildren()) do
+                if string.find(string.lower(torn.Name), "tornado", 1, true) then
+                    local tpos = worldPos(torn)
+                    if tpos and (root.Position - tpos).Magnitude < 24 then
+                        dodgeOffset = (root.Position - tpos).Unit * 26
+                        log("Windy", "Уворот от торнадо Windy Bee!")
+                        break
+                    end
+                end
+            end
+        end
+
+        -- Зависаем на облаке прямо у пчелы (+4.5 studs выше центра)
+        local goal = targetPos + Vector3.new(0, 4.5, 0) + dodgeOffset
+        moveRootToPosition(root, goal, 0.35)
+
+        pcall(swingDigTool)
+
+        -- Сбор падающих Cloud Vials и токенов
+        collectTokensFor(1.2, function()
+            return not alive() or not windy.Parent
+        end, targetPos)
+
+        task.wait(0.08)
+    end
+    setFlightNoclip(false)
+
+    log("Windy", "Windy Bee повержена или сменила поле! Сбор оставшихся Cloud Vials...")
+    collectTokensFor(8, function() return not alive() end, lastActiveTargetPos)
+    notifyAllWebhooks("Windy Bee залутана!", "Фаза Windy Bee завершена, собраны Cloud Vials и награды.", "00f5a0")
+    return true
+end
+
+-- ══════════════════════════════════════════════════════════════════════
+--  METEOR SHOWER (СБОР МЕТЕОРИТНОГО ДОЖДЯ)
+-- ══════════════════════════════════════════════════════════════════════
+function findActiveMeteors()
+    local meteorsFolder = Workspace:FindFirstChild("Meteors")
+    if meteorsFolder and #meteorsFolder:GetChildren() > 0 then
+        return meteorsFolder
+    end
+    local h = Workspace:FindFirstChild("Happenings")
+    if h then
+        local m = h:FindFirstChild("Meteors") or h:FindFirstChild("MeteorShower")
+        if m and #m:GetChildren() > 0 then return m end
+    end
+    return nil
+end
+
+function lootMeteorShower(meteors)
+    log("Meteor", "Обнаружен Meteor Shower! Начинаю сбор падающего метеоритного лута...")
+    notifyAllWebhooks("Метеоритный дождь!", "На сервере идет Meteor Shower! Бот пылесосит метеоритные награды.", "ffaa00")
+    local started = os.clock()
+    while alive() and os.clock() - started < 50 do
+        if not findActiveMeteors() then break end
+        collectTokensFor(4, function()
+            return not alive() or not findActiveMeteors()
+        end)
+        task.wait(0.2)
+    end
+    log("Meteor", "Метеоритный дождь завершен, сбор 10 секунд оставшегося лута...")
+    collectTokensFor(10, function() return not alive() end)
+    return true
+end
+
+-- ══════════════════════════════════════════════════════════════════════
+--  АВТО-СБОР СПЕЛЫХ ПЛАНТАТОРОВ (PLANTERS)
+-- ══════════════════════════════════════════════════════════════════════
+function harvestMaturePlanters()
+    if CONFIG.AUTO_HARVEST_PLANTERS == false then return end
+    local plantersFolder = Workspace:FindFirstChild("Planters") or (Workspace:FindFirstChild("Core") and Workspace.Core:FindFirstChild("Planters"))
+    if not plantersFolder then return end
+
+    local rep = game:GetService("ReplicatedStorage")
+    local pCmd = rep:FindFirstChild("Events") and rep.Events:FindFirstChild("PlanterCommand")
+
+    for _, planter in ipairs(plantersFolder:GetChildren()) do
+        local isMature = false
+        pcall(function()
+            local text = string.lower(puffTextOf(planter))
+            if string.find(text, "100%%", 1, true) or string.find(text, "ready", 1, true) or string.find(text, "harvest", 1, true) then
+                isMature = true
+            end
+        end)
+        if isMature and pCmd then
+            log("Плантатор", "Созрел плантатор " .. tostring(planter.Name) .. "! Собираю урожай...")
+            pcall(function()
+                pCmd:FireServer({ Type = "Harvest", Planter = planter })
+            end)
+            task.wait(0.25)
+        end
+    end
+end
+
 function findEligiblePuffshrooms()
     local results = {}
     local minR = PUFF_RARITY_PRIORITY[CONFIG.PUFF_MIN_RARITY] or 1
+    local minLvl = tonumber(CONFIG.PUFF_MIN_LEVEL) or 1
+    local maxLvl = tonumber(CONFIG.PUFF_MAX_LEVEL) or 25
+
     for _, entry in ipairs(findPuffshrooms()) do
         local lk = "PUFF_MIN_LEVEL_" .. string.upper(entry.rarity)
         local minL = math.clamp(tonumber(CONFIG[lk]) or 0, 0, 30)
-        if (PUFF_RARITY_PRIORITY[entry.rarity] or 0) >= minR and entry.level >= minL then
+        if (PUFF_RARITY_PRIORITY[entry.rarity] or 0) >= minR 
+            and entry.level >= minL 
+            and entry.level >= minLvl 
+            and entry.level <= maxLvl then
             table.insert(results, entry)
         end
     end
@@ -3988,17 +4279,24 @@ function swingDigTool()
     if not char then return end
     local tool = ensureHarvestToolEquipped()
     if tool and tool.Parent == char then
-        -- 1. Родной метод активации инструмента Roblox (БЕЗ использования кликера мыши!)
         tool.Enabled = true
         pcall(function() tool:Activate() end)
-
-        -- 2. Если эксплоит поддерживает firesignal — вызываем событие Activated напрямую
         if type(firesignal) == "function" and tool:FindFirstChild("Activated") then
             pcall(firesignal, tool.Activated)
         end
     end
 
-    -- 3. Вызов серверного RemoteEvent сбора пыльцы в BSS
+    -- Нативная эмуляция зажатия через VirtualInputManager (внутри движка Roblox, мышь Windows свободна 100%)
+    pcall(function()
+        local vim = game:GetService("VirtualInputManager")
+        if vim then
+            vim:SendMouseButtonEvent(0, 0, 0, true, game, 1)
+            task.wait(0.03)
+            vim:SendMouseButtonEvent(0, 0, 0, false, game, 1)
+        end
+    end)
+
+    -- Серверный RemoteEvent сбора пыльцы в BSS
     local ev = getToolCollectRemote()
     if ev then
         pcall(function() ev:FireServer() end)
@@ -4182,9 +4480,20 @@ collectTokensFor = function(maxSeconds, stopFn, fieldAnchor)
                 end
             end
 
-            -- Поиск токенов внутри и вокруг поля
+            -- Поиск токенов внутри и вокруг поля (с Target Lock от тряски)
             local tokens = findFieldTokens(anchorZone, limitX, limitZ, fieldAnchor)
             local best, bestKey = nil, math.huge
+            if activeTokenObj and activeTokenObj.Parent and not collectedTokens[activeTokenObj] then
+                local p = worldPos(activeTokenObj)
+                if p then
+                    local dx = p.X - rootPos.X
+                    local dz = p.Z - rootPos.Z
+                    if (dx * dx + dz * dz) > 4.0 then
+                        best = { obj = activeTokenObj, pos = p, priority = 1 }
+                        bestKey = 0
+                    end
+                end
+            end
             for _, token in ipairs(tokens) do
                 local tobj = token.obj
                 if tobj and tobj.Parent and not collectedTokens[tobj] then
@@ -4279,9 +4588,19 @@ collectTokensFor = function(maxSeconds, stopFn, fieldAnchor)
                 end
             end
 
-            -- Бег строго через MoveTo к цели
-            if patrolTarget then
-                humanoid:MoveTo(patrolTarget)
+            -- Плавное человеческое перемещение без вибраций и покадрового сброса MoveTo
+            if patrolTarget and humanoid and root then
+                local currentPos = root.Position
+                local flatTarget = Vector3.new(patrolTarget.X, currentPos.Y, patrolTarget.Z)
+                local offset = flatTarget - currentPos
+                local dist = offset.Magnitude
+
+                if dist > 1.2 then
+                    local moveDir = offset.Unit
+                    humanoid:Move(moveDir, false)
+                else
+                    humanoid:Move(Vector3.zero, false)
+                end
             end
 
             RunService.Heartbeat:Wait()
@@ -5188,13 +5507,24 @@ function Solo:Start()
                     end
                 end
 
-                -- Проверяем сервер на наличие ростка или вициуса
-                s.currentStatus = "Проверяю сервер на росток и вициус..."
+                -- Авто-сбор созревших плантаторов на сервере
+                if CONFIG.AUTO_HARVEST_PLANTERS ~= false then
+                    pcall(harvestMaturePlanters)
+                end
+
+                -- Комплексная проверка целей: Vicious, Росток, Грибы, Windy Bee, Метеоры
+                s.currentStatus = "Сканирую сервер на цели (ростки, грибы, вициус, windy, метеоры)..."
                 local vicious = CONFIG.CHECK_VICIOUS and findVicious() or nil
                 local sprout = CONFIG.CHECK_SPROUTS and findSprout() or nil
+                local puffRoot, puffRarity, puffLevel = nil, nil, nil
+                if CONFIG.CHECK_PUFFSHROOMS then
+                    puffRoot, puffRarity, puffLevel = findPuffshroom()
+                end
+                local windy = CONFIG.CHECK_WINDY and findWindyBee() or nil
+                local meteors = CONFIG.CHECK_METEORS and findActiveMeteors() or nil
 
-                -- Если нет ни ростка, ни вициуса — улей не ставим, переходим на другой сервер!
-                if not vicious and not sprout then
+                -- Если целей нет — улей не ставим, переходим на другой сервер!
+                if not vicious and not sprout and not puffRoot and not windy and not meteors then
                     s.currentStatus = "Целей нет — перехожу на другой сервер..."
                     local hopWait = math.max(3.5, tonumber(CONFIG.HOP_DELAY) or 3.5)
                     task.wait(hopWait)
@@ -5234,6 +5564,27 @@ function Solo:Start()
                 end
 
                 -- ШАГ 3: ЛЕТИТ ЛУТАТЬ!
+                if windy then
+                    s.currentStatus = "🌪️ Найдена Windy Bee — взлетаю в облако!"
+                    pcall(function() fightWindyBee(windy) end)
+                    task.wait(1)
+                    return
+                end
+
+                if meteors then
+                    s.currentStatus = "☄️ На сервере метеоритный дождь — собираю метеоры!"
+                    pcall(function() lootMeteorShower(meteors) end)
+                    task.wait(1)
+                    return
+                end
+
+                if puffRoot then
+                    s.currentStatus = string.format("🍄 Найден гриб %s (лвл %d) — атакую!", RARITY_LABEL[puffRarity] or puffRarity, puffLevel or 1)
+                    pcall(function() fightPuffshroom(puffRoot, puffRarity, puffLevel) end)
+                    task.wait(1)
+                    return
+                end
+
                 if vicious then
                     s.currentStatus = "Vicious найден — лечу к нему"
                     local searcher = Hopper.instances.searcher
@@ -5605,7 +5956,7 @@ new("TextLabel", {
 })
 new("TextLabel", {
     Size = UDim2.new(0, 220, 0, 25), Position = UDim2.new(0, 58, 0, 10),
-    BackgroundTransparency = 1, Text = "BSS Hopper v1.3.71",
+    BackgroundTransparency = 1, Text = "BSS Hopper v1.3.72",
     TextColor3 = C.text, Font = Enum.Font.GothamBold, TextSize = 22,
     TextXAlignment = Enum.TextXAlignment.Left, Parent = head,
 })
@@ -5738,10 +6089,12 @@ end
 
 makeTab("⌂", "Главная", "main")
 makeTab("🌱", "Спруты", "sprouts")
+makeTab("🍄", "Грибы", "puffshrooms")
+makeTab("🌪️", "Windy & Meteors", "windy_meteors")
+makeTab("📡", "Вебхуки", "webhooks")
 makeTab("⚙", "Настройки", "settings")
 makeTab("📁", "Конфиги", "configs")
 makeTab("🐝", "Vicious Bee", "vicious")
-makeTab("🍄", "Puffshrooms", "puffshrooms")
 
 trace("Боковая панель готова")
 
@@ -5949,19 +6302,36 @@ local function makeToggle(parent, label, value, order, onChanged)
         TextYAlignment = Enum.TextYAlignment.Center, Parent = box,
     })
     local state = value and true or false
-    local knob = new("TextButton", {
-        Size = UDim2.new(0, 44, 0, 20),
-        Position = UDim2.new(1, -52, 0.5, -10),
-        BackgroundColor3 = state and C.accent2 or C.cardHi,
-        Text = state and "ВКЛ" or "ВЫКЛ",
-        TextColor3 = C.text, Font = Enum.Font.GothamBold, TextSize = 9,
+    local TweenService = game:GetService("TweenService")
+
+    -- Стильный анимированный переключатель (Cyber Switch) с гладким сдвигом таблетки
+    local switch = new("TextButton", {
+        Size = UDim2.new(0, 48, 0, 24),
+        Position = UDim2.new(1, -56, 0.5, -12),
+        BackgroundColor3 = state and Color3.fromRGB(0, 230, 150) or Color3.fromRGB(32, 38, 52),
+        Text = "", AutoButtonColor = false,
         BorderSizePixel = 0, Parent = box,
     })
-    round(knob, 10)
-    knob.MouseButton1Click:Connect(function()
+    round(switch, 12)
+    stroke(switch, state and Color3.fromRGB(0, 255, 180) or Color3.fromRGB(48, 56, 76), 1)
+
+    local circle = new("Frame", {
+        Size = UDim2.new(0, 18, 0, 18),
+        Position = state and UDim2.new(1, -21, 0.5, -9) or UDim2.new(0, 3, 0.5, -9),
+        BackgroundColor3 = Color3.fromRGB(255, 255, 255),
+        BorderSizePixel = 0, Parent = switch,
+    })
+    round(circle, 9)
+
+    switch.MouseButton1Click:Connect(function()
         state = not state
-        knob.BackgroundColor3 = state and C.accent2 or C.cardHi
-        knob.Text = state and "ВКЛ" or "ВЫКЛ"
+        local targetColor = state and Color3.fromRGB(0, 230, 150) or Color3.fromRGB(32, 38, 52)
+        local targetPos = state and UDim2.new(1, -21, 0.5, -9) or UDim2.new(0, 3, 0.5, -9)
+        local twInfo = TweenInfo.new(0.2, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+        pcall(function()
+            TweenService:Create(switch, twInfo, { BackgroundColor3 = targetColor }):Play()
+            TweenService:Create(circle, twInfo, { Position = targetPos }):Play()
+        end)
         if onChanged then pcall(onChanged, state) end
     end)
     return function() return state end
@@ -5981,11 +6351,23 @@ local function makeBtn(parent, txt, cb, col, order)
 end
 
 section("ОСНОВНЫЕ ФУНКЦИИ", 1).Parent = PAGE_HOME
-makeToggle(PAGE_HOME, "Лутать Vicious Bee", CONFIG.CHECK_VICIOUS, 2, function(v)
+makeToggle(PAGE_HOME, "Лутать ростки (Sprouts)", CONFIG.CHECK_SPROUTS, 2, function(v)
+    CONFIG.CHECK_SPROUTS = v; saveNow()
+end)
+makeToggle(PAGE_HOME, "Лутать грибы (Puffshrooms)", CONFIG.CHECK_PUFFSHROOMS, 3, function(v)
+    CONFIG.CHECK_PUFFSHROOMS = v; saveNow()
+end)
+makeToggle(PAGE_HOME, "Охота на Windy Bee (в облаке)", CONFIG.CHECK_WINDY, 4, function(v)
+    CONFIG.CHECK_WINDY = v; saveNow()
+end)
+makeToggle(PAGE_HOME, "Лутать метеориты (Meteor Shower)", CONFIG.CHECK_METEORS, 5, function(v)
+    CONFIG.CHECK_METEORS = v; saveNow()
+end)
+makeToggle(PAGE_HOME, "Лутать Vicious Bee", CONFIG.CHECK_VICIOUS, 6, function(v)
     CONFIG.CHECK_VICIOUS = v; saveNow()
 end)
-makeToggle(PAGE_HOME, "Лутать ростки", CONFIG.CHECK_SPROUTS, 4, function(v)
-    CONFIG.CHECK_SPROUTS = v; saveNow()
+makeToggle(PAGE_HOME, "Авто-сбор плантаторов", CONFIG.AUTO_HARVEST_PLANTERS, 7, function(v)
+    CONFIG.AUTO_HARVEST_PLANTERS = v; saveNow()
 end)
 -- Автокопание работает пассивно
 -- Bypass работает пассивно
@@ -6004,6 +6386,50 @@ new("UIPadding", { PaddingLeft = UDim.new(0, 12), PaddingRight = UDim.new(0, 12)
 -- ══════════════════════════════════════════════════════════════════════
 --  СПРУТЫ
 -- ══════════════════════════════════════════════════════════════════════
+
+-- ══════════════════════════════════════════════════════════════════════
+--  ВКЛАДКА: 🌪️ WINDY BEE & METEORS
+-- ══════════════════════════════════════════════════════════════════════
+local PAGE_WINDY = new("Frame", {
+    Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y,
+    BackgroundTransparency = 1, Visible = false, Parent = content,
+})
+new("UIListLayout", { SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0, 8), Parent = PAGE_WINDY })
+
+section("🌪️ WINDY BEE & METEOR SHOWER", 1).Parent = PAGE_WINDY
+makeToggle(PAGE_WINDY, "Атаковать дикую Windy Bee в облаке", CONFIG.CHECK_WINDY, 2, function(v)
+    CONFIG.CHECK_WINDY = v; saveNow()
+end)
+makeToggle(PAGE_WINDY, "Лутать метеоритный дождь (Meteors)", CONFIG.CHECK_METEORS, 3, function(v)
+    CONFIG.CHECK_METEORS = v; saveNow()
+end)
+makeToggle(PAGE_WINDY, "Автоматический сбор спелых плантаторов", CONFIG.AUTO_HARVEST_PLANTERS, 4, function(v)
+    CONFIG.AUTO_HARVEST_PLANTERS = v; saveNow()
+end)
+
+-- ══════════════════════════════════════════════════════════════════════
+--  ВКЛАДКА: 📡 ВЕБХУКИ DISCORD & TELEGRAM
+-- ══════════════════════════════════════════════════════════════════════
+local PAGE_WEBHOOKS = new("Frame", {
+    Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y,
+    BackgroundTransparency = 1, Visible = false, Parent = content,
+})
+new("UIListLayout", { SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0, 8), Parent = PAGE_WEBHOOKS })
+
+section("📡 УВЕДОМЛЕНИЯ В DISCORD & TELEGRAM", 1).Parent = PAGE_WEBHOOKS
+local fDisc = makeField(PAGE_WEBHOOKS, "DISCORD WEBHOOK URL", CONFIG.DISCORD_WEBHOOK_URL or "", "https://discord.com/api/webhooks/...", 2)
+local fTgToken = makeField(PAGE_WEBHOOKS, "TELEGRAM BOT TOKEN", CONFIG.TELEGRAM_BOT_TOKEN or "", "123456789:ABCdef...", 3)
+local fTgChat = makeField(PAGE_WEBHOOKS, "TELEGRAM CHAT ID", CONFIG.TELEGRAM_CHAT_ID or "", "123456789", 4)
+
+makeBtn(PAGE_WEBHOOKS, "💾 Сохранить и проверить вебхуки", function()
+    CONFIG.DISCORD_WEBHOOK_URL = fDisc.Text
+    CONFIG.TELEGRAM_BOT_TOKEN = fTgToken.Text
+    CONFIG.TELEGRAM_CHAT_ID = fTgChat.Text
+    saveNow()
+    notifyAllWebhooks("Тестовое уведомление!", "Вебхуки BSS Hopper успешно подключены и работают!", "00f5a0")
+    log("Вебхуки", "Настройки сохранены! Отправлено тестовое уведомление.")
+end, C.accent2, 5)
+
 local PAGE_SPROUTS = new("Frame", {
     Size = UDim2.new(1, 0, 0, 0),
     AutomaticSize = Enum.AutomaticSize.Y,
