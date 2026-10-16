@@ -1989,7 +1989,9 @@ function findYellowHivePads()
     return results
 end
 
--- Кэш назначенного улья (сохраняется на всё время пребывания на текущем сервере + файл)
+-- Точный улей, занятый на ТЕКУЩЕМ сервере (сбрасывается на каждом новом сервере)
+myClaimedHiveSlot = nil
+myClaimedHivePos = nil
 local cachedHiveSlot = nil
 local cachedHivePos = nil
 _G.BSS_CLAIMED_HIVE_POS = nil
@@ -1997,35 +1999,18 @@ _G.BSS_CLAIMED_HIVE_POS = nil
 function saveMyHivePos(pos)
     if not pos or typeof(pos) ~= "Vector3" then return end
     cachedHivePos = pos
+    myClaimedHivePos = pos
     _G.BSS_CLAIMED_HIVE_POS = pos
-    pcall(function()
-        if writefile then
-            writefile("bss_my_hive.txt", string.format("%f,%f,%f", pos.X, pos.Y, pos.Z))
-        end
-    end)
-    log("Улей", string.format("Точка улья надежно сохранена: %.1f, %.1f, %.1f", pos.X, pos.Y, pos.Z))
+    log("Улей", string.format("Свой улей закреплен: %.1f, %.1f, %.1f", pos.X, pos.Y, pos.Z))
 end
 
 function loadSavedHivePos()
+    if myClaimedHivePos and typeof(myClaimedHivePos) == "Vector3" then return myClaimedHivePos end
     if cachedHivePos and typeof(cachedHivePos) == "Vector3" then return cachedHivePos end
     if _G.BSS_CLAIMED_HIVE_POS and typeof(_G.BSS_CLAIMED_HIVE_POS) == "Vector3" then
-        cachedHivePos = _G.BSS_CLAIMED_HIVE_POS
-        return cachedHivePos
+        return _G.BSS_CLAIMED_HIVE_POS
     end
-    pcall(function()
-        if isfile and isfile("bss_my_hive.txt") then
-            local txt = readfile("bss_my_hive.txt")
-            local x, y, z = string.match(txt, "([^,]+),([^,]+),([^,]+)")
-            if x and y and z then
-                local v = Vector3.new(tonumber(x), tonumber(y), tonumber(z))
-                if v and v.Magnitude > 0 then
-                    cachedHivePos = v
-                    _G.BSS_CLAIMED_HIVE_POS = v
-                end
-            end
-        end
-    end)
-    return cachedHivePos
+    return nil
 end
 
 -- Прямой поиск промпта Make Honey своего улья в Workspace
@@ -2117,81 +2102,51 @@ function getHivePlatformRecords()
 end
 
 function findAssignedHiveSlot()
-    -- 0. Кэш своего улья: если на этом сервере позиция уже проверена и закреплена
+    -- 0. Если улей уже был занят нами на этом сервере
+    if myClaimedHiveSlot and myClaimedHiveSlot.pos then
+        return myClaimedHiveSlot
+    end
     if cachedHiveSlot and cachedHiveSlot.pos then
         return cachedHiveSlot
     end
 
-    -- 1. Сначала проверяем прямой prompt "Make Honey" (он есть ТОЛЬКО у занятого нами улья)
-    local prompt, promptPos = findMyHivePromptAndPos()
-    if prompt and promptPos then
-        cachedHivePos = promptPos
-        _G.BSS_CLAIMED_HIVE_POS = promptPos
-        local records = getHivePlatformRecords()
-        for _, slot in ipairs(records) do
-            if (slot.pos - promptPos).Magnitude <= 25 then
-                slot.prompt = prompt
-                cachedHiveSlot = slot
-                return slot
-            end
-        end
-        local res = { pos = promptPos, prompt = prompt, platform = prompt.Parent, model = prompt.Parent }
-        cachedHiveSlot = res
-        return res
-    end
-
-    -- 2. Проверяем records в HivePlatforms (по имени, ID, TextLabel и ProximityPrompt)
+    -- 1. Проверяем records в HivePlatforms СТРОГО по имени, DisplayName или UserId нашего аккаунта!
     local ok, records = pcall(getHivePlatformRecords)
     if ok and records then
         local myName = string.lower(player.Name)
         local myDisplay = player.DisplayName and string.lower(player.DisplayName) or nil
+        local myId = tostring(player.UserId)
 
         for _, slot in ipairs(records) do
-            local val = nil
-            if slot.playerRef then
-                val = slot.playerRef.Value
-            end
             local isMe = false
-            if val == player or (player.Character and val == player.Character) then
-                isMe = true
-            elseif type(val) == "string" and string.lower(val) == myName then
-                isMe = true
-            elseif tostring(val) == player.Name or string.lower(tostring(val)) == myName then
-                isMe = true
-            end
-
-            if not isMe and slot.model then
-                local ownerAttr = slot.model:GetAttribute("Owner") or slot.model:GetAttribute("Player") or slot.model:GetAttribute("UserId")
-                if ownerAttr and (ownerAttr == player.UserId or tostring(ownerAttr) == tostring(player.UserId) or string.lower(tostring(ownerAttr)) == myName) then
+            if slot.playerRef then
+                local val = slot.playerRef.Value
+                if val == player or (player.Character and val == player.Character) then
+                    isMe = true
+                elseif type(val) == "string" and (string.lower(val) == myName or (myDisplay and string.lower(val) == myDisplay)) then
+                    isMe = true
+                elseif tostring(val) == player.Name or (myDisplay and tostring(val) == player.DisplayName) then
                     isMe = true
                 end
             end
 
-            -- Проверяем TextLabel на платформе Circle / табличке улья
             if not isMe and slot.model then
-                for _, d in ipairs(slot.model:GetDescendants()) do
-                    if d:IsA("TextLabel") then
-                        local txt = string.lower(tostring(d.Text or ""))
-                        if txt == myName or (myDisplay and txt == myDisplay)
-                            or string.find(txt, myName, 1, true)
-                            or (myDisplay and string.find(txt, myDisplay, 1, true)) then
-                            isMe = true
-                            break
-                        end
+                local ownerAttr = slot.model:GetAttribute("Owner") or slot.model:GetAttribute("Player") or slot.model:GetAttribute("UserId")
+                if ownerAttr then
+                    local sAttr = string.lower(tostring(ownerAttr))
+                    if sAttr == myName or (myDisplay and sAttr == myDisplay) or tostring(ownerAttr) == myId then
+                        isMe = true
                     end
                 end
             end
 
-            -- Проверяем ProximityPrompt внутри модели
+            -- Проверяем табличку улья (TextLabel)
             if not isMe and slot.model then
                 for _, d in ipairs(slot.model:GetDescendants()) do
-                    if d:IsA("ProximityPrompt") then
-                        local txt = string.lower(tostring(d.ActionText or ""))
-                        local objTxt = string.lower(tostring(d.ObjectText or ""))
-                        if string.find(txt, "honey", 1, true) or string.find(txt, "make", 1, true)
-                            or string.find(objTxt, "honey", 1, true) or string.find(objTxt, "make", 1, true) then
+                    if d:IsA("TextLabel") then
+                        local txt = string.lower(tostring(d.Text or ""))
+                        if txt == myName or (myDisplay and txt == myDisplay) then
                             isMe = true
-                            slot.prompt = d
                             break
                         end
                     end
@@ -2199,6 +2154,8 @@ function findAssignedHiveSlot()
             end
 
             if isMe then
+                myClaimedHiveSlot = slot
+                myClaimedHivePos = slot.pos
                 cachedHiveSlot = slot
                 cachedHivePos = slot.pos
                 _G.BSS_CLAIMED_HIVE_POS = slot.pos
@@ -2408,24 +2365,25 @@ function claimHive()
                 end
             end)
 
-            task.wait(0.3)
+            task.wait(0.25)
         end
 
-        saveMyHivePos(slot.pos)
-        local foundAfter = findAssignedHiveSlot()
-        if foundAfter then
-            log("Улей", "Улей успешно занят!")
-            cachedHiveSlot = foundAfter
-            saveMyHivePos(foundAfter.pos)
-            return true
-        end
+        -- Мы завершили захват этой свободной платформы!
+        myClaimedHiveSlot = slot
+        myClaimedHivePos = slot.pos
+        cachedHiveSlot = slot
+        cachedHivePos = slot.pos
+        _G.BSS_CLAIMED_HIVE_POS = slot.pos
+        log("Улей", string.format("Свой улей успешно занят на платформе: %.1f, %.1f, %.1f!", slot.pos.X, slot.pos.Y, slot.pos.Z))
         return true
     end
 
     local finalCheck = findAssignedHiveSlot()
     if finalCheck then
+        myClaimedHiveSlot = finalCheck
+        myClaimedHivePos = finalCheck.pos
         cachedHiveSlot = finalCheck
-        saveMyHivePos(finalCheck.pos)
+        cachedHivePos = finalCheck.pos
         return true
     end
     return false
@@ -2623,60 +2581,38 @@ function makeHoney()
         return true
     end
 
+    -- Если улей еще не был занят на этом сервере — сначала занимаем СВОЙ улей!
+    if not hasOwnHive() then
+        log("Honey", "Свой улей еще не занят. Сначала занимаю свободный улей...")
+        claimHive()
+    end
+
+    local mySlot = myClaimedHiveSlot or findAssignedHiveSlot()
+    local hivePos = (mySlot and mySlot.pos) or myClaimedHivePos
+
+    if not hivePos then
+        log("Honey", "Свой улей не найден, повторная попытка захвата...")
+        if claimHive() then
+            mySlot = myClaimedHiveSlot or findAssignedHiveSlot()
+            hivePos = (mySlot and mySlot.pos) or myClaimedHivePos
+        end
+    end
+
+    if not hivePos then
+        log("Honey", "Ошибка: не удалось определить свой улей на этом сервере")
+        return false
+    end
+
     -- Немедленно останавливаем копание и сбор токенов, чтобы не перебивали полет
     stopAutoDig()
     tokenCollectorBusy = false
     patrolTarget = nil
 
-    -- Определяем позицию улья (или зоны ульев) без блокирующих проверок
-    local hivePos = loadSavedHivePos()
-    if not hivePos then
-        local slot = findAssignedHiveSlot()
-        if slot and slot.pos then
-            hivePos = slot.pos
-            saveMyHivePos(slot.pos)
-        end
-    end
-    if not hivePos then
-        local p, pPos = findMyHivePromptAndPos()
-        if pPos then
-            hivePos = pPos
-            saveMyHivePos(pPos)
-        end
-    end
-    if not hivePos then
-        local pads = findYellowHivePads()
-        if #pads > 0 then hivePos = pads[1].pos end
-    end
-    if not hivePos then
-        local records = getHivePlatformRecords()
-        if #records > 0 then hivePos = records[1].pos end
-    end
-    if not hivePos then
-        local hp = Workspace:FindFirstChild("HivePlatforms") or Workspace:FindFirstChild("Honeycombs")
-        if hp then
-            local okP, p = pcall(function() return hp:GetPivot().Position end)
-            if okP and p then hivePos = Vector3.new(p.X, 3.5, p.Z) end
-        end
-    end
-    if not hivePos then
-        -- Статичные координаты зоны ульев в Bee Swarm Simulator
-        hivePos = Vector3.new(-3.5, 3.5, 305)
-    end
-
-    log("Honey", string.format("Рюкзак полон! Лечу к улью (%.1f, %.1f, %.1f)...", hivePos.X, hivePos.Y, hivePos.Z))
-    -- Подлетаем прямо к платформе улья
+    log("Honey", string.format("Рюкзак полон! Лечу строго в СВОЙ улей (%.1f, %.1f, %.1f)...", hivePos.X, hivePos.Y, hivePos.Z))
+    -- Подлетаем прямо к платформе СВОЕГО улья
     moveRootToPosition(root, hivePos + Vector3.new(0, 3.5, 0), 10)
 
-    -- По прилету перепроверяем точный слот (теперь все объекты и промпты гарантированно подгружены!)
-    local updatedSlot = findAssignedHiveSlot()
-    if updatedSlot and updatedSlot.pos then
-        hivePos = updatedSlot.pos
-        cachedHiveSlot = updatedSlot
-        saveMyHivePos(updatedSlot.pos)
-    end
-
-    -- Отключаем ноклип и встаем ровно на платформу
+    -- Отключаем ноклип и встаем ровно на платформу СВОЕГО улья
     setFlightNoclip(false)
     pcall(function()
         root.CFrame = CFrame.new(hivePos + Vector3.new(0, 3.2, 0))
@@ -2687,26 +2623,35 @@ function makeHoney()
     end)
     task.wait(0.2)
 
-    -- Ищем Prompt "Make Honey"
+    -- Ищем Prompt "Make Honey" СТРОГО на модели СВОЕГО улья или в пределах 14 стадс от нашей платформы
     local function findNearbyMakeHoneyPrompt()
-        local active = nil
-        local charRoot = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
-        local myPos = charRoot and charRoot.Position or hivePos
+        local myModel = mySlot and mySlot.model
+        if myModel then
+            for _, d in ipairs(myModel:GetDescendants()) do
+                if d:IsA("ProximityPrompt") then
+                    local act = string.lower(tostring(d.ActionText or ""))
+                    local objT = string.lower(tostring(d.ObjectText or ""))
+                    if string.find(act, "make", 1, true) or string.find(act, "honey", 1, true)
+                        or string.find(objT, "make", 1, true) or string.find(objT, "honey", 1, true) then
+                        return d
+                    end
+                end
+            end
+        end
         for _, p in ipairs(Workspace:GetDescendants()) do
             if p:IsA("ProximityPrompt") then
                 local pPos = promptWorldPos(p)
-                if pPos and (pPos - myPos).Magnitude <= 28 then
+                if pPos and (pPos - hivePos).Magnitude <= 14 then
                     local act = string.lower(tostring(p.ActionText or ""))
                     local objT = string.lower(tostring(p.ObjectText or ""))
                     if string.find(act, "make", 1, true) or string.find(act, "honey", 1, true)
                         or string.find(objT, "make", 1, true) or string.find(objT, "honey", 1, true) then
                         return p
                     end
-                    if not active then active = p end
                 end
             end
         end
-        return active or prompt or (hive and hive.prompt) or (slot and slot.prompt)
+        return nil
     end
 
     local activePrompt = findNearbyMakeHoneyPrompt()
@@ -3933,30 +3878,47 @@ function Looter:Start()
         s.currentStatus = "Ожидание загрузки игры..."
         waitForGameReady(25)
 
+        -- Сброс данных улья прошлого сервера
+        myClaimedHiveSlot = nil
+        myClaimedHivePos = nil
+        cachedHiveSlot = nil
+        cachedHivePos = nil
+
         -- 1. Сначала при заходе на сервер ищем росток/вициус ровно 5 секунд
         local initialTargetFound = false
         for checkSec = 1, 5 do
             if not alive() then return end
             s.currentStatus = string.format("Проверяю сервер на росток / вициус (%dc)...", 6 - checkSec)
 
-            if CONFIG.CHECK_SPROUTS then
-                local okSprout, sprout = pcall(findLootableSprout)
-                if okSprout and sprout then
-                    s.currentStatus = "Росток найден — начинаю лутать!"
+            local sprout = CONFIG.CHECK_SPROUTS and findLootableSprout() or nil
+            local vicious = CONFIG.CHECK_VICIOUS and findVicious() or nil
+
+            if sprout or vicious then
+                initialTargetFound = true
+
+                -- ШАГ 1: Поставил улей если есть росток/вициус!
+                if not hasOwnHive() then
+                    s.currentStatus = "Цель есть! Занимаю свой улей..."
+                    local claimOk, claimed = pcall(ensureHiveClaimed)
+                    if claimOk and claimed then s.hivesClaimed += 1 end
+                end
+
+                -- ШАГ 2: Если рюкзак полон — конвертирует в своем улье!
+                if isBackpackFull() then
+                    s.currentStatus = "Рюкзак полон — конвертирую в своем улье..."
+                    pcall(makeHoney)
+                end
+
+                -- ШАГ 3: Летит лутать!
+                if sprout then
+                    s.currentStatus = "Лечу лутать росток!"
                     local okHarvest, harvestRes = pcall(function() return self:harvest() end)
                     if okHarvest and harvestRes == true then
-                        initialTargetFound = true
                         break
                     end
-                end
-            end
-
-            if CONFIG.CHECK_VICIOUS then
-                local okV, v = pcall(findVicious)
-                if okV and v then
-                    s.currentStatus = "Vicious найден — начинаю бой!"
-                    pcall(function() fightVicious(v) end)
-                    initialTargetFound = true
+                elseif vicious then
+                    s.currentStatus = "Лечу бить Вициуса!"
+                    pcall(function() fightVicious(vicious) end)
                     break
                 end
             end
@@ -4188,13 +4150,54 @@ function Solo:Start()
             local ok, err = pcall(function()
                 s.serversChecked += 1
 
+                -- Сброс данных улья прошлого сервера
+                myClaimedHiveSlot = nil
+                myClaimedHivePos = nil
+                cachedHiveSlot = nil
+                cachedHivePos = nil
+
+                -- Проверяем сервер на наличие ростка или вициуса
+                s.currentStatus = "Проверяю сервер на росток и вициус..."
                 local vicious = CONFIG.CHECK_VICIOUS and findVicious() or nil
-                if vicious then
-                    if not hasOwnHive() then
-                        s.currentStatus = "Цель найдена — занимаю улей"
-                        local claimOk, claimed = pcall(ensureHiveClaimed)
-                        if claimOk and claimed then s.hivesClaimed += 1 end
+                local sprout = CONFIG.CHECK_SPROUTS and findSprout() or nil
+
+                -- Если нет ни ростка, ни вициуса — улей не ставим, переходим на другой сервер!
+                if not vicious and not sprout then
+                    s.currentStatus = "Целей нет — перехожу на другой сервер..."
+                    local hopWait = math.max(3.5, tonumber(CONFIG.HOP_DELAY) or 3.5)
+                    task.wait(hopWait)
+                    if alive() then
+                        s.hops += 1
+                        s.currentStatus = "Телепортируюсь на новый сервер..."
+                        hopRandom()
+                        task.wait(6)
+                        return
                     end
+                    return
+                end
+
+                -- ЦЕЛЬ ЕСТЬ (росток или вициус)!
+                -- ШАГ 1: ПОСТАВИЛ УЛЕЙ!
+                if not hasOwnHive() then
+                    s.currentStatus = "Цель найдена! Занимаю свой улей..."
+                    local claimOk, claimed = pcall(ensureHiveClaimed)
+                    if claimOk and claimed then s.hivesClaimed += 1 end
+                end
+
+                -- ШАГ 2: ЕСЛИ РЮКЗАК ПОЛОН — КОНВЕРТИРУЕТ В СВОЕМ УЛЬЕ!
+                if isBackpackFull() then
+                    stopAutoDig()
+                    tokenCollectorBusy = false
+                    patrolTarget = nil
+                    while isBackpackFull() and alive() do
+                        s.currentStatus = "Рюкзак полный — делаю Honey в своем улье..."
+                        makeHoney()
+                        task.wait(0.5)
+                    end
+                end
+
+                -- ШАГ 3: ЛЕТИТ ЛУТАТЬ!
+                if vicious then
                     s.currentStatus = "Vicious найден — лечу к нему"
                     local searcher = Hopper.instances.searcher
                     if searcher then
@@ -4205,31 +4208,11 @@ function Solo:Start()
                     return
                 end
 
-                -- Проверка рюкзака перед поиском целей
-                if isBackpackFull() then
-                    stopAutoDig()
-                    tokenCollectorBusy = false
-                    patrolTarget = nil
-                    while isBackpackFull() and alive() do
-                        s.currentStatus = "Рюкзак полный — делаю Honey на улье..."
-                        makeHoney()
-                        task.wait(0.5)
-                    end
-                end
-
-                local sprout = CONFIG.CHECK_SPROUTS and findSprout() or nil
                 if sprout then
                     s.sproutsFound += 1
                     local rar = detectRarity(sprout)
                     s.lastSprout = { fieldName = RARITY_LABEL[rar] or "спрут" }
-                    s.currentStatus = "Росток найден — занимаю улей"
-
-                    if not hasOwnHive() then
-                        local claimOk, claimed = pcall(ensureHiveClaimed)
-                        if claimOk and claimed then s.hivesClaimed += 1 end
-                    end
-
-                    s.currentStatus = "Лечу к ростку: " .. (RARITY_LABEL[rar] or "спрут")
+                    s.currentStatus = "Лечу лутать росток: " .. (RARITY_LABEL[rar] or "спрут")
                     local sproutAnchor = worldPos(sprout)
                     if moveToSprout(sprout) then
                         sproutAnchor = worldPos(sprout) or sproutAnchor or (player.Character and player.Character:FindFirstChild("HumanoidRootPart") and player.Character.HumanoidRootPart.Position)
@@ -4556,7 +4539,7 @@ new("TextLabel", {
 })
 new("TextLabel", {
     Size = UDim2.new(0, 220, 0, 25), Position = UDim2.new(0, 58, 0, 10),
-    BackgroundTransparency = 1, Text = "BSS Hopper v1.3.60",
+    BackgroundTransparency = 1, Text = "BSS Hopper v1.3.61",
     TextColor3 = C.text, Font = Enum.Font.GothamBold, TextSize = 22,
     TextXAlignment = Enum.TextXAlignment.Left, Parent = head,
 })
