@@ -2575,52 +2575,47 @@ local function makeHoney()
     tokenCollectorBusy = false
     patrolTarget = nil
 
-    -- Проверяем наличие своего улья (СТРОГО: без своего улья мед не делаем!)
-    if not hasOwnHive() then
-        log("Honey", "Улей не назначен — сначала занимаю свободный улей...")
-        ensureHiveClaimed()
-        task.wait(0.5)
-        if not hasOwnHive() then
-            log("Honey", "Улей ещё не занят, конвертация невозможна")
-            return false
-        end
-    end
-
-    local hive = findMyHive()
-    local slot = findAssignedHiveSlot()
-    local prompt, promptPos = findMyHivePromptAndPos()
-    local hivePos = (hive and hive.pos) or (slot and slot.pos) or promptPos or cachedHivePos or _G.BSS_CLAIMED_HIVE_POS
-
+    -- Определяем позицию улья (или зоны ульев) без блокирующих проверок
+    local hivePos = cachedHivePos or _G.BSS_CLAIMED_HIVE_POS
     if not hivePos then
-        log("Honey", "Позиция своего улья не найдена, пробую обновить...")
-        slot = findAssignedHiveSlot()
-        prompt, promptPos = findMyHivePromptAndPos()
-        hivePos = (slot and slot.pos) or promptPos or cachedHivePos or _G.BSS_CLAIMED_HIVE_POS
+        local slot = findAssignedHiveSlot()
+        if slot and slot.pos then hivePos = slot.pos end
     end
-
-    -- Если точная позиция стойки еще не подгрузилась из-за дистанции, летим к хабу ульев (HivePlatforms)
+    if not hivePos then
+        local p, pPos = findMyHivePromptAndPos()
+        if pPos then hivePos = pPos end
+    end
+    if not hivePos then
+        local pads = findYellowHivePads()
+        if #pads > 0 then hivePos = pads[1].pos end
+    end
     if not hivePos then
         local records = getHivePlatformRecords()
-        if records and #records > 0 then
-            hivePos = records[1].pos
-            log("Honey", "Лечу к зоне ульев для обнаружения точной стойки...")
+        if #records > 0 then hivePos = records[1].pos end
+    end
+    if not hivePos then
+        local hp = Workspace:FindFirstChild("HivePlatforms") or Workspace:FindFirstChild("Honeycombs")
+        if hp then
+            local okP, p = pcall(function() return hp:GetPivot().Position end)
+            if okP and p then hivePos = Vector3.new(p.X, 3.5, p.Z) end
         end
     end
-
     if not hivePos then
-        log("Honey", "Позиция зоны ульев не определена!")
-        return false
+        -- Статичные координаты зоны ульев в Bee Swarm Simulator
+        hivePos = Vector3.new(-3.5, 3.5, 305)
     end
 
     log("Honey", "Рюкзак полон! Лечу к улью на разгрузку...")
     -- Подлетаем прямо к платформе улья
     moveRootToPosition(root, hivePos + Vector3.new(0, 3.5, 0), 10)
 
-    -- По прилету перепроверяем точный слот, если ранее летели к общей зоне
+    -- По прилету перепроверяем точный слот (теперь все объекты и промпты гарантированно подгружены!)
     local updatedSlot = findAssignedHiveSlot()
     if updatedSlot and updatedSlot.pos then
         hivePos = updatedSlot.pos
-        slot = updatedSlot
+        cachedHiveSlot = updatedSlot
+        cachedHivePos = updatedSlot.pos
+        _G.BSS_CLAIMED_HIVE_POS = updatedSlot.pos
     end
 
     -- Отключаем ноклип и встаем ровно на платформу
@@ -4143,15 +4138,9 @@ function Solo:Start()
                     tokenCollectorBusy = false
                     patrolTarget = nil
                     while isBackpackFull() and alive() do
-                        if not hasOwnHive() then
-                            s.currentStatus = "Рюкзак полон — занимаю свободный улей..."
-                            ensureHiveClaimed()
-                            task.wait(1)
-                        else
-                            s.currentStatus = "Рюкзак полный — делаю Honey на улье..."
-                            makeHoney()
-                            task.wait(1)
-                        end
+                        s.currentStatus = "Рюкзак полный — делаю Honey на улье..."
+                        makeHoney()
+                        task.wait(0.5)
                     end
                 end
 
@@ -4183,15 +4172,9 @@ function Solo:Start()
                                 tokenCollectorBusy = false
                                 patrolTarget = nil
                                 while isBackpackFull() and alive() do
-                                    if not hasOwnHive() then
-                                        s.currentStatus = "Рюкзак полон — занимаю свободный улей..."
-                                        ensureHiveClaimed()
-                                        task.wait(1)
-                                    else
-                                        s.currentStatus = "Рюкзак полный — делаю Honey на улье..."
-                                        makeHoney()
-                                        task.wait(1)
-                                    end
+                                    s.currentStatus = "Рюкзак полный — делаю Honey на улье..."
+                                    makeHoney()
+                                    task.wait(0.5)
                                 end
                                 if not alive() or not isSproutAlive(sprout, sproutAnchor) then break end
                                 s.currentStatus = "Возвращаюсь к ростку"
@@ -4214,15 +4197,9 @@ function Solo:Start()
                                 tokenCollectorBusy = false
                                 patrolTarget = nil
                                 while isBackpackFull() and alive() do
-                                    if not hasOwnHive() then
-                                        s.currentStatus = "Рюкзак полон — занимаю свободный улей..."
-                                        ensureHiveClaimed()
-                                        task.wait(1)
-                                    else
-                                        s.currentStatus = "Рюкзак полный — делаю Honey"
-                                        makeHoney()
-                                        task.wait(1)
-                                    end
+                                    s.currentStatus = "Рюкзак полный — делаю Honey"
+                                    makeHoney()
+                                    task.wait(0.5)
                                 end
                             end
                             if alive() and not isBackpackFull() then
@@ -4240,15 +4217,9 @@ function Solo:Start()
                         tokenCollectorBusy = false
                         patrolTarget = nil
                         while isBackpackFull() and alive() do
-                            if not hasOwnHive() then
-                                s.currentStatus = "Рюкзак полон — занимаю свободный улей..."
-                                ensureHiveClaimed()
-                                task.wait(1)
-                            else
-                                s.currentStatus = "Рюкзак полный — делаю Honey перед переходом"
-                                makeHoney()
-                                task.wait(1)
-                            end
+                            s.currentStatus = "Рюкзак полный — делаю Honey перед переходом"
+                            makeHoney()
+                            task.wait(0.5)
                         end
                     end
 
@@ -4484,7 +4455,7 @@ new("TextLabel", {
 })
 new("TextLabel", {
     Size = UDim2.new(0, 220, 0, 25), Position = UDim2.new(0, 58, 0, 10),
-    BackgroundTransparency = 1, Text = "BSS Hopper v1.3.52",
+    BackgroundTransparency = 1, Text = "BSS Hopper v1.3.54",
     TextColor3 = C.text, Font = Enum.Font.GothamBold, TextSize = 22,
     TextXAlignment = Enum.TextXAlignment.Left, Parent = head,
 })
