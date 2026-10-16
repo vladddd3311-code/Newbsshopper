@@ -1961,9 +1961,43 @@ local function findYellowHivePads()
     return results
 end
 
--- Кэш назначенного улья (сохраняется на всё время пребывания на текущем сервере)
+-- Кэш назначенного улья (сохраняется на всё время пребывания на текущем сервере + файл)
 local cachedHiveSlot = nil
 local cachedHivePos = nil
+
+local function saveMyHivePos(pos)
+    if not pos or typeof(pos) ~= "Vector3" then return end
+    cachedHivePos = pos
+    _G.BSS_CLAIMED_HIVE_POS = pos
+    pcall(function()
+        if writefile then
+            writefile("bss_my_hive.txt", string.format("%f,%f,%f", pos.X, pos.Y, pos.Z))
+        end
+    end)
+    log("Улей", string.format("Точка улья надежно сохранена: %.1f, %.1f, %.1f", pos.X, pos.Y, pos.Z))
+end
+
+local function loadSavedHivePos()
+    if cachedHivePos and typeof(cachedHivePos) == "Vector3" then return cachedHivePos end
+    if _G.BSS_CLAIMED_HIVE_POS and typeof(_G.BSS_CLAIMED_HIVE_POS) == "Vector3" then
+        cachedHivePos = _G.BSS_CLAIMED_HIVE_POS
+        return cachedHivePos
+    end
+    pcall(function()
+        if isfile and isfile("bss_my_hive.txt") then
+            local txt = readfile("bss_my_hive.txt")
+            local x, y, z = string.match(txt, "([^,]+),([^,]+),([^,]+)")
+            if x and y and z then
+                local v = Vector3.new(tonumber(x), tonumber(y), tonumber(z))
+                if v and v.Magnitude > 0 then
+                    cachedHivePos = v
+                    _G.BSS_CLAIMED_HIVE_POS = v
+                end
+            end
+        end
+    end)
+    return cachedHivePos
+end
 
 -- Прямой поиск промпта Make Honey своего улья в Workspace
 local function findMyHivePromptAndPos()
@@ -2231,15 +2265,15 @@ local function claimHive()
     local root = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
     local hum = player.Character and player.Character:FindFirstChildOfClass("Humanoid")
     if not root or not hum or hum.Health <= 0 then return false end
-    if cachedHivePos then
+    local saved = loadSavedHivePos()
+    if saved then
         log("Улей", "Свой улей уже сохранен")
         return true
     end
     local assigned = findAssignedHiveSlot()
     if assigned then
         cachedHiveSlot = assigned
-        cachedHivePos = assigned.pos
-        _G.BSS_CLAIMED_HIVE_POS = assigned.pos
+        saveMyHivePos(assigned.pos)
         log("Улей", "Свой улей уже назначен")
         return true
     end
@@ -2288,6 +2322,7 @@ local function claimHive()
 
         log("Улей", "Встаю на платформу улья: " .. tostring(slot.model and slot.model.Name or "Pad"))
         local standPos = slot.pos + Vector3.new(0, 3.2, 0)
+        saveMyHivePos(slot.pos) -- Запоминаем позицию сразу при попытке занять!
 
         moveRootToPosition(root, standPos, 4)
         task.wait(0.15)
@@ -2319,8 +2354,7 @@ local function claimHive()
             if found then
                 log("Улей", "Улей успешно занят!")
                 cachedHiveSlot = found
-                cachedHivePos = found.pos
-                _G.BSS_CLAIMED_HIVE_POS = found.pos
+                saveMyHivePos(found.pos)
                 return true
             end
 
@@ -2358,21 +2392,21 @@ local function claimHive()
             task.wait(0.3)
         end
 
+        saveMyHivePos(slot.pos)
         local foundAfter = findAssignedHiveSlot()
         if foundAfter then
             log("Улей", "Улей успешно занят!")
             cachedHiveSlot = foundAfter
-            cachedHivePos = foundAfter.pos
-            _G.BSS_CLAIMED_HIVE_POS = foundAfter.pos
+            saveMyHivePos(foundAfter.pos)
             return true
         end
+        return true
     end
 
     local finalCheck = findAssignedHiveSlot()
     if finalCheck then
         cachedHiveSlot = finalCheck
-        cachedHivePos = finalCheck.pos
-        _G.BSS_CLAIMED_HIVE_POS = finalCheck.pos
+        saveMyHivePos(finalCheck.pos)
         return true
     end
     return false
@@ -2576,14 +2610,14 @@ local function makeHoney()
     patrolTarget = nil
 
     -- Определяем позицию улья (или зоны ульев) без блокирующих проверок
-    local hivePos = cachedHivePos or _G.BSS_CLAIMED_HIVE_POS
+    local hivePos = loadSavedHivePos()
     if not hivePos then
         local slot = findAssignedHiveSlot()
-        if slot and slot.pos then hivePos = slot.pos end
+        if slot and slot.pos then hivePos = slot.pos saveMyHivePos(slot.pos) end
     end
     if not hivePos then
         local p, pPos = findMyHivePromptAndPos()
-        if pPos then hivePos = pPos end
+        if pPos then hivePos = pPos saveMyHivePos(pPos) end
     end
     if not hivePos then
         local pads = findYellowHivePads()
@@ -2605,7 +2639,7 @@ local function makeHoney()
         hivePos = Vector3.new(-3.5, 3.5, 305)
     end
 
-    log("Honey", "Рюкзак полон! Лечу к улью на разгрузку...")
+    log("Honey", string.format("Рюкзак полон! Лечу к улью (%.1f, %.1f, %.1f)...", hivePos.X, hivePos.Y, hivePos.Z))
     -- Подлетаем прямо к платформе улья
     moveRootToPosition(root, hivePos + Vector3.new(0, 3.5, 0), 10)
 
@@ -2614,8 +2648,7 @@ local function makeHoney()
     if updatedSlot and updatedSlot.pos then
         hivePos = updatedSlot.pos
         cachedHiveSlot = updatedSlot
-        cachedHivePos = updatedSlot.pos
-        _G.BSS_CLAIMED_HIVE_POS = updatedSlot.pos
+        saveMyHivePos(updatedSlot.pos)
     end
 
     -- Отключаем ноклип и встаем ровно на платформу
@@ -4455,7 +4488,7 @@ new("TextLabel", {
 })
 new("TextLabel", {
     Size = UDim2.new(0, 220, 0, 25), Position = UDim2.new(0, 58, 0, 10),
-    BackgroundTransparency = 1, Text = "BSS Hopper v1.3.54",
+    BackgroundTransparency = 1, Text = "BSS Hopper v1.3.55",
     TextColor3 = C.text, Font = Enum.Font.GothamBold, TextSize = 22,
     TextXAlignment = Enum.TextXAlignment.Left, Parent = head,
 })
