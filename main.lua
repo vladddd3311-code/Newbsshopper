@@ -315,9 +315,38 @@ local CONFIG = {
     PUFF_MIN_LEVEL = 1,
     PUFF_MAX_LEVEL = 20,
     PUFF_AUTO_BOOST_EPIC = true,
+    PUFF_SELECTED_BOOSTS = {
+        ["Glitter"] = true,
+        ["Red Extract"] = true,
+        ["Blue Extract"] = true,
+        ["Oil"] = true,
+        ["Enzymes"] = true,
+        ["Glue"] = true,
+        ["Tropical Drink"] = true,
+        ["Purple Potion"] = true,
+        ["Super Smoothie"] = true,
+    },
     CHECK_METEORS = true,
     CHECK_WINDY = true,
     AUTO_HARVEST_PLANTERS = true,
+    SHOW_PLANTER_HUD = true,
+    PLANTER_HUD_COLLAPSED = false,
+    PLANTERS_CONFIG = {
+        ["Paper Planter"] = { enabled = false, field = "Sunflower Field", percent = 100 },
+        ["Plastic Planter"] = { enabled = false, field = "Dandelion Field", percent = 100 },
+        ["Candy Planter"] = { enabled = true, field = "Stump Field", percent = 100 },
+        ["Tacky Planter"] = { enabled = true, field = "Dandelion Field", percent = 100 },
+        ["Pesticide Planter"] = { enabled = true, field = "Spider Field", percent = 100 },
+        ["Red Clay Planter"] = { enabled = false, field = "Strawberry Field", percent = 100 },
+        ["Blue Clay Planter"] = { enabled = false, field = "Pine Tree Forest", percent = 100 },
+        ["Petal Planter"] = { enabled = false, field = "Coconut Field", percent = 100 },
+        ["Hydroponic Planter"] = { enabled = false, field = "Pine Tree Forest", percent = 100 },
+        ["Heat-Treated Planter"] = { enabled = false, field = "Pepper Patch", percent = 100 },
+        ["Ticket Planter"] = { enabled = false, field = "Clover Field", percent = 100 },
+        ["Sticker Planter"] = { enabled = false, field = "Dandelion Field", percent = 100 },
+        ["Festive Planter"] = { enabled = false, field = "Mountain Top Field", percent = 100 },
+        ["The Planter of Plenty"] = { enabled = false, field = "Pine Tree Forest", percent = 100 },
+    },
     DISCORD_WEBHOOK_URL = "",
     TELEGRAM_BOT_TOKEN = "",
     TELEGRAM_CHAT_ID = "",
@@ -445,8 +474,10 @@ local SAVED_KEYS = {
     "TOKEN_SCAN_INTERVAL","TOKEN_PATROL_TIME","FARM_REGION","ANTI_LAG","SUPER_OPTIMIZE","AVOID_FRIENDS","SPRINKLER_KEYWORD","DIG_TOOL_KEYWORD",
     "ENABLE_AUTO_SPRINKLER","SPRINKLER_COUNT",
     "ENABLE_AUTO_DIG","EMPTY_SLOT_KEYWORD","MY_HIVE_KEYWORD","CLAIM_TIMEOUT",
-    "CLAIM_APPROACH","CLAIM_PROMPT_WAIT","ENABLE_BYPASS","BYPASS_RETRY",
     "BURST_LOOT_ENABLED","BURST_LOOT_TIME","PREFER_LOW_PLAYERS","MAX_PLAYERS","MIN_PLAYERS","TOKEN_PRIORITIES",
+    "CHECK_METEORS","CHECK_WINDY","AUTO_HARVEST_PLANTERS","SHOW_PLANTER_HUD","PLANTER_HUD_COLLAPSED",
+    "PLANTERS_CONFIG","PUFF_AUTO_BOOST_EPIC","PUFF_SELECTED_BOOSTS","PUFF_MIN_LEVEL","PUFF_MAX_LEVEL",
+    "DISCORD_WEBHOOK_URL","TELEGRAM_BOT_TOKEN","TELEGRAM_CHAT_ID",
 }
 
 function applySavedData(data, source)
@@ -1096,8 +1127,8 @@ function moveRootToPosition(root, destination, maxDuration)
         return true
     end
 
-    local speed = 100 -- Статичная скорость полета: 100 studs/s
-    local duration = math.clamp(distance / speed, 0.25, maxDuration or 10)
+    local speed = tonumber(CONFIG.FLY_SPEED) or 55
+    local duration = math.clamp(distance / speed, 0.25, maxDuration or 12)
     local direction = offset.Unit
     local targetCFrame = CFrame.new(destination, destination + direction)
     local started = os.clock()
@@ -1528,15 +1559,18 @@ function autoUseBoostItems()
     local act = ev and ev:FindFirstChild("PlayerActivesCommand")
     if not act then return end
 
+    local selected = CONFIG.PUFF_SELECTED_BOOSTS or {}
     local now = os.clock()
     for _, item in ipairs(BOOST_ITEM_NAMES) do
-        if not lastBoostUsedAt[item] or (now - lastBoostUsedAt[item] > 70) then
-            pcall(function()
-                act:FireServer({ Name = item })
-            end)
-            lastBoostUsedAt[item] = now
-            log("Бусты", "⚡ Использован бафф: " .. tostring(item))
-            task.wait(0.12)
+        if selected[item] ~= false then
+            if not lastBoostUsedAt[item] or (now - lastBoostUsedAt[item] > 70) then
+                pcall(function()
+                    act:FireServer({ Name = item })
+                end)
+                lastBoostUsedAt[item] = now
+                log("Бусты", "⚡ Использован бафф: " .. tostring(item))
+                task.wait(0.12)
+            end
         end
     end
 end
@@ -1612,58 +1646,110 @@ end
 
 function fightWindyBee(windy)
     if not windy or not windy.Parent then return false end
-    log("Windy", "Найдена дикая Windy Bee! Взлетаю в облако...")
-    notifyAllWebhooks("Windy Bee!", "Обнаружена дикая Windy Bee! Начинаю атаку в облаке...", "00e5ff")
+    log("Windy", "Найдена дикая Windy Bee! Начинаю бой...")
+    notifyAllWebhooks("Windy Bee!", "Обнаружена дикая Windy Bee! Лечу на поле для боя...", "00e5ff")
     local started = os.clock()
-    setFlightNoclip(true)
 
-    while alive() and windy.Parent and os.clock() - started < 360 do
-        local root = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
-        local hum = player.Character and player.Character:FindFirstChildOfClass("Humanoid")
-        if not root or not hum or hum.Health <= 0 then task.wait(0.5); continue end
+    local initialPos = worldPos(windy)
+    if not initialPos then return false end
+    local fieldName, fieldZone = getFieldForPos(initialPos, 50)
+    local groundTarget = getGroundPos(initialPos)
 
-        local targetPos = worldPos(windy)
-        if not targetPos then break end
+    -- ПОДЛЕТАЕМ ТОЛЬКО 1 РАЗ к полю / к земле под Windy Bee!
+    local root = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
+    if root then
+        log("Windy", string.format("Подлетаю 1 раз на поле к Windy Bee (%s)...", tostring(fieldName or "Поле")))
+        moveRootToPosition(root, groundTarget, 6)
+        setFlightNoclip(false)
+    end
 
-        -- Интеллектуальный уворот от торнадо
-        local tornadoes = Workspace:FindFirstChild("Tornadoes") or Workspace:FindFirstChild("Happenings")
-        local dodgeOffset = Vector3.zero
+    local lastBeePos = initialPos
+    local lastMoveToCall = 0
+    local lastMoveToTarget = nil
+
+    -- ДАЛЬШЕ БЕГАЕМ ПО ПОЛЮ НА ЗЕМЛЕ: БЬЁМ ПЧЁЛУ И УВОРАЧИВАЕМСЯ ОТ ТОРНАДО!
+    while alive() and windy.Parent and (os.clock() - started < 360) do
+        local char = player.Character
+        local curRoot = char and char:FindFirstChild("HumanoidRootPart")
+        local hum = char and char:FindFirstChildOfClass("Humanoid")
+        if not curRoot or not hum or hum.Health <= 0 then task.wait(0.5); continue end
+
+        local beePos = worldPos(windy)
+        if not beePos then break end
+
+        -- Если Windy Bee перелетела на ДРУГОЕ поле (дистанция > 90 studs) - только тогда перелетаем!
+        if (beePos - lastBeePos).Magnitude > 90 then
+            log("Windy", "Windy Bee сменила поле! Перелетаю 1 раз на новое поле...")
+            lastBeePos = beePos
+            local newGround = getGroundPos(beePos)
+            moveRootToPosition(curRoot, newGround, 6)
+            setFlightNoclip(false)
+            task.wait(0.3)
+        end
+
+        applyWalkSpeed()
+        pcall(swingDigTool)
+
+        -- Сканируем торнадо для уворота на земле
+        local tornadoDodgeDir = nil
+        local tornadoes = Workspace:FindFirstChild("Tornadoes") or (Workspace:FindFirstChild("Happenings") and Workspace.Happenings:FindFirstChild("Tornadoes"))
         if tornadoes then
             for _, torn in ipairs(tornadoes:GetChildren()) do
                 if string.find(string.lower(torn.Name), "tornado", 1, true) then
                     local tpos = worldPos(torn)
-                    if tpos and (root.Position - tpos).Magnitude < 24 then
-                        dodgeOffset = (root.Position - tpos).Unit * 26
-                        log("Windy", "Уворот от торнадо Windy Bee!")
+                    if tpos and (curRoot.Position - tpos).Magnitude < 25 then
+                        local away = (curRoot.Position - tpos)
+                        tornadoDodgeDir = Vector3.new(away.X, 0, away.Z).Unit
                         break
                     end
                 end
             end
         end
 
-        -- Зависаем на облаке прямо у пчелы (+4.5 studs выше центра)
-        local goal = targetPos + Vector3.new(0, 4.5, 0) + dodgeOffset
-        moveRootToPosition(root, goal, 0.35)
+        local runTarget
+        if tornadoDodgeDir then
+            runTarget = curRoot.Position + tornadoDodgeDir * 28
+            log("Windy", "Уворот по земле от торнадо Windy Bee!")
+            hum.Jump = true
+        else
+            -- Бегаем вокруг проекции пчелы на землю (в радиусе 12 studs), чтобы пчёлы атаковали
+            local angle = (os.clock() * 2) % (math.pi * 2)
+            runTarget = Vector3.new(beePos.X + math.cos(angle) * 12, curRoot.Position.Y, beePos.Z + math.sin(angle) * 12)
+        end
 
-        pcall(swingDigTool)
+        if fieldZone then
+            local lp = fieldZone.CFrame:PointToObjectSpace(runTarget)
+            local half = fieldZone.Size * 0.5
+            local safeX = math.clamp(lp.X, -half.X + 4, half.X - 4)
+            local safeZ = math.clamp(lp.Z, -half.Z + 4, half.Z - 4)
+            local safeWorld = fieldZone.CFrame:PointToWorldSpace(Vector3.new(safeX, lp.Y, safeZ))
+            runTarget = Vector3.new(safeWorld.X, curRoot.Position.Y, safeWorld.Z)
+        end
 
-        -- Сбор падающих Cloud Vials и токенов
+        local now = os.clock()
+        if not lastMoveToTarget or (lastMoveToTarget - runTarget).Magnitude > 1.5 or (now - lastMoveToCall > 0.25) then
+            lastMoveToTarget = runTarget
+            lastMoveToCall = now
+            hum:MoveTo(runTarget)
+        end
+
+        -- Микро-сбор падающих Cloud Vials и токенов на земле
         collectTokensFor(1.2, function()
             return not alive() or not windy.Parent
-        end, targetPos)
+        end, beePos)
 
-        task.wait(0.08)
+        task.wait(0.05)
     end
-    setFlightNoclip(false)
 
-    log("Windy", "Windy Bee повержена или сменила поле! Сбор оставшихся Cloud Vials...")
-    collectTokensFor(8, function() return not alive() end, lastActiveTargetPos)
-    notifyAllWebhooks("Windy Bee залутана!", "Фаза Windy Bee завершена, собраны Cloud Vials и награды.", "00f5a0")
+    setFlightNoclip(false)
+    log("Windy", "Windy Bee повержена или исчезла! Сбор оставшихся Cloud Vials 8 секунд...")
+    collectTokensFor(8, function() return not alive() end, lastBeePos)
+    notifyAllWebhooks("Windy Bee залутана!", "Фаза Windy Bee завершена, собраны Cloud Vials и жетоны.", "00f5a0")
     return true
 end
 
 -- ══════════════════════════════════════════════════════════════════════
---  METEOR SHOWER (СБОР МЕТЕОРИТНОГО ДОЖДЯ)
+--  METEOR SHOWER (3 РАУНДА НА 3 ПОЛЯХ)
 -- ══════════════════════════════════════════════════════════════════════
 function findActiveMeteors()
     local meteorsFolder = Workspace:FindFirstChild("Meteors")
@@ -1675,53 +1761,315 @@ function findActiveMeteors()
         local m = h:FindFirstChild("Meteors") or h:FindFirstChild("MeteorShower")
         if m and #m:GetChildren() > 0 then return m end
     end
+    for _, child in ipairs(Workspace:GetChildren()) do
+        local cn = string.lower(child.Name)
+        if string.find(cn, "meteor", 1, true) or string.find(cn, "impact", 1, true) then
+            return child
+        end
+    end
     return nil
 end
 
-function lootMeteorShower(meteors)
-    log("Meteor", "Обнаружен Meteor Shower! Начинаю сбор падающего метеоритного лута...")
-    notifyAllWebhooks("Метеоритный дождь!", "На сервере идет Meteor Shower! Бот пылесосит метеоритные награды.", "ffaa00")
-    local started = os.clock()
-    while alive() and os.clock() - started < 50 do
-        if not findActiveMeteors() then break end
-        collectTokensFor(4, function()
-            return not alive() or not findActiveMeteors()
-        end)
-        task.wait(0.2)
+function getFieldPart(fieldName)
+    if not fieldName or fieldName == "" then return nil end
+    local zones = Workspace:FindFirstChild("FlowerZones")
+    if not zones then return nil end
+    local clean = string.lower(fieldName):gsub("%s*field%s*", ""):gsub("%s*patch%s*", ""):gsub("%s*forest%s*", "")
+    for _, z in ipairs(zones:GetChildren()) do
+        local zn = string.lower(z.Name)
+        if zn == string.lower(fieldName) or string.find(zn, clean, 1, true) then
+            return z
+        end
     end
-    log("Meteor", "Метеоритный дождь завершен, сбор 10 секунд оставшегося лута...")
+    return nil
+end
+
+function findMeteorFields()
+    local fieldsFound = {}
+    local seen = {}
+    local function checkPos(pos)
+        if not pos then return end
+        local fName = getFieldForPos(pos, 40)
+        if fName and not seen[fName] then
+            seen[fName] = true
+            table.insert(fieldsFound, fName)
+        end
+    end
+
+    local mFolder = Workspace:FindFirstChild("Meteors") or (Workspace:FindFirstChild("Happenings") and Workspace.Happenings:FindFirstChild("Meteors"))
+    if mFolder then
+        for _, m in ipairs(mFolder:GetChildren()) do
+            checkPos(worldPos(m))
+        end
+    end
+    for _, child in ipairs(Workspace:GetChildren()) do
+        local cn = string.lower(child.Name)
+        if string.find(cn, "meteor", 1, true) or string.find(cn, "impact", 1, true) then
+            checkPos(worldPos(child))
+        end
+    end
+    return fieldsFound
+end
+
+function lootMeteorShower(meteors)
+    log("Meteor", "☄️ Обнаружен Meteor Shower (3 раунда на 3 полях)! Начинаю целевой сбор...")
+    notifyAllWebhooks("Метеоритный дождь!", "На сервере идет Meteor Shower (3 раунда на 3 полях)! Бот облетает поля и собирает все награды.", "ffaa00")
+    local showerStart = os.clock()
+    local roundsDone = 0
+
+    while alive() and (os.clock() - showerStart < 140) and (roundsDone < 3) do
+        local activeFields = findMeteorFields()
+        if #activeFields == 0 then
+            task.wait(2.5)
+            activeFields = findMeteorFields()
+            if #activeFields == 0 then
+                break
+            end
+        end
+
+        roundsDone = roundsDone + 1
+        log("Meteor", string.format("☄️ Раунд %d/3! Метеоры падают на полях: %s", roundsDone, table.concat(activeFields, ", ")))
+
+        for idx, fName in ipairs(activeFields) do
+            if idx > 3 then break end
+            local zPart = getFieldPart(fName)
+            local root = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
+            if zPart and root and alive() then
+                local safeGround = getGroundPos(zPart.Position)
+                log("Meteor", string.format("Перелет на метеоритное поле [%d/3]: %s...", idx, fName))
+                moveRootToPosition(root, safeGround, 3.5)
+                collectTokensFor(7, function() return not alive() end, safeGround)
+            end
+        end
+
+        task.wait(1.5)
+    end
+
+    log("Meteor", "Все 3 раунда метеоритного дождя завершены! Финальный сбор токенов 10 секунд...")
     collectTokensFor(10, function() return not alive() end)
+    notifyAllWebhooks("Метеориты собраны!", "Все 3 раунда метеоритного дождя успешно залутаны!", "00f5a0")
     return true
 end
 
 -- ══════════════════════════════════════════════════════════════════════
---  АВТО-СБОР СПЕЛЫХ ПЛАНТАТОРОВ (PLANTERS)
+--  ПЛАНТАТОРЫ (14 ТИПОВ: СБОР ПО % И АВТО-ПОСАДКА НА ПОЛЕ)
 -- ══════════════════════════════════════════════════════════════════════
-function harvestMaturePlanters()
-    if CONFIG.AUTO_HARVEST_PLANTERS == false then return end
-    local plantersFolder = Workspace:FindFirstChild("Planters") or (Workspace:FindFirstChild("Core") and Workspace.Core:FindFirstChild("Planters"))
-    if not plantersFolder then return end
+local ALL_PLANTER_TYPES = {
+    "Paper Planter",
+    "Plastic Planter",
+    "Candy Planter",
+    "Tacky Planter",
+    "Pesticide Planter",
+    "Red Clay Planter",
+    "Blue Clay Planter",
+    "Petal Planter",
+    "Hydroponic Planter",
+    "Heat-Treated Planter",
+    "Ticket Planter",
+    "Sticker Planter",
+    "Festive Planter",
+    "The Planter of Plenty",
+}
 
+local ALL_BSS_FIELDS = {
+    "Sunflower Field", "Dandelion Field", "Mushroom Field", "Blue Flower Field",
+    "Clover Field", "Strawberry Field", "Spider Field", "Bamboo Field",
+    "Pineapple Patch", "Stump Field", "Cactus Field", "Pumpkin Patch",
+    "Pine Tree Forest", "Rose Field", "Mountain Top Field", "Coconut Field", "Pepper Patch"
+}
+
+function getPlanterType(model)
+    if not model then return "Unknown Planter" end
+    local raw = model:GetAttribute("Type") or model:GetAttribute("PlanterType") or model.Name
+    local low = string.lower(tostring(raw))
+    for _, pType in ipairs(ALL_PLANTER_TYPES) do
+        local pLow = string.lower(pType)
+        local short = pLow:gsub("%s*planter%s*", ""):gsub("the%s*", ""):gsub("%s*of%s*", "")
+        if string.find(low, short, 1, true) then
+            return pType
+        end
+    end
+    return model.Name
+end
+
+function getPlanterProgress(model)
+    if not model then return 0, "0%" end
+    local percent = nil
+    local timeLeftStr = nil
+
+    local attrPct = model:GetAttribute("Progress") or model:GetAttribute("Growth") or model:GetAttribute("Percent")
+    if type(attrPct) == "number" then
+        percent = (attrPct <= 1.05 and attrPct > 0) and (attrPct * 100) or attrPct
+    end
+    local attrTime = model:GetAttribute("TimeLeft") or model:GetAttribute("Remaining") or model:GetAttribute("Duration")
+    if attrTime then timeLeftStr = tostring(attrTime) end
+
+    for _, desc in ipairs(model:GetDescendants()) do
+        if desc:IsA("TextLabel") then
+            local txt = desc.Text or ""
+            local pMatch = string.match(txt, "(%d+%.?%d*)%%")
+            if pMatch and not percent then
+                percent = tonumber(pMatch)
+            end
+            if string.find(txt, "left", 1, true) or string.find(txt, ":", 1, true) then
+                timeLeftStr = txt
+            end
+            local low = string.lower(txt)
+            if string.find(low, "ready", 1, true) or string.find(low, "harvest", 1, true) or string.find(low, "100%%", 1, true) then
+                percent = 100
+                timeLeftStr = "0s left"
+            end
+        elseif desc:IsA("Frame") and (desc.Name == "Bar" or desc.Name == "Progress" or desc.Name == "Fill") then
+            if desc.Size.X.Scale > 0 and desc.Size.X.Scale <= 1 then
+                if not percent then percent = desc.Size.X.Scale * 100 end
+            end
+        end
+    end
+
+    percent = percent or 0
+    local statusStr
+    if timeLeftStr and timeLeftStr ~= "" then
+        statusStr = timeLeftStr
+    else
+        statusStr = string.format("%.1f%%", percent)
+    end
+    return percent, statusStr
+end
+
+function findMyActivePlanters()
+    local myPlanters = {}
+    local plantersFolder = Workspace:FindFirstChild("Planters") 
+        or (Workspace:FindFirstChild("Core") and Workspace.Core:FindFirstChild("Planters"))
+        or (Workspace:FindFirstChild("Happenings") and Workspace.Happenings:FindFirstChild("Planters"))
+    if not plantersFolder then return myPlanters end
+
+    local myName = string.lower(player.Name)
+    local myId = tostring(player.UserId)
+
+    for _, pModel in ipairs(plantersFolder:GetChildren()) do
+        if pModel:IsA("Model") or pModel:IsA("Folder") or pModel:IsA("BasePart") then
+            local isMine = false
+            local ownerAttr = pModel:GetAttribute("Owner") or pModel:GetAttribute("UserId") or pModel:GetAttribute("Player")
+            if ownerAttr and (string.lower(tostring(ownerAttr)) == myName or tostring(ownerAttr) == myId) then
+                isMine = true
+            end
+            if not isMine then
+                local oVal = pModel:FindFirstChild("Owner") or pModel:FindFirstChild("Player") or pModel:FindFirstChild("PlayerRef")
+                if oVal and (oVal.Value == player or string.lower(tostring(oVal.Value)) == myName or tostring(oVal.Value) == myId) then
+                    isMine = true
+                end
+            end
+            if not isMine then
+                for _, desc in ipairs(pModel:GetDescendants()) do
+                    if desc:IsA("TextLabel") and string.find(string.lower(desc.Text or ""), myName, 1, true) then
+                        isMine = true
+                        break
+                    end
+                end
+            end
+            if not isMine and #Players:GetPlayers() <= 1 then
+                isMine = true
+            end
+
+            if isMine then
+                local pType = getPlanterType(pModel)
+                local percent, statusStr = getPlanterProgress(pModel)
+                local fieldName = detectField(pModel) or "Unknown Field"
+                local ready = percent >= 100 or string.find(string.lower(statusStr), "0s", 1, true) or string.find(string.lower(statusStr), "ready", 1, true)
+                table.insert(myPlanters, {
+                    type = pType,
+                    model = pModel,
+                    field = fieldName,
+                    percent = percent,
+                    statusStr = statusStr,
+                    ready = ready,
+                })
+            end
+        end
+    end
+    return myPlanters
+end
+
+function managePlanters()
+    if CONFIG.AUTO_HARVEST_PLANTERS == false then return end
     local rep = game:GetService("ReplicatedStorage")
     local pCmd = rep:FindFirstChild("Events") and rep.Events:FindFirstChild("PlanterCommand")
+    local repPkg = rep:FindFirstChild("Events") and rep.Events:FindFirstChild("PlanterPackage")
+    local activePlanters = findMyActivePlanters()
+    local activeTypes = {}
 
-    for _, planter in ipairs(plantersFolder:GetChildren()) do
-        local isMature = false
-        pcall(function()
-            local text = string.lower(puffTextOf(planter))
-            if string.find(text, "100%%", 1, true) or string.find(text, "ready", 1, true) or string.find(text, "harvest", 1, true) then
-                isMature = true
+    -- 1. Сбор созревших плантаторов (по проценту или готовности)
+    for _, info in ipairs(activePlanters) do
+        activeTypes[info.type] = true
+        local pCfg = CONFIG.PLANTERS_CONFIG and CONFIG.PLANTERS_CONFIG[info.type]
+        local targetPct = (pCfg and tonumber(pCfg.percent)) or 100
+        local shouldHarvest = (info.percent >= targetPct) or info.ready
+
+        if shouldHarvest then
+            log("Плантатор", string.format("🪴 Плантатор %s на поле %s достиг %.1f%% (порог %d%%)! Собираю урожай...", info.type, info.field, info.percent, targetPct))
+            notifyAllWebhooks("Сбор плантатора!", string.format("Плантатор %s на поле %s достиг %.1f%% и был собран!", info.type, info.field, info.percent), "00f5a0")
+
+            local root = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
+            local pPos = worldPos(info.model)
+            if root and pPos then
+                moveRootToPosition(root, getGroundPos(pPos), 3.5)
             end
-        end)
-        if isMature and pCmd then
-            log("Плантатор", "Созрел плантатор " .. tostring(planter.Name) .. "! Собираю урожай...")
-            pcall(function()
-                pCmd:FireServer({ Type = "Harvest", Planter = planter })
-            end)
-            task.wait(0.25)
+
+            if pCmd then
+                pcall(function()
+                    pCmd:FireServer({ Type = "Harvest", Planter = info.model })
+                    pCmd:FireServer({ Type = "Harvest", PlanterBox = info.model })
+                end)
+            end
+            if repPkg then
+                pcall(function() repPkg:FireServer({ Type = "Harvest", Planter = info.model }) end)
+            end
+            for _, prompt in ipairs(info.model:GetDescendants()) do
+                if prompt:IsA("ProximityPrompt") then
+                    pcall(fireproximityprompt, prompt)
+                end
+            end
+
+            collectTokensFor(6, function() return not alive() end, pPos)
+            activeTypes[info.type] = false
+            task.wait(1)
+        end
+    end
+
+    -- 2. Авто-посадка свободных настроенных плантаторов (Re-plant)
+    if CONFIG.PLANTERS_CONFIG then
+        for pType, pCfg in pairs(CONFIG.PLANTERS_CONFIG) do
+            if pCfg.enabled and not activeTypes[pType] and pCfg.field and pCfg.field ~= "" then
+                local fieldPart = getFieldPart(pCfg.field)
+                local root = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
+                if fieldPart and root and alive() then
+                    local targetPos = getGroundPos(fieldPart.Position)
+                    log("Плантатор", string.format("🌱 Сажаю %s на поле %s...", pType, pCfg.field))
+                    moveRootToPosition(root, targetPos, 4)
+                    task.wait(0.5)
+
+                    if pCmd then
+                        pcall(function()
+                            pCmd:FireServer({ Type = "Plant", Planter = pType, Field = pCfg.field })
+                            pCmd:FireServer({ Type = "Plant", Name = pType, Field = pCfg.field })
+                        end)
+                    end
+                    if repPkg then
+                        pcall(function()
+                            repPkg:FireServer({ Type = "Plant", PlanterType = pType, Field = pCfg.field })
+                        end)
+                    end
+                    local actCmd = rep:FindFirstChild("Events") and rep.Events:FindFirstChild("PlayerActivesCommand")
+                    if actCmd then
+                        pcall(function() actCmd:FireServer({ Name = pType }) end)
+                    end
+                    task.wait(1)
+                end
+            end
         end
     end
 end
+harvestMaturePlanters = managePlanters
 
 function findEligiblePuffshrooms()
     local results = {}
@@ -4289,9 +4637,11 @@ function swingDigTool()
     pcall(function()
         local vim = game:GetService("VirtualInputManager")
         if vim then
-            vim:SendMouseButtonEvent(0, 0, 0, true, game, 1)
-            task.wait(0.03)
-            vim:SendMouseButtonEvent(0, 0, 0, false, game, 1)
+            task.spawn(function()
+                vim:SendMouseButtonEvent(0, 0, 0, true, game, 1)
+                task.wait(0.02)
+                vim:SendMouseButtonEvent(0, 0, 0, false, game, 1)
+            end)
         end
     end)
 
@@ -4404,6 +4754,8 @@ collectTokensFor = function(maxSeconds, stopFn, fieldAnchor)
         local started = os.clock()
         patrolTarget, activeTokenObj = nil, nil
         lastPatrolPickAt = 0
+        local lastMoveToTarget = nil
+        local lastMoveToCall = 0
 
         -- Находим физическую зону текущего поля
         local anchorZone = getActiveFlowerZone(fieldAnchor)
@@ -4587,7 +4939,7 @@ collectTokensFor = function(maxSeconds, stopFn, fieldAnchor)
                 end
             end
 
-            -- Плавное человеческое перемещение без вибраций и покадрового сброса MoveTo
+            -- Плавное и безотказное перемещение через нативный MoveTo с защитой от тряски
             if patrolTarget and humanoid and root then
                 local currentPos = root.Position
                 local flatTarget = Vector3.new(patrolTarget.X, currentPos.Y, patrolTarget.Z)
@@ -4595,10 +4947,19 @@ collectTokensFor = function(maxSeconds, stopFn, fieldAnchor)
                 local dist = offset.Magnitude
 
                 if dist > 1.2 then
-                    local moveDir = offset.Unit
-                    humanoid:Move(moveDir, false)
+                    local now = os.clock()
+                    if not lastMoveToTarget or (lastMoveToTarget - patrolTarget).Magnitude > 1.2 or (now - lastMoveToCall > 0.28) then
+                        lastMoveToTarget = patrolTarget
+                        lastMoveToCall = now
+                        applyWalkSpeed()
+                        humanoid:MoveTo(patrolTarget)
+                    end
+                    -- Автоматический прыжок при застревании в клумбе/заборе
+                    if humanoid.MoveDirection.Magnitude < 0.05 and dist > 3.5 then
+                        humanoid.Jump = true
+                    end
                 else
-                    humanoid:Move(Vector3.zero, false)
+                    lastMoveToTarget = nil
                 end
             end
 
@@ -5908,6 +6269,126 @@ local hint = new("TextLabel", {
 
 trace("ScreenGui создан")
 
+-- ══════════════════════════════════════════════════════════════════════
+--  ON-SCREEN HUD: PLANTER TIMERS (ТОЧНО КАК НА СКРИНШОТЕ)
+-- ══════════════════════════════════════════════════════════════════════
+local planterHudFrame = new("Frame", {
+    Name = "PlanterTimersHUD",
+    Size = UDim2.new(0, 260, 0, 0),
+    AutomaticSize = Enum.AutomaticSize.Y,
+    Position = UDim2.new(1, -275, 0, 75),
+    BackgroundColor3 = Color3.fromRGB(18, 18, 22),
+    BorderSizePixel = 0, Active = true, Draggable = true,
+    Visible = (CONFIG.SHOW_PLANTER_HUD ~= false),
+    Parent = gui,
+})
+round(planterHudFrame, 8)
+stroke(planterHudFrame, Color3.fromRGB(48, 50, 62), 1)
+
+local planterHudHeader = new("Frame", {
+    Size = UDim2.new(1, 0, 0, 28),
+    BackgroundTransparency = 1,
+    Parent = planterHudFrame,
+})
+
+local planterHudTitle = new("TextLabel", {
+    Size = UDim2.new(1, -36, 1, 0),
+    Position = UDim2.new(0, 10, 0, 0),
+    BackgroundTransparency = 1,
+    Text = "Planter Timers",
+    Font = Enum.Font.GothamBold,
+    TextSize = 13,
+    TextColor3 = Color3.fromRGB(240, 240, 245),
+    TextXAlignment = Enum.TextXAlignment.Left,
+    Parent = planterHudHeader,
+})
+
+local planterHudArrow = new("TextButton", {
+    Size = UDim2.new(0, 26, 0, 26),
+    Position = UDim2.new(1, -28, 0, 1),
+    BackgroundTransparency = 1,
+    Text = CONFIG.PLANTER_HUD_COLLAPSED and "▲" or "▼",
+    Font = Enum.Font.GothamBold,
+    TextSize = 12,
+    TextColor3 = Color3.fromRGB(200, 200, 210),
+    Parent = planterHudHeader,
+})
+
+local planterHudContent = new("Frame", {
+    Size = UDim2.new(1, 0, 0, 0),
+    AutomaticSize = Enum.AutomaticSize.Y,
+    Position = UDim2.new(0, 0, 0, 28),
+    BackgroundTransparency = 1,
+    Visible = not CONFIG.PLANTER_HUD_COLLAPSED,
+    Parent = planterHudFrame,
+})
+new("UIListLayout", {
+    SortOrder = Enum.SortOrder.LayoutOrder,
+    Padding = UDim.new(0, 4),
+    Parent = planterHudContent,
+})
+new("UIPadding", {
+    PaddingTop = UDim.new(0, 2),
+    PaddingBottom = UDim.new(0, 8),
+    PaddingLeft = UDim.new(0, 10),
+    PaddingRight = UDim.new(0, 10),
+    Parent = planterHudContent,
+})
+
+planterHudArrow.MouseButton1Click:Connect(function()
+    CONFIG.PLANTER_HUD_COLLAPSED = not CONFIG.PLANTER_HUD_COLLAPSED
+    planterHudContent.Visible = not CONFIG.PLANTER_HUD_COLLAPSED
+    planterHudArrow.Text = CONFIG.PLANTER_HUD_COLLAPSED and "▲" or "▼"
+    saveNow()
+end)
+
+local function refreshPlanterHud(activeList)
+    if not planterHudContent then return end
+    planterHudContent:ClearAllChildren()
+    new("UIListLayout", {
+        SortOrder = Enum.SortOrder.LayoutOrder,
+        Padding = UDim.new(0, 4),
+        Parent = planterHudContent,
+    })
+    new("UIPadding", {
+        PaddingTop = UDim.new(0, 2),
+        PaddingBottom = UDim.new(0, 8),
+        PaddingLeft = UDim.new(0, 10),
+        PaddingRight = UDim.new(0, 10),
+        Parent = planterHudContent,
+    })
+
+    if not activeList or #activeList == 0 then
+        new("TextLabel", {
+            Size = UDim2.new(1, 0, 0, 18),
+            BackgroundTransparency = 1,
+            Text = "Нет активных плантаторов",
+            TextColor3 = Color3.fromRGB(140, 140, 150),
+            Font = Enum.Font.Gotham,
+            TextSize = 11,
+            TextXAlignment = Enum.TextXAlignment.Left,
+            Parent = planterHudContent,
+        })
+        return
+    end
+
+    for idx, info in ipairs(activeList) do
+        local isReady = info.ready or (info.percent >= 100) or string.find(string.lower(info.statusStr), "0s", 1, true)
+        local lineText = string.format("%s: %s (%s)", info.type, info.statusStr, info.field)
+        new("TextLabel", {
+            Size = UDim2.new(1, 0, 0, 18),
+            BackgroundTransparency = 1,
+            Text = lineText,
+            TextColor3 = isReady and Color3.fromRGB(80, 240, 120) or Color3.fromRGB(230, 230, 235),
+            Font = isReady and Enum.Font.GothamBold or Enum.Font.GothamMedium,
+            TextSize = 11,
+            TextXAlignment = Enum.TextXAlignment.Left,
+            LayoutOrder = idx,
+            Parent = planterHudContent,
+        })
+    end
+end
+
 local WIN_W, WIN_H = 880, 500
 local HEADER_H = 58
 local SIDEBAR_W = 154
@@ -5955,7 +6436,7 @@ new("TextLabel", {
 })
 new("TextLabel", {
     Size = UDim2.new(0, 220, 0, 25), Position = UDim2.new(0, 58, 0, 10),
-    BackgroundTransparency = 1, Text = "BSS Hopper v1.3.73",
+    BackgroundTransparency = 1, Text = "BSS Hopper v1.3.74",
     TextColor3 = C.text, Font = Enum.Font.GothamBold, TextSize = 22,
     TextXAlignment = Enum.TextXAlignment.Left, Parent = head,
 })
@@ -6089,6 +6570,7 @@ end
 makeTab("⌂", "Главная", "main")
 makeTab("🌱", "Спруты", "sprouts")
 makeTab("🍄", "Грибы", "puffshrooms")
+makeTab("🪴", "Плантаторы", "planters")
 makeTab("🌪️", "Windy & Meteors", "windy_meteors")
 makeTab("📡", "Вебхуки", "webhooks")
 makeTab("⚙", "Настройки", "settings")
@@ -6356,7 +6838,7 @@ end)
 makeToggle(PAGE_HOME, "Лутать грибы (Puffshrooms)", CONFIG.CHECK_PUFFSHROOMS, 3, function(v)
     CONFIG.CHECK_PUFFSHROOMS = v; saveNow()
 end)
-makeToggle(PAGE_HOME, "Охота на Windy Bee (в облаке)", CONFIG.CHECK_WINDY, 4, function(v)
+makeToggle(PAGE_HOME, "Охота на Windy Bee (бой на поле)", CONFIG.CHECK_WINDY, 4, function(v)
     CONFIG.CHECK_WINDY = v; saveNow()
 end)
 makeToggle(PAGE_HOME, "Лутать метеориты (Meteor Shower)", CONFIG.CHECK_METEORS, 5, function(v)
@@ -6365,7 +6847,7 @@ end)
 makeToggle(PAGE_HOME, "Лутать Vicious Bee", CONFIG.CHECK_VICIOUS, 6, function(v)
     CONFIG.CHECK_VICIOUS = v; saveNow()
 end)
-makeToggle(PAGE_HOME, "Авто-сбор плантаторов", CONFIG.AUTO_HARVEST_PLANTERS, 7, function(v)
+makeToggle(PAGE_HOME, "Авто-плантаторы (Сбор и Посадка)", CONFIG.AUTO_HARVEST_PLANTERS, 7, function(v)
     CONFIG.AUTO_HARVEST_PLANTERS = v; saveNow()
 end)
 -- Автокопание работает пассивно
@@ -6428,6 +6910,188 @@ makeBtn(PAGE_WEBHOOKS, "💾 Сохранить и проверить вебху
     notifyAllWebhooks("Тестовое уведомление!", "Вебхуки BSS Hopper успешно подключены и работают!", "00f5a0")
     log("Вебхуки", "Настройки сохранены! Отправлено тестовое уведомление.")
 end, C.accent2, 5)
+
+-- ══════════════════════════════════════════════════════════════════════
+--  ВКЛАДКА: 🪴 ПЛАНТАТОРЫ (14 ТИПОВ: СБОР ПО % И ПОСАДКА НА ПОЛЕ)
+-- ══════════════════════════════════════════════════════════════════════
+local PAGE_PLANTERS = new("Frame", {
+    Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y,
+    BackgroundTransparency = 1, Visible = false, Parent = content,
+})
+new("UIListLayout", { SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0, 8), Parent = PAGE_PLANTERS })
+
+section("🪴 УПРАВЛЕНИЕ ПЛАНТАТОРАМИ (14 ТИПОВ)", 1).Parent = PAGE_PLANTERS
+makeToggle(PAGE_PLANTERS, "Включить авто-плантаторы (Сбор и Посадка)", CONFIG.AUTO_HARVEST_PLANTERS ~= false, 2, function(v)
+    CONFIG.AUTO_HARVEST_PLANTERS = v; saveNow()
+end)
+makeToggle(PAGE_PLANTERS, "Показывать виджет 'Planter Timers' на экране", CONFIG.SHOW_PLANTER_HUD ~= false, 3, function(v)
+    CONFIG.SHOW_PLANTER_HUD = v
+    if planterHudFrame then planterHudFrame.Visible = v end
+    saveNow()
+end)
+
+section("📊 АКТИВНЫЕ ПЛАНТАТОРЫ НА КАРТЕ (ЖИВОЙ СТАТУС)", 4).Parent = PAGE_PLANTERS
+local livePlantersCard = new("Frame", {
+    Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y,
+    BackgroundColor3 = C.card, BorderSizePixel = 0, LayoutOrder = 5,
+    Parent = PAGE_PLANTERS,
+})
+round(livePlantersCard, 10)
+stroke(livePlantersCard)
+local livePlantersList = new("Frame", {
+    Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y,
+    BackgroundTransparency = 1, Parent = livePlantersCard,
+})
+new("UIListLayout", { SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0, 4), Parent = livePlantersList })
+new("UIPadding", { PaddingTop = UDim.new(0, 8), PaddingBottom = UDim.new(0, 8), PaddingLeft = UDim.new(0, 10), PaddingRight = UDim.new(0, 10), Parent = livePlantersList })
+
+local function updateLivePlantersGui(activeList)
+    if not livePlantersList then return end
+    livePlantersList:ClearAllChildren()
+    new("UIListLayout", { SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0, 4), Parent = livePlantersList })
+    new("UIPadding", { PaddingTop = UDim.new(0, 8), PaddingBottom = UDim.new(0, 8), PaddingLeft = UDim.new(0, 10), PaddingRight = UDim.new(0, 10), Parent = livePlantersList })
+
+    if not activeList or #activeList == 0 then
+        new("TextLabel", {
+            Size = UDim2.new(1, 0, 0, 20), BackgroundTransparency = 1,
+            Text = "Нет активных плантаторов на карте", TextColor3 = C.dim,
+            Font = Enum.Font.Gotham, TextSize = 11, TextXAlignment = Enum.TextXAlignment.Left,
+            Parent = livePlantersList,
+        })
+        return
+    end
+
+    for idx, info in ipairs(activeList) do
+        local isReady = info.ready or (info.percent >= 100) or string.find(string.lower(info.statusStr), "0s", 1, true)
+        local row = new("Frame", {
+            Size = UDim2.new(1, 0, 0, 24), BackgroundTransparency = 1,
+            LayoutOrder = idx, Parent = livePlantersList,
+        })
+        new("TextLabel", {
+            Size = UDim2.new(1, 0, 1, 0), BackgroundTransparency = 1,
+            Text = string.format("🪴 %s:  %s  ➔  %s", info.type, info.statusStr, info.field),
+            TextColor3 = isReady and Color3.fromRGB(80, 240, 120) or C.text,
+            Font = isReady and Enum.Font.GothamBold or Enum.Font.GothamMedium, TextSize = 11,
+            TextXAlignment = Enum.TextXAlignment.Left, Parent = row,
+        })
+    end
+end
+
+section("⚙️ НАСТРОЙКИ ПОСАДКИ И СБОРА (14 ПЛАНТАТОРОВ)", 6).Parent = PAGE_PLANTERS
+
+local planterInputFields = {}
+
+for pIdx, pName in ipairs(ALL_PLANTER_TYPES) do
+    if not CONFIG.PLANTERS_CONFIG then CONFIG.PLANTERS_CONFIG = {} end
+    if not CONFIG.PLANTERS_CONFIG[pName] then
+        CONFIG.PLANTERS_CONFIG[pName] = { enabled = false, field = "Sunflower Field", percent = 100 }
+    end
+    local cfg = CONFIG.PLANTERS_CONFIG[pName]
+
+    local pCard = new("Frame", {
+        Size = UDim2.new(1, 0, 0, 80), BackgroundColor3 = C.card,
+        BorderSizePixel = 0, LayoutOrder = 10 + pIdx, Parent = PAGE_PLANTERS,
+    })
+    round(pCard, 10)
+    stroke(pCard)
+
+    local pTopRow = new("Frame", {
+        Size = UDim2.new(1, 0, 0, 32), BackgroundTransparency = 1,
+        Parent = pCard,
+    })
+    new("TextLabel", {
+        Size = UDim2.new(1, -70, 1, 0), Position = UDim2.new(0, 12, 0, 0),
+        BackgroundTransparency = 1, Text = "🪴 " .. pName,
+        TextColor3 = C.accent, Font = Enum.Font.GothamBold, TextSize = 12,
+        TextXAlignment = Enum.TextXAlignment.Left, Parent = pTopRow,
+    })
+
+    local swBack = new("Frame", {
+        Size = UDim2.new(0, 44, 0, 22), Position = UDim2.new(1, -56, 0.5, -11),
+        BackgroundColor3 = cfg.enabled and C.accent or C.field, BorderSizePixel = 0,
+        Parent = pTopRow,
+    })
+    round(swBack, 11)
+    local swKnob = new("Frame", {
+        Size = UDim2.new(0, 18, 0, 18),
+        Position = cfg.enabled and UDim2.new(1, -20, 0.5, -9) or UDim2.new(0, 2, 0.5, -9),
+        BackgroundColor3 = Color3.fromRGB(255, 255, 255), BorderSizePixel = 0,
+        Parent = swBack,
+    })
+    round(swKnob, 9)
+    local swHit = new("TextButton", {
+        Size = UDim2.new(1, 0, 1, 0), BackgroundTransparency = 1, Text = "",
+        Parent = swBack,
+    })
+    swHit.MouseButton1Click:Connect(function()
+        cfg.enabled = not cfg.enabled
+        swBack.BackgroundColor3 = cfg.enabled and C.accent or C.field
+        swKnob.Position = cfg.enabled and UDim2.new(1, -20, 0.5, -9) or UDim2.new(0, 2, 0.5, -9)
+        saveNow()
+    end)
+
+    local pBottomRow = new("Frame", {
+        Size = UDim2.new(1, -24, 0, 38), Position = UDim2.new(0, 12, 0, 34),
+        BackgroundTransparency = 1, Parent = pCard,
+    })
+    new("UIListLayout", {
+        FillDirection = Enum.FillDirection.Horizontal,
+        Padding = UDim.new(0, 10), Parent = pBottomRow,
+    })
+
+    local fFieldBox = new("TextBox", {
+        Size = UDim2.new(0.65, -5, 1, 0), BackgroundColor3 = C.field,
+        Text = tostring(cfg.field or "Sunflower Field"),
+        TextColor3 = C.text, Font = Enum.Font.GothamMedium, TextSize = 11,
+        ClearTextOnFocus = false, BorderSizePixel = 0, Parent = pBottomRow,
+    })
+    round(fFieldBox, 6)
+    stroke(fFieldBox)
+    fFieldBox.FocusLost:Connect(function()
+        cfg.field = fFieldBox.Text
+        saveNow()
+    end)
+
+    local fPctBox = new("TextBox", {
+        Size = UDim2.new(0.35, -5, 1, 0), BackgroundColor3 = C.field,
+        Text = tostring(cfg.percent or 100),
+        PlaceholderText = "% сбора (1-100)",
+        TextColor3 = C.accent, Font = Enum.Font.GothamBold, TextSize = 11,
+        ClearTextOnFocus = false, BorderSizePixel = 0, Parent = pBottomRow,
+    })
+    round(fPctBox, 6)
+    stroke(fPctBox)
+    fPctBox.FocusLost:Connect(function()
+        local n = tonumber(fPctBox.Text)
+        if n then
+            cfg.percent = math.clamp(n, 1, 100)
+            fPctBox.Text = tostring(cfg.percent)
+        else
+            cfg.percent = 100
+            fPctBox.Text = "100"
+        end
+        saveNow()
+    end)
+
+    planterInputFields[pName] = { field = fFieldBox, pct = fPctBox, swBack = swBack, swKnob = swKnob }
+end
+
+makeBtn(PAGE_PLANTERS, "💾 Сохранить настройки плантаторов", function()
+    saveNow()
+    log("Плантаторы", "Настройки 14 плантаторов успешно сохранены!")
+end, C.accent2, 35)
+
+task.spawn(function()
+    while true do
+        if not alive() then return end
+        pcall(function()
+            local active = findMyActivePlanters()
+            refreshPlanterHud(active)
+            updateLivePlantersGui(active)
+        end)
+        task.wait(1.5)
+    end
+end)
 
 local PAGE_SPROUTS = new("Frame", {
     Size = UDim2.new(1, 0, 0, 0),
@@ -6974,6 +7638,54 @@ end
 if not PUFF_RARITY_PRIORITY[CONFIG.PUFF_MIN_RARITY] then CONFIG.PUFF_MIN_RARITY = "common" end
 paintPuffRarity()
 
+section("ДИАПАЗОН УРОВНЕЙ ГРИБОВ ДЛЯ ФАРМА", 6).Parent = PAGE_PUFF
+local puffLevelRow = new("Frame", {
+    Size = UDim2.new(1, 0, 0, 48), BackgroundTransparency = 1,
+    LayoutOrder = 7, Parent = PAGE_PUFF,
+})
+new("UIListLayout", {
+    FillDirection = Enum.FillDirection.Horizontal,
+    Padding = UDim.new(0, 10), Parent = puffLevelRow,
+})
+local fPuffMin = makeField(puffLevelRow, "ОТ УРОВНЯ (MIN)", CONFIG.PUFF_MIN_LEVEL or 1, "1", 1)
+fPuffMin.Parent.Size = UDim2.new(0.5, -5, 1, 0)
+fPuffMin.FocusLost:Connect(function()
+    CONFIG.PUFF_MIN_LEVEL = tonumber(fPuffMin.Text) or 1
+    saveNow()
+end)
+local fPuffMax = makeField(puffLevelRow, "ДО УРОВНЯ (MAX)", CONFIG.PUFF_MAX_LEVEL or 20, "20", 2)
+fPuffMax.Parent.Size = UDim2.new(0.5, -5, 1, 0)
+fPuffMax.FocusLost:Connect(function()
+    CONFIG.PUFF_MAX_LEVEL = tonumber(fPuffMax.Text) or 20
+    saveNow()
+end)
+
+section("⚡ ВЫБОР БУСТОВ ДЛЯ EPIC+ ГРИБОВ", 8).Parent = PAGE_PUFF
+makeToggle(PAGE_PUFF, "Использовать бусты при спавне Epic/Legendary/Mythic", CONFIG.PUFF_AUTO_BOOST_EPIC ~= false, 9, function(v)
+    CONFIG.PUFF_AUTO_BOOST_EPIC = v; saveNow()
+end)
+
+local boostDisplayNames = {
+    ["Glitter"] = "✨ Glitter",
+    ["Red Extract"] = "🔴 Red Extract",
+    ["Blue Extract"] = "🔵 Blue Extract",
+    ["Oil"] = "🛢️ Oil",
+    ["Enzymes"] = "🧪 Enzymes",
+    ["Glue"] = "🍯 Glue",
+    ["Tropical Drink"] = "🍹 Tropical Drink",
+    ["Purple Potion"] = "🟣 Purple Potion",
+    ["Super Smoothie"] = "🥤 Super Smoothie",
+}
+
+for bIndex, bName in ipairs(BOOST_ITEM_NAMES) do
+    local isChecked = (CONFIG.PUFF_SELECTED_BOOSTS and CONFIG.PUFF_SELECTED_BOOSTS[bName] ~= false)
+    makeToggle(PAGE_PUFF, boostDisplayNames[bName] or bName, isChecked, 10 + bIndex, function(v)
+        if not CONFIG.PUFF_SELECTED_BOOSTS then CONFIG.PUFF_SELECTED_BOOSTS = {} end
+        CONFIG.PUFF_SELECTED_BOOSTS[bName] = v
+        saveNow()
+    end)
+end
+
 -- ══════════════════════════════════════════════════════════════════════
 --  ПЕРЕКЛЮЧЕНИЕ РАЗДЕЛОВ
 -- ══════════════════════════════════════════════════════════════════════
@@ -7229,6 +7941,21 @@ syncGuiWithConfig = function()
         if fDisc and CONFIG.DISCORD_WEBHOOK_URL ~= nil then fDisc.Text = tostring(CONFIG.DISCORD_WEBHOOK_URL) end
         if fTgToken and CONFIG.TELEGRAM_BOT_TOKEN ~= nil then fTgToken.Text = tostring(CONFIG.TELEGRAM_BOT_TOKEN) end
         if fTgChat and CONFIG.TELEGRAM_CHAT_ID ~= nil then fTgChat.Text = tostring(CONFIG.TELEGRAM_CHAT_ID) end
+        if fPuffMin and CONFIG.PUFF_MIN_LEVEL ~= nil then fPuffMin.Text = tostring(CONFIG.PUFF_MIN_LEVEL) end
+        if fPuffMax and CONFIG.PUFF_MAX_LEVEL ~= nil then fPuffMax.Text = tostring(CONFIG.PUFF_MAX_LEVEL) end
+        if planterInputFields and CONFIG.PLANTERS_CONFIG then
+            for pName, pInputs in pairs(planterInputFields) do
+                local pCfg = CONFIG.PLANTERS_CONFIG[pName]
+                if pCfg then
+                    if pInputs.field then pInputs.field.Text = tostring(pCfg.field or "Sunflower Field") end
+                    if pInputs.pct then pInputs.pct.Text = tostring(pCfg.percent or 100) end
+                    if pInputs.swBack and pInputs.swKnob then
+                        pInputs.swBack.BackgroundColor3 = pCfg.enabled and C.accent or C.field
+                        pInputs.swKnob.Position = pCfg.enabled and UDim2.new(1, -20, 0.5, -9) or UDim2.new(0, 2, 0.5, -9)
+                    end
+                end
+            end
+        end
         if refreshConfigButtons then refreshConfigButtons() end
         if refreshBindsList then refreshBindsList() end
     end)
@@ -7243,6 +7970,7 @@ local pages = {
     puffshrooms = PAGE_PUFF,
     windy_meteors = PAGE_WINDY,
     webhooks = PAGE_WEBHOOKS,
+    planters = PAGE_PLANTERS,
 }
 
 local settingsOpen = false
