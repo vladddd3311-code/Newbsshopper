@@ -285,7 +285,7 @@ local CONFIG = {
 
     HOP_DELAY = 1.5, POLL_INTERVAL = 3, BROKEN_WAIT = 20,
     INITIAL_CHECK = 1, REPORT_DELAY = 2.5,
-    CONNECT_TIMEOUT = 20, MAX_ATTEMPTS = 3, FAILED_TTL = 180,
+    CONNECT_TIMEOUT = 12, MAX_ATTEMPTS = 3, FAILED_TTL = 600,
 
     DEBUG_SPROUT = true, CHECK_VICIOUS = true, CHECK_SPROUTS = true,
     AUTO_START = true,
@@ -316,7 +316,7 @@ local CONFIG = {
     BURST_LOOT_TIME = 7,
     PREFER_LOW_PLAYERS = true,
     MAX_PLAYERS = 5,
-    MIN_PLAYERS = 1,
+    MIN_PLAYERS = 2,
     TOKEN_PRIORITIES = {},
 }
 
@@ -832,20 +832,31 @@ function waitForGameReady(timeout)
     if alive() then task.wait(2.0) end
 end
 
+function waitForRespawn(timeout)
+    timeout = timeout or 8
+    local t0 = os.clock()
+    while alive() and (os.clock() - t0 < timeout) do
+        local c = player.Character
+        local h = c and c:FindFirstChildOfClass("Humanoid")
+        local r = c and c:FindFirstChild("HumanoidRootPart")
+        if c and h and r and h.Health > 0 then
+            return c, r, h
+        end
+        task.wait(0.2)
+    end
+    local c = player.Character
+    return c, c and c:FindFirstChild("HumanoidRootPart"), c and c:FindFirstChildOfClass("Humanoid")
+end
+
 function moveToSprout(sprout)
     if not sprout then return false end
-    local targetPos = worldPos(sprout)
+    local targetPos = worldPos(sprout) or lastActiveTargetPos
     if not targetPos then return false end
     lastActiveTargetPos = targetPos
-    local char = player.Character
-    local root = char and char:FindFirstChild("HumanoidRootPart")
-    local hum = char and char:FindFirstChildOfClass("Humanoid")
-    if not root or not hum or hum.Health <= 0 then
-        local newChar = player.Character or player.CharacterAdded:Wait()
-        root = newChar:WaitForChild("HumanoidRootPart", 6)
-        hum = newChar:WaitForChild("Humanoid", 6)
-        if not root or not hum then return false end
-    end
+
+    local char, root, hum = waitForRespawn(6)
+    if not root or not hum or hum.Health <= 0 then return false end
+
     local safeLanding = getGroundPos(targetPos)
     local ok = moveRootToPosition(root, safeLanding, 10)
     return ok or ((root.Position - safeLanding).Magnitude < 25)
@@ -1522,16 +1533,22 @@ function getCandidateServers()
     if not servers then return nil end
 
     local preferLow = CONFIG.PREFER_LOW_PLAYERS ~= false
-    local minP = tonumber(CONFIG.MIN_PLAYERS) or 1
-    local maxP = tonumber(CONFIG.MAX_PLAYERS) or 5
+    local minP = math.max(2, tonumber(CONFIG.MIN_PLAYERS) or 2)
+    local maxP = math.max(minP, tonumber(CONFIG.MAX_PLAYERS) or 5)
 
     local out = {}
     local fallback = {}
 
     for _, s in ipairs(servers) do
+        -- Защита от мертвых/зависших серверов:
+        -- 1. Серверы с 1 игроком часто зависшие призраки (ghost servers)
+        -- 2. Пинг должен быть реальным (< 280)
+        local ping = s.ping or 999
+        local isHealthy = (s.ping ~= nil and ping > 0 and ping < 280) and (not s.fps or s.fps >= 15)
+
         if s.id ~= game.JobId and not isFailed(s.id) and not isVisitedServer(s.id)
-            and s.playing < s.maxPlayers and s.playing > 0 then
-            local entry = { id = s.id, ping = s.ping or 999, playing = s.playing }
+            and s.playing < s.maxPlayers and s.playing >= 2 and isHealthy then
+            local entry = { id = s.id, ping = ping, playing = s.playing }
             table.insert(fallback, entry)
             if preferLow then
                 if s.playing >= minP and s.playing <= maxP then
@@ -1543,11 +1560,12 @@ function getCandidateServers()
         end
     end
 
-    -- Если все доступные серверы попали в блэклист — снимаем ограничение блэклиста
+    -- Если все доступные серверы попали в блэклист — берем здоровые серверы без блэклиста
     if #out == 0 and #fallback == 0 then
         for _, s in ipairs(servers) do
-            if s.id ~= game.JobId and not isFailed(s.id) and s.playing < s.maxPlayers and s.playing > 0 then
-                table.insert(fallback, { id = s.id, ping = s.ping or 999, playing = s.playing })
+            local ping = s.ping or 999
+            if s.id ~= game.JobId and not isFailed(s.id) and s.playing < s.maxPlayers and s.playing >= 2 and ping < 280 then
+                table.insert(fallback, { id = s.id, ping = ping, playing = s.playing })
             end
         end
     end
@@ -1620,17 +1638,15 @@ task.spawn(function()
         if not alive() then return end
         task.wait(1)
         if pendingAt > 0 then
-            local timeout = tonumber(CONFIG.CONNECT_TIMEOUT) or 3
+            local timeout = math.clamp(tonumber(CONFIG.CONNECT_TIMEOUT) or 12, 8, 20)
             if os.clock() - pendingAt >= timeout then
                 local target = pendingTarget
                 clearTeleport()
                 if target then rememberFailure(target) end
-                if CONFIG.ENABLE_BYPASS then bypassRecover("connect_timeout") end
-                if CONFIG.MODE ~= "looter" and lastMode ~= "looter" then
-                    hopRandom()
-                else
-                    log("Лутающий", "Таймаут подключения к серверу задачи, жду следующую...")
-                end
+                log("TP", string.format("Таймаут подключения (%dс) к серверу %s! Завис на экране загрузки. Подключаюсь через общий Matchmaker...", timeout, tostring(target)))
+                armTeleportPersistence()
+                local pid = tonumber(CONFIG.PLACE_ID) or 1537690962
+                pcall(function() TeleportService:Teleport(pid, player) end)
             end
         end
     end
@@ -3324,14 +3340,15 @@ function findFieldTokens(anchorZone, limitX, limitZ, fieldAnchor)
                                 if (dx * dx + dz * dz) <= maxRadiusSq then
                                     local lp = anchorZone.CFrame:PointToObjectSpace(pos)
                                     local half = anchorZone.Size * 0.5
-                                    if math.abs(lp.X) <= half.X + 25 and math.abs(lp.Z) <= half.Z + 25 then
+                                    -- Строго внутри цветков поля (с запасом 2 стадса от края) — не убегаем за пределы поля!
+                                    if math.abs(lp.X) <= (half.X - 2.0) and math.abs(lp.Z) <= (half.Z - 2.0) then
                                         inField = true
                                     end
                                 end
                             elseif fieldAnchor then
                                 local dx = pos.X - fieldAnchor.X
                                 local dz = pos.Z - fieldAnchor.Z
-                                inField = (dx * dx + dz * dz) <= (65 * 65)
+                                inField = (dx * dx + dz * dz) <= (38 * 38)
                             else
                                 inField = true
                             end
@@ -3412,22 +3429,17 @@ collectTokensFor = function(maxSeconds, stopFn, fieldAnchor)
             if collectorTokenGen ~= myGen then break end
             if stopFn and stopFn() then break end
 
-            local char = player.Character
-            local root = char and char:FindFirstChild("HumanoidRootPart")
-            local humanoid = char and char:FindFirstChildOfClass("Humanoid")
-
-            -- Персонаж умер: ждем респавна и летим обратно на поле!
+            local char, root, humanoid = waitForRespawn(5)
             if not root or not humanoid or humanoid.Health <= 0 then
-                patrolTarget, activeTokenObj = nil, nil
-                task.wait(0.4)
-                local newChar = player.Character or player.CharacterAdded:Wait()
-                local newRoot = newChar:WaitForChild("HumanoidRootPart", 6)
-                local newHum = newChar:WaitForChild("Humanoid", 6)
-                if newRoot and newHum and newHum.Health > 0 and fieldAnchor then
-                    log("Смерть", "Возрождение во время сбора токенов. Лечу обратно на поле...")
-                    moveRootToPosition(newRoot, getGroundPos(fieldAnchor), 10)
-                end
                 break
+            end
+
+            -- Защита от потери поля: если персонаж возродился на улье после смерти (> 70 studs от поля)
+            local targetFieldPos = fieldAnchor or (anchorZone and anchorZone.Position)
+            if targetFieldPos and (root.Position - targetFieldPos).Magnitude > 70 then
+                log("Возврат", string.format("Персонаж вдали от поля (%.0f studs). Немедленно лечу обратно на поле...", (root.Position - targetFieldPos).Magnitude))
+                moveRootToPosition(root, getGroundPos(targetFieldPos), 10)
+                task.wait(0.3)
             end
 
 
@@ -3539,13 +3551,23 @@ collectTokensFor = function(maxSeconds, stopFn, fieldAnchor)
                     end
                 end
 
-                -- Ограничиваем случайный патруль (когда токенов нет), но НЕ обрезаем реальный токен!
-                if anchorZone and patrolTarget then
-                    local lp = anchorZone.CFrame:PointToObjectSpace(patrolTarget)
-                    local safeX = math.clamp(lp.X, -limitX, limitX)
-                    local safeZ = math.clamp(lp.Z, -limitZ, limitZ)
-                    local safeWorld = anchorZone.CFrame:PointToWorldSpace(Vector3.new(safeX, lp.Y, safeZ))
-                    patrolTarget = Vector3.new(safeWorld.X, root.Position.Y, safeWorld.Z)
+            end
+
+            -- Ограничение цели СТРОГО в границы поля (персонаж никогда не убегает с поля!)
+            if anchorZone and patrolTarget then
+                local lp = anchorZone.CFrame:PointToObjectSpace(patrolTarget)
+                local safeX = math.clamp(lp.X, -limitX, limitX)
+                local safeZ = math.clamp(lp.Z, -limitZ, limitZ)
+                local safeWorld = anchorZone.CFrame:PointToWorldSpace(Vector3.new(safeX, lp.Y, safeZ))
+                patrolTarget = Vector3.new(safeWorld.X, root.Position.Y, safeWorld.Z)
+            end
+
+            -- Защита от вылета с поля: если персонажа оттолкнуло монстром или способностью за пределы клумбы
+            if anchorZone then
+                local myLp = anchorZone.CFrame:PointToObjectSpace(root.Position)
+                local half = anchorZone.Size * 0.5
+                if math.abs(myLp.X) > half.X + 6 or math.abs(myLp.Z) > half.Z + 6 then
+                    humanoid:MoveTo(anchorZone.Position)
                 end
             end
 
@@ -4504,16 +4526,20 @@ function Solo:Start()
                             local char = player.Character
                             local root = char and char:FindFirstChild("HumanoidRootPart")
                             local hum = char and char:FindFirstChildOfClass("Humanoid")
-                            if not root or not hum or hum.Health <= 0 then
-                                s.currentStatus = "Персонаж погиб — жду возрождения..."
-                                local newChar = player.CharacterAdded:Wait()
-                                local newRoot = newChar:WaitForChild("HumanoidRootPart", 6)
-                                task.wait(0.3)
-                                if newRoot and sprout and isSproutAlive(sprout, sproutAnchor) then
-                                    s.currentStatus = "Возвращаюсь к ростку после смерти..."
-                                    moveToSprout(sprout)
+                            if not root or not hum or hum.Health <= 0 or (sproutAnchor and (root.Position - sproutAnchor).Magnitude > 70) then
+                                if not root or not hum or hum.Health <= 0 then
+                                    s.currentStatus = "Персонаж погиб — жду возрождения..."
+                                    char, root, hum = waitForRespawn(8)
                                 end
-
+                                task.wait(0.3)
+                                if root and (sprout or sproutAnchor) then
+                                    s.currentStatus = "Возвращаюсь к ростку после смерти..."
+                                    if sprout and isSproutAlive(sprout, sproutAnchor) then
+                                        moveToSprout(sprout)
+                                    elseif sproutAnchor then
+                                        moveRootToPosition(root, getGroundPos(sproutAnchor), 10)
+                                    end
+                                end
                             end
 
                             if isBackpackFull() then
@@ -4544,14 +4570,15 @@ function Solo:Start()
                             local char = player.Character
                             local root = char and char:FindFirstChild("HumanoidRootPart")
                             local hum = char and char:FindFirstChildOfClass("Humanoid")
-                            if not root or not hum or hum.Health <= 0 then
-                                local newChar = player.CharacterAdded:Wait()
-                                local newRoot = newChar:WaitForChild("HumanoidRootPart", 6)
-                                task.wait(0.3)
-                                if newRoot and sproutAnchor then
-                                    moveRootToPosition(newRoot, getGroundPos(sproutAnchor), 10)
+                            if not root or not hum or hum.Health <= 0 or (root.Position - sproutAnchor).Magnitude > 70 then
+                                if not root or not hum or hum.Health <= 0 then
+                                    char, root, hum = waitForRespawn(8)
                                 end
-
+                                task.wait(0.3)
+                                if root and sproutAnchor then
+                                    log("Возврат", "Возврат к сломанному ростку после смерти...")
+                                    moveRootToPosition(root, getGroundPos(sproutAnchor), 10)
+                                end
                             end
 
                             if isBackpackFull() then
@@ -4836,7 +4863,7 @@ new("TextLabel", {
 })
 new("TextLabel", {
     Size = UDim2.new(0, 220, 0, 25), Position = UDim2.new(0, 58, 0, 10),
-    BackgroundTransparency = 1, Text = "BSS Hopper v1.3.64",
+    BackgroundTransparency = 1, Text = "BSS Hopper v1.3.65",
     TextColor3 = C.text, Font = Enum.Font.GothamBold, TextSize = 22,
     TextXAlignment = Enum.TextXAlignment.Left, Parent = head,
 })
