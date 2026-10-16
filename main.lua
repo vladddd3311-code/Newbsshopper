@@ -1965,7 +1965,7 @@ end
 local cachedHiveSlot = nil
 local cachedHivePos = nil
 
-local function saveMyHivePos(pos)
+function saveMyHivePos(pos)
     if not pos or typeof(pos) ~= "Vector3" then return end
     cachedHivePos = pos
     _G.BSS_CLAIMED_HIVE_POS = pos
@@ -1977,7 +1977,7 @@ local function saveMyHivePos(pos)
     log("Улей", string.format("Точка улья надежно сохранена: %.1f, %.1f, %.1f", pos.X, pos.Y, pos.Z))
 end
 
-local function loadSavedHivePos()
+function loadSavedHivePos()
     if cachedHivePos and typeof(cachedHivePos) == "Vector3" then return cachedHivePos end
     if _G.BSS_CLAIMED_HIVE_POS and typeof(_G.BSS_CLAIMED_HIVE_POS) == "Vector3" then
         cachedHivePos = _G.BSS_CLAIMED_HIVE_POS
@@ -5546,10 +5546,12 @@ local function boot()
     setWindow(true)
 end
 
-local okBoot, errBoot = pcall(boot)
-if not okBoot then
-    log("ERR", "Ошибка запуска: " .. tostring(errBoot))
-    if Hopper.OnModeChanged then pcall(function() Hopper.OnModeChanged("off") end) end
+do
+    local okBoot, errBoot = pcall(boot)
+    if not okBoot then
+        log("ERR", "Ошибка запуска: " .. tostring(errBoot))
+        if Hopper.OnModeChanged then pcall(function() Hopper.OnModeChanged("off") end) end
+    end
 end
 
 trace("Запуск завершён")
