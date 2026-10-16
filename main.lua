@@ -1884,8 +1884,33 @@ safeConnect(Players, "PlayerAdded", function(newPlr)
     end
 end, "friend_evacuate")
 
+local SERVER_CACHE_FILE = "bss_known_servers.json"
 local serverPoolCache = {}
 local lastServerFetchAt = 0
+
+local function loadKnownServersFromDisk()
+    pcall(function()
+        if _G.BSS_KNOWN_SERVERS and type(_G.BSS_KNOWN_SERVERS) == "table" and #_G.BSS_KNOWN_SERVERS > 0 then
+            serverPoolCache = _G.BSS_KNOWN_SERVERS
+        elseif HAS_FS and isfile and isfile(SERVER_CACHE_FILE) then
+            local raw = readfile(SERVER_CACHE_FILE)
+            local decoded = HttpService:JSONDecode(raw)
+            if type(decoded) == "table" and #decoded > 0 then
+                serverPoolCache = decoded
+            end
+        end
+    end)
+end
+loadKnownServersFromDisk()
+
+local function saveKnownServersToDisk()
+    pcall(function()
+        _G.BSS_KNOWN_SERVERS = serverPoolCache
+        if HAS_FS and writefile and #serverPoolCache > 0 then
+            writefile(SERVER_CACHE_FILE, HttpService:JSONEncode(serverPoolCache))
+        end
+    end)
+end
 
 local function robustHttpGet(url)
     local req = (syn and syn.request) or (http and http.request) or http_request or request
@@ -1967,6 +1992,7 @@ function getServerList(cursor)
         while #serverPoolCache > 150 do
             table.remove(serverPoolCache, 1)
         end
+        saveKnownServersToDisk()
         return data.data, data.nextPageCursor
     end
 
@@ -2061,7 +2087,7 @@ function getCandidateServers()
     end
 
     local preferLow = CONFIG.PREFER_LOW_PLAYERS ~= false
-    local minP = math.max(2, tonumber(CONFIG.MIN_PLAYERS) or 2)
+    local minP = math.max(1, tonumber(CONFIG.MIN_PLAYERS) or 1)
     local maxP = math.max(minP, tonumber(CONFIG.MAX_PLAYERS) or 5)
 
     local out = {}
@@ -2080,10 +2106,10 @@ function getCandidateServers()
             continue
         end
 
-        -- 3. СТРОГИЙ ЗАПРЕТ: Мертвые серверы (< 2 игроков) и переполненные (>= maxPlayers)
+        -- 3. Разрешаем живые серверы (от 1 до maxPlayers - 1)
         local playing = tonumber(s.playing) or 0
         local maxPlr = tonumber(s.maxPlayers) or 6
-        if playing < 2 or playing >= maxPlr then
+        if playing < 1 or playing >= maxPlr then
             continue
         end
 
@@ -2115,7 +2141,7 @@ function getCandidateServers()
             local fps = tonumber(s.fps) or 60
             if sid ~= game.JobId and not isFailed(sid)
                 and (CONFIG.AVOID_FRIENDS == false or not friendJobIds[sid])
-                and playing >= 2 and playing < maxPlr
+                and playing >= 1 and playing < maxPlr
                 and (ping == 0 or ping < 300) and fps >= 15 then
                 table.insert(fallback, { id = sid, ping = ping, playing = playing })
             end
@@ -2163,7 +2189,10 @@ function hopTo(jobId, placeId)
         end
     end
 
-    if not jobId or jobId == "" then return false end
+    if not jobId or jobId == "" or jobId == game.JobId then
+        log("Телепорт", "Отмена: попытка прыжка на текущий же сервер!")
+        return false
+    end
     lastAttemptId += 1
     lastTeleportAt = os.clock()
     markTeleport(jobId)
@@ -2199,51 +2228,70 @@ function hopRandom()
     end
     armTeleportPersistence()
 
+    -- 1. Поиск среди лучших кандидатов
     local candidates = getCandidateServers()
     if candidates and #candidates > 0 then
-        for i = 1, math.min(5, #candidates) do
+        for i = 1, math.min(6, #candidates) do
             local target = candidates[i]
-            if hopTo(target) then return true end
+            if target and target ~= game.JobId and hopTo(target) then return true end
             task.wait(0.3)
         end
     end
 
-    -- Если кандидаты временно сбоили — очищаем временные ошибки и пробуем снова
+    -- 2. Если кандидаты в списке временных сбоев — сбрасываем список сбоев и пробуем снова
     clearFailures()
     candidates = getCandidateServers()
     if candidates and #candidates > 0 then
-        for i = 1, math.min(5, #candidates) do
+        for i = 1, math.min(6, #candidates) do
             local target = candidates[i]
-            if hopTo(target) then return true end
+            if target and target ~= game.JobId and hopTo(target) then return true end
             task.wait(0.3)
         end
     end
 
-    -- Резервный поиск любого живого сервера из кэша / API
+    -- 3. Резервный перебор ВСЕХ доступных серверов из кэша и API (СТРОГО sid ~= game.JobId)
     log("Телепорт", "Резервный перебор живых серверов...")
-    local servers = getServerList() or serverPoolCache
-    if servers and #servers > 0 then
+    local pool = {}
+    if serverPoolCache and #serverPoolCache > 0 then
+        for _, s in ipairs(serverPoolCache) do table.insert(pool, s) end
+    end
+    local fresh = getServerList()
+    if fresh and type(fresh) == "table" then
+        for _, s in ipairs(fresh) do table.insert(pool, s) end
+    end
+
+    if #pool > 0 then
         updateFriendsList()
-        for _, s in ipairs(servers) do
+        -- Перемешиваем пул для разнообразия
+        for i = #pool, 2, -1 do
+            local j = math.random(1, i)
+            pool[i], pool[j] = pool[j], pool[i]
+        end
+        for _, s in ipairs(pool) do
             local sid = tostring(s.id or "")
             local p = tonumber(s.playing) or 0
             local maxP = tonumber(s.maxPlayers) or 6
-            if sid ~= "" and sid ~= game.JobId and p >= 2 and p < maxP
+            if sid ~= "" and sid ~= game.JobId and not isVisitedServer(sid)
                 and (CONFIG.AVOID_FRIENDS == false or not friendJobIds[sid]) then
                 if hopTo(sid) then return true end
-                task.wait(0.2)
+                task.wait(0.25)
+            end
+        end
+        -- Если все посещены — пробуем любой сервер кроме текущего
+        for _, s in ipairs(pool) do
+            local sid = tostring(s.id or "")
+            if sid ~= "" and sid ~= game.JobId
+                and (CONFIG.AVOID_FRIENDS == false or not friendJobIds[sid]) then
+                if hopTo(sid) then return true end
+                task.wait(0.25)
             end
         end
     end
 
-    -- Абсолютный резерв: если все конкретные JobId отклонены Roblox'ом,
-    -- используем стандартный TeleportService, чтобы не зависать бесконечно на одном сервере!
-    log("Телепорт", "Аварийный резерв: переход через TeleportService...")
-    armTeleportPersistence()
-    if CONFIG.ENABLE_BYPASS then bypassNotify() end
-    local pid = tonumber(CONFIG.PLACE_ID) or (game and game.PlaceId) or 1537690962
-    local ok = pcall(function() TeleportService:Teleport(pid, player) end)
-    return ok
+    -- СТРОГИЙ ЗАПРЕТ: НИ В КОЕМ СЛУЧАЕ НЕ ВЫЗЫВАЕМ TeleportService:Teleport(placeId)!
+    -- Именно он перезаходит на ТОТ ЖЕ САМЫЙ сервер!
+    log("Телепорт", "Ожидаю появления новых серверов в пуле (без перезахода на старый)...")
+    return false
 end
 
 -- СТОРОЖЕВОЙ ТАЙМЕР ЗАВИСШЕГО ПОДКЛЮЧЕНИЯ (ЗАЩИТА ОТ БЕСКОНЕЧНОЙ ЗАГРУЗКИ)
@@ -3933,23 +3981,24 @@ end
 local lastSwingAt = 0
 function swingDigTool()
     local now = os.clock()
-    if now - lastSwingAt < 0.15 then return end
+    if now - lastSwingAt < 0.12 then return end
     lastSwingAt = now
 
     local char = player.Character
     if not char then return end
     local tool = ensureHarvestToolEquipped()
-    if tool then
+    if tool and tool.Parent == char then
+        -- 1. Родной метод активации инструмента Roblox (БЕЗ использования кликера мыши!)
+        tool.Enabled = true
         pcall(function() tool:Activate() end)
+
+        -- 2. Если эксплоит поддерживает firesignal — вызываем событие Activated напрямую
+        if type(firesignal) == "function" and tool:FindFirstChild("Activated") then
+            pcall(firesignal, tool.Activated)
+        end
     end
-    if type(mouse1click) == "function" then
-        pcall(mouse1click)
-    elseif type(mouse1press) == "function" and type(mouse1release) == "function" then
-        pcall(function()
-            mouse1press()
-            mouse1release()
-        end)
-    end
+
+    -- 3. Вызов серверного RemoteEvent сбора пыльцы в BSS
     local ev = getToolCollectRemote()
     if ev then
         pcall(function() ev:FireServer() end)
@@ -4354,9 +4403,9 @@ useSprinklerBuilder = function(fieldAnchor)
             pcall(function() tool:Activate() end)
         end
 
-        -- 3. Клик мыши
-        if type(mouse1click) == "function" then
-            pcall(mouse1click)
+        -- 3. Активация без мыши (чистый firesignal)
+        if tool and type(firesignal) == "function" and tool:FindFirstChild("Activated") then
+            pcall(firesignal, tool.Activated)
         end
 
         placed += 1
@@ -4383,10 +4432,17 @@ function startAutoDig()
         while alive() do
             local tool = findHarvestTool()
             if tool then
-                if tool.Parent ~= player.Character then equipTool(tool) end
+                local char = player.Character
+                if tool.Parent ~= char and char then equipTool(tool) end
+                tool.Enabled = true
                 pcall(function() tool:Activate() end)
+                if type(firesignal) == "function" and tool:FindFirstChild("Activated") then
+                    pcall(firesignal, tool.Activated)
+                end
+                local ev = getToolCollectRemote()
+                if ev then pcall(function() ev:FireServer() end) end
             end
-            task.wait(0.28)
+            task.wait(0.18)
         end
     end)
 end
@@ -5549,7 +5605,7 @@ new("TextLabel", {
 })
 new("TextLabel", {
     Size = UDim2.new(0, 220, 0, 25), Position = UDim2.new(0, 58, 0, 10),
-    BackgroundTransparency = 1, Text = "BSS Hopper v1.3.70",
+    BackgroundTransparency = 1, Text = "BSS Hopper v1.3.71",
     TextColor3 = C.text, Font = Enum.Font.GothamBold, TextSize = 22,
     TextXAlignment = Enum.TextXAlignment.Left, Parent = head,
 })
