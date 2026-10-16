@@ -52,13 +52,13 @@ end
 -- как Roblox выкинет на экран "Disconnected".
 local bypassActive = type(Bypass) == "table"
 
-local function bypassNotify()
+function bypassNotify()
     if bypassActive and Bypass.Notify then
         pcall(Bypass.Notify, Bypass)
     end
 end
 
-local function bypassRecover(reason)
+function bypassRecover(reason)
     if bypassActive and Bypass.Recover then
         pcall(Bypass.Recover, Bypass, reason)
     end
@@ -159,7 +159,7 @@ end)
 
 local saveNow, applySettings
 
-local function armTeleportPersistence()
+function armTeleportPersistence()
     if applySettings then pcall(applySettings) end
     if saveNow then pcall(saveNow) end
 
@@ -225,14 +225,14 @@ local UserInputService = game:GetService("UserInputService")
 local player = Players.LocalPlayer
 
 local STEP = 0
-local function trace(msg)
+function trace(msg)
     STEP += 1
     print(string.format("[ШАГ %02d] %s", STEP, msg))
 end
 trace("Скрипт стартовал")
 
 _G.BSS_FATAL = nil
-local function showFatal(msg)
+function showFatal(msg)
     _G.BSS_FATAL = msg
     pcall(function()
         print("[ФАТАЛЬНО] " .. tostring(msg))
@@ -316,12 +316,12 @@ local SAVE_FILE = "bss_hopper_config.json"
 local uiState = { snakePos = nil, winPos = nil }
 local lastMode = "searcher"
 
-local function packPosition(pos)
+function packPosition(pos)
     if not pos then return nil end
     return { xScale=pos.X.Scale, xOffset=pos.X.Offset,
              yScale=pos.Y.Scale, yOffset=pos.Y.Offset }
 end
-local function unpackPosition(pos)
+function unpackPosition(pos)
     if type(pos) ~= "table" then return nil end
     local xs, xo = tonumber(pos.xScale), tonumber(pos.xOffset)
     local ys, yo = tonumber(pos.yScale), tonumber(pos.yOffset)
@@ -337,10 +337,10 @@ if OLD and type(OLD.Destroy) == "function" then pcall(OLD.Destroy) end
 
 local MY_TOKEN = {}
 _G.BSS_HOPPER_TOKEN = MY_TOKEN
-local function alive() return rawget(_G, "BSS_HOPPER_TOKEN") == MY_TOKEN end
+function alive() return rawget(_G, "BSS_HOPPER_TOKEN") == MY_TOKEN end
 
 local myConns = {}
-local function trackConn(conn)
+function trackConn(conn)
     if conn then table.insert(myConns, conn) end
     return conn
 end
@@ -348,7 +348,7 @@ end
 -- Hold primary mouse button while the hopper is enabled. This uses the executor's
 -- input bridge when available; tool:Activate() remains the fallback for harvesting.
 local leftMouseHeld = false
-local function setLeftMouseHeld(shouldHold)
+function setLeftMouseHeld(shouldHold)
     local vim
     pcall(function() vim = game:GetService("VirtualInputManager") end)
     local uis = game:GetService("UserInputService")
@@ -374,7 +374,7 @@ local function setLeftMouseHeld(shouldHold)
     end
 end
 
-local function stopEverything()
+function stopEverything()
     pcall(function() setLeftMouseHeld(false) end)
     if type(Hopper) == "table" and Hopper.Mode then
         pcall(function() Hopper.Mode:Stop() end)
@@ -384,7 +384,7 @@ local function stopEverything()
     pcall(function() if gui then gui:Destroy() end end)
 end
 
-local function log(tag, msg)
+function log(tag, msg)
     print(string.format("[BSS Hopper][%s][%.1f] %s", tostring(tag), os.clock(), tostring(msg)))
 end
 
@@ -409,7 +409,7 @@ local SAVED_KEYS = {
     "CLAIM_APPROACH","CLAIM_PROMPT_WAIT","ENABLE_BYPASS","BYPASS_RETRY",
 }
 
-local function applySavedData(data, source)
+function applySavedData(data, source)
     if type(data) ~= "table" then return false end
     for _, key in ipairs(SAVED_KEYS) do
         if data[key] ~= nil then CONFIG[key] = data[key] end
@@ -425,7 +425,7 @@ local function applySavedData(data, source)
     return true
 end
 
-local function loadSaved()
+function loadSaved()
     pcall(function()
         if _G.BSS_HOPPER_PERSIST_CONFIG and _G.BSS_HOPPER_PERSIST_CONFIG ~= "" then
             local okD, d = pcall(function() return HttpService:JSONDecode(_G.BSS_HOPPER_PERSIST_CONFIG) end)
@@ -448,7 +448,7 @@ end
 loadSaved()
 
 -- Оптимизация графики клиента. Не удаляет игровые объекты/токены и не меняет логику фарма.
-local function applyAntiLag(enabled)
+function applyAntiLag(enabled)
     CONFIG.ANTI_LAG = enabled == true
     pcall(function()
         local Lighting = game:GetService("Lighting")
@@ -494,7 +494,7 @@ saveNow = function()
     if not encoded then return false end
     return pcall(writefile, SAVE_FILE, json)
 end
-local function flushSettings()
+function flushSettings()
     if applySettings then pcall(applySettings) end
     if saveNow then pcall(saveNow) end
 end
@@ -514,7 +514,7 @@ local sproutFolders = {}
 local freshSprout = nil
 local isSprout
 
-local function addFolder(path)
+function addFolder(path)
     local node = Workspace
     for piece in path:gmatch("[^%.]+") do
         node = node:FindFirstChild(piece)
@@ -564,7 +564,7 @@ isSprout = function(obj)
 end
 
 local watchedFolders = {}
-local function watchFolders()
+function watchFolders()
     for _, p in ipairs({ "Particles.Folder2", "Happenings.Sprouts", "Sprouts" }) do
         addFolder(p)
     end
@@ -589,7 +589,7 @@ task.spawn(function()
     end
 end)
 
-local function findSprout()
+function findSprout()
     if freshSprout then
         if freshSprout.Parent and isSprout(freshSprout) then return freshSprout end
         freshSprout = nil
@@ -606,7 +606,7 @@ local function findSprout()
     return nil
 end
 
-local function isSproutAlive(sprout, anchorPos)
+function isSproutAlive(sprout, anchorPos)
     if sprout and sprout.Parent then
         local ok, isDesc = pcall(function() return sprout:IsDescendantOf(Workspace) end)
         if ok and isDesc then return true end
@@ -631,20 +631,20 @@ local function isSproutAlive(sprout, anchorPos)
     return false
 end
 
-local function _rawWorldPos(obj)
+function _rawWorldPos(obj)
     if obj:IsA("BasePart") then return obj.Position end
     if obj:IsA("Model") then return obj:GetPivot().Position end
     return nil
 end
 
-local function worldPos(obj)
+function worldPos(obj)
     if not obj then return nil end
     local ok, p = pcall(_rawWorldPos, obj)
     if ok and p then return p end
     return nil
 end
 
-local function normalizeJobId(id)
+function normalizeJobId(id)
     if type(id) ~= "string" then return "" end
     return string.lower(id):gsub("[{}]", ""):gsub("%s+", "")
 end
@@ -655,7 +655,7 @@ local RunService = game:GetService("RunService")
 -- Original CanCollide values are restored after each flight segment.
 local flightStopRequested = false
 local noclipSteppedConn = nil
-local function setFlightNoclip(enabled)
+function setFlightNoclip(enabled)
     if enabled then
         if not noclipSteppedConn then
             noclipSteppedConn = RunService.Stepped:Connect(function()
@@ -696,7 +696,7 @@ local function setFlightNoclip(enabled)
     end
 end
 
-local function stopFlightNow()
+function stopFlightNow()
     flightStopRequested = true
     pcall(function() setFlightNoclip(false) end)
     local character = player and player.Character
@@ -710,7 +710,7 @@ local function stopFlightNow()
 end
 
 -- Raycast down to find the exact top surface of the field
-local function getGroundPos(pos)
+function getGroundPos(pos)
     if not pos then return pos end
     local ground = pos + Vector3.new(0, 3.2, 0)
     local ok, hit = pcall(function()
@@ -731,7 +731,7 @@ local function getGroundPos(pos)
 end
 
 -- Плавный покадровый полёт через стены: без проваливания под текстуры
-local function moveRootToPosition(root, destination, maxDuration)
+function moveRootToPosition(root, destination, maxDuration)
     if not root or not root.Parent or typeof(destination) ~= "Vector3" then return false end
     flightStopRequested = false
     setFlightNoclip(true)
@@ -787,7 +787,7 @@ local function moveRootToPosition(root, destination, maxDuration)
     return not flightStopRequested and root.Parent ~= nil and (root.Position - destination).Magnitude < 18
 end
 
-local function waitForGameReady(timeout)
+function waitForGameReady(timeout)
     local t0 = os.clock()
     timeout = timeout or 25
     while not game:IsLoaded() and os.clock() - t0 < timeout do
@@ -810,7 +810,7 @@ local function waitForGameReady(timeout)
     if alive() then task.wait(2.0) end
 end
 
-local function moveToSprout(sprout)
+function moveToSprout(sprout)
     if not sprout then return false end
     local targetPos = worldPos(sprout)
     if not targetPos then return false end
@@ -821,7 +821,7 @@ local function moveToSprout(sprout)
     return ok or ((root.Position - safeLanding).Magnitude < 25)
 end
 
-local function getFieldForPos(pos, maxExtra)
+function getFieldForPos(pos, maxExtra)
     if not pos then return nil end
     local zones = Workspace:FindFirstChild("FlowerZones")
     if not zones then return nil end
@@ -842,7 +842,7 @@ local function getFieldForPos(pos, maxExtra)
     return nil
 end
 
-local function detectField(sprout)
+function detectField(sprout)
     local pos = worldPos(sprout)
     if not pos then return nil end
     local fName = getFieldForPos(pos, 25)
@@ -866,7 +866,7 @@ end
 --  СКОРОСТЬ
 -- ══════════════════════════════════════════════════════════════════════
 local STATIC_SPEED = 90
-local function applyWalkSpeed()
+function applyWalkSpeed()
     local char = player.Character
     local hum = char and char:FindFirstChildOfClass("Humanoid")
     if hum then
@@ -901,7 +901,7 @@ end)
 local PUFF_RARITY_PRIORITY = { common=1, rare=2, epic=3, legendary=4, mythic=5 }
 local puffReported = {}
 
-local function puffTextOf(root)
+function puffTextOf(root)
     local chunks = { tostring(root.Name or "") }
     local function addAttrs(obj)
         local ok, attrs = pcall(function() return obj:GetAttributes() end)
@@ -932,7 +932,7 @@ local function puffTextOf(root)
     return table.concat(chunks, " | ")
 end
 
-local function isPuffshroomRoot(obj)
+function isPuffshroomRoot(obj)
     local name = string.lower(tostring(obj and obj.Name or ""))
     if string.find(name,"puffshroom",1,true) or string.find(name,"puff shroom",1,true) then return true end
     if name ~= "sprout" then return false end
@@ -949,7 +949,7 @@ local function isPuffshroomRoot(obj)
     return false
 end
 
-local function parsePuffshroom(root)
+function parsePuffshroom(root)
     local text = string.lower(puffTextOf(root))
     local rootName = string.lower(tostring(root and root.Name or ""))
     if not string.find(text,"puff",1,true)
@@ -981,7 +981,7 @@ local function parsePuffshroom(root)
     return rarity, math.floor(level)
 end
 
-local function findPuffshroomTimer(root)
+function findPuffshroomTimer(root)
     local ok, descendants = pcall(function() return root:GetDescendants() end)
     if ok then
         for _, obj in ipairs(descendants) do
@@ -997,7 +997,7 @@ local function findPuffshroomTimer(root)
     return nil
 end
 
-local function findPuffshrooms()
+function findPuffshrooms()
     local searchRoots = {}
     local h = Workspace:FindFirstChild("Happenings")
     if h then
@@ -1038,7 +1038,7 @@ local function findPuffshrooms()
     return results
 end
 
-local function findEligiblePuffshrooms()
+function findEligiblePuffshrooms()
     local results = {}
     local minR = PUFF_RARITY_PRIORITY[CONFIG.PUFF_MIN_RARITY] or 1
     for _, entry in ipairs(findPuffshrooms()) do
@@ -1051,7 +1051,7 @@ local function findEligiblePuffshrooms()
     return results
 end
 
-local function findPuffshroom()
+function findPuffshroom()
     local ok, entries = pcall(findEligiblePuffshrooms)
     if not ok then return nil end
     if #entries > 0 then return entries[1].root, entries[1].rarity, entries[1].level end
@@ -1066,7 +1066,7 @@ local VICIOUS_FIELD_ORDER = {
     ["mountain top field"] = 4, ["pepper patch"] = 5,
 }
 
-local function isPlayerBee(obj)
+function isPlayerBee(obj)
     if not obj then return false end
     local ok, res = pcall(function()
         -- 1. Быстрые атрибуты и маркеры
@@ -1097,7 +1097,7 @@ local function isPlayerBee(obj)
     return ok and res
 end
 
-local function isViciousFieldAllowed(obj)
+function isViciousFieldAllowed(obj)
     local pos = worldPos(obj)
     if not pos then return false end
     local field = getFieldForPos(pos, 25)
@@ -1125,14 +1125,14 @@ end
 
 local freshVicious = nil
 
-local function isViciousPart(obj)
+function isViciousPart(obj)
     if not obj or isPlayerBee(obj) then return false end
     local ok, name = pcall(function() return obj.Name end)
     return ok and type(name) == "string"
         and string.find(string.lower(name), "vicious", 1, true) ~= nil
 end
 
-local function getViciousTargetRoot(obj)
+function getViciousTargetRoot(obj)
     if not obj or isPlayerBee(obj) then return nil end
     local current = obj
     local bestModel = nil
@@ -1157,7 +1157,7 @@ local function getViciousTargetRoot(obj)
 end
 
 -- Поиск шипа (Spike) дикого Вициуса строго в разрешенных полях
-local function findViciousSpikeInAllowedFields()
+function findViciousSpikeInAllowedFields()
     local searchRoots = {}
     local p = Workspace:FindFirstChild("Particles")
     if p then
@@ -1190,7 +1190,7 @@ local function findViciousSpikeInAllowedFields()
     return nil
 end
 
-local function findVicious()
+function findVicious()
     -- 1. СТРОГАЯ ПРОВЕРКА: летим на Вициуса ТОЛЬКО если на нужном поле есть реальный шип!
     -- Это на 100% исключает атаку пчёл других игроков.
     local spikeObj, spikePos, fieldName = findViciousSpikeInAllowedFields()
@@ -1262,7 +1262,7 @@ task.spawn(function()
     end
 end)
 
-local function viciousDefeatedMessageVisible()
+function viciousDefeatedMessageVisible()
     local needles = { "vicious bee has been defeated", "vicious bee defeated", "defeated vicious bee" }
     local pgui = player:FindFirstChildOfClass("PlayerGui")
     if not pgui then return false end
@@ -1279,7 +1279,7 @@ local function viciousDefeatedMessageVisible()
     return false
 end
 
-local function fightVicious(vicious)
+function fightVicious(vicious)
     if not vicious or not vicious.Parent then return false end
     vicious = getViciousTargetRoot(vicious) or vicious
     if not vicious or not vicious.Parent then return false end
@@ -1383,12 +1383,12 @@ local function fightVicious(vicious)
     return viciousDefeatedMessageVisible() or not vicious.Parent
 end
 
-local function detectViciousKind(obj)
+function detectViciousKind(obj)
     if string.find(string.lower(obj.Name or ""), "rogue", 1, true) then return "rogue" end
     return "wild"
 end
 
-local function getServerList()
+function getServerList()
     local ok, res = pcall(function()
         return game:HttpGet("https://games.roblox.com/v1/games/" ..
             tostring(CONFIG.PLACE_ID) .. "/servers/Public?sortOrder=Asc&limit=100")
@@ -1407,13 +1407,13 @@ local attemptCounter = 0
 local lastTeleportAt = 0
 local lastAttemptId = 0
 
-local function rememberFailure(jobId)
+function rememberFailure(jobId)
     if jobId then failedServers[jobId] = os.clock() end
     attemptCounter += 1
 end
-local function clearFailures() failedServers = {}; attemptCounter = 0 end
-local function isFailed(jobId) return jobId ~= nil and failedServers[jobId] ~= nil end
-local function pruneFailures()
+function clearFailures() failedServers = {}; attemptCounter = 0 end
+function isFailed(jobId) return jobId ~= nil and failedServers[jobId] ~= nil end
+function pruneFailures()
     local now = os.clock()
     local ttl = tonumber(CONFIG.FAILED_TTL) or 90
     for id, t in pairs(failedServers) do
@@ -1421,7 +1421,7 @@ local function pruneFailures()
     end
 end
 
-local function getCandidateServers()
+function getCandidateServers()
     pruneFailures()
     local servers = getServerList()
     if not servers then return nil end
@@ -1441,11 +1441,11 @@ local function getCandidateServers()
 end
 
 local pendingTarget, pendingAt, rejoinTries = nil, 0, 0
-local function resetRejoinTries() if rejoinTries > 0 then rejoinTries = 0 end end
-local function markTeleport(j) pendingTarget = j; pendingAt = os.clock(); resetRejoinTries() end
-local function clearTeleport() pendingTarget = nil; pendingAt = 0 end
+function resetRejoinTries() if rejoinTries > 0 then rejoinTries = 0 end end
+function markTeleport(j) pendingTarget = j; pendingAt = os.clock(); resetRejoinTries() end
+function clearTeleport() pendingTarget = nil; pendingAt = 0 end
 
-local function hopTo(jobId, placeId)
+function hopTo(jobId, placeId)
     if not jobId then return false end
     lastAttemptId += 1
     lastTeleportAt = os.clock()
@@ -1504,7 +1504,7 @@ task.spawn(function()
     end
 end)
 
-local function rejoinSame()
+function rejoinSame()
     armTeleportPersistence()
     local servers = getServerList()
     if servers then
@@ -1521,7 +1521,7 @@ end
 
 local RETRYABLE_TELEPORT_CODES = { [2]=true, [3]=true, [279]=true, [267]=true }
 local MAX_REJOIN_TRIES = 5
-local function rejoinRetry(code)
+function rejoinRetry(code)
     rejoinTries += 1
     local attempt = rejoinTries
     task.wait(3) -- Таймаут перезахода: статично 3 секунды
@@ -1534,7 +1534,7 @@ local function rejoinRetry(code)
 end
 
 local teleportLock = false
-local function handleTeleportFailure(reason)
+function handleTeleportFailure(reason)
     if teleportLock then return end
     teleportLock = true
     clearTeleport()
@@ -1548,7 +1548,7 @@ end
 
 -- Автоматический обход Ошибки 2 (Connection Failed / Reconnect) и дисконнектов
 local lastErrorBypass = 0
-local function checkAndBypassError()
+function checkAndBypassError()
     if os.clock() - lastErrorBypass < 2 then return end
 
     local promptGui = nil
@@ -1631,7 +1631,7 @@ task.spawn(function()
     end
 end)
 
-local function safeConnect(obj, signal, fn, name)
+function safeConnect(obj, signal, fn, name)
     local ok = pcall(function() trackConn(obj[signal]:Connect(fn)) end)
     if not ok then log("TP", "Не удалось подписаться: " .. name) end
 end
@@ -1669,7 +1669,7 @@ local RARITY_LABEL = {
     rare="🥈 Rare", basic="🌱 Basic", moon="🌙 Moon", common="⚪ Common",
 }
 
-local function hueOf(color)
+function hueOf(color)
     local h, s, v = Color3.toHSV(color); return h or 0, s or 0, v or 0
 end
 
@@ -1681,7 +1681,7 @@ local RARITY_WORDS = {
     { level="moon",      words={"moon","lunar"} },
     { level="basic",     words={"common","normal","basic"} },
 }
-local function matchWords(text)
+function matchWords(text)
     if not text or text == "" then return nil end
     local low = string.lower(text)
     for _, entry in ipairs(RARITY_WORDS) do
@@ -1692,7 +1692,7 @@ local function matchWords(text)
     return nil
 end
 
-local function sproutSparklesRate(sprout)
+function sproutSparklesRate(sprout)
     local bestRate = nil
     local ok, descendants = pcall(function() return sprout:GetDescendants() end)
     if ok then
@@ -1706,7 +1706,7 @@ local function sproutSparklesRate(sprout)
     return bestRate
 end
 
-local function sproutHasGlow(sprout)
+function sproutHasGlow(sprout)
     local function partGlows(obj)
         if obj:IsA("BasePart") and obj.Material == Enum.Material.Neon then return true end
         return false
@@ -1721,7 +1721,7 @@ local function sproutHasGlow(sprout)
     return false
 end
 
-local function detectRarity(sprout)
+function detectRarity(sprout)
     if not sprout then return nil, "no-object" end
     local ownName = string.lower(tostring(sprout.Name or ""))
     local own = matchWords(ownName)
@@ -1797,18 +1797,18 @@ local function detectRarity(sprout)
     return nil, "unconfirmed"
 end
 
-local function isRarityAtLeast(rarity, minimum)
+function isRarityAtLeast(rarity, minimum)
     local got = rarity and RARITY_PRIORITY[rarity]
     local minValue = RARITY_PRIORITY[string.lower(tostring(minimum or "basic"))] or RARITY_PRIORITY.basic
     return got ~= nil and got >= minValue
 end
 
-local function isSproutEligible(sprout)
+function isSproutEligible(sprout)
     local rarity, source = detectRarity(sprout)
     return isRarityAtLeast(rarity, CONFIG.MIN_RARITY), rarity, source
 end
 
-local function findLootableSprout()
+function findLootableSprout()
     local best, bestPriority = nil, -1
     local function consider(obj)
         if not obj or not isSprout(obj) then return end
@@ -1851,7 +1851,7 @@ end
 --  УЛЕЙ / HONEY / РЮКЗАК / ТОКЕНЫ
 -- ══════════════════════════════════════════════════════════════════════
 
-local function promptWorldPos(prompt)
+function promptWorldPos(prompt)
     if not prompt or not prompt.Parent then return nil end
     local parent = prompt.Parent
     local ok, pos = pcall(function()
@@ -1868,7 +1868,7 @@ local function promptWorldPos(prompt)
     return worldPos(parent)
 end
 
-local function findPromptByKeyword(keyword)
+function findPromptByKeyword(keyword)
     local needle = string.lower(tostring(keyword or ""))
     local results = {}
     local searchRoots = {}
@@ -1929,7 +1929,7 @@ local function findPromptByKeyword(keyword)
     return results
 end
 
-local function findPromptNearPosition(keyword, position, maxDistance)
+function findPromptNearPosition(keyword, position, maxDistance)
     if not position then return nil end
     local best, bestD = nil, maxDistance or 25
     local prompts = findPromptByKeyword(keyword)
@@ -1942,7 +1942,7 @@ local function findPromptNearPosition(keyword, position, maxDistance)
     return best
 end
 
-local function findYellowHivePads()
+function findYellowHivePads()
     local results = {}
     local hp = Workspace:FindFirstChild("HivePlatforms")
     if not hp then return results end
@@ -2000,7 +2000,7 @@ function loadSavedHivePos()
 end
 
 -- Прямой поиск промпта Make Honey своего улья в Workspace
-local function findMyHivePromptAndPos()
+function findMyHivePromptAndPos()
     local roots = {}
     local hp = Workspace:FindFirstChild("HivePlatforms")
     if hp then table.insert(roots, hp) end
@@ -2048,7 +2048,7 @@ local function findMyHivePromptAndPos()
     return nil, nil
 end
 
-local function getHivePlatformRecords()
+function getHivePlatformRecords()
     local records = {}
     local folder = Workspace:FindFirstChild("HivePlatforms") or Workspace:FindFirstChild("Hives")
     if not folder then return records end
@@ -2087,7 +2087,7 @@ local function getHivePlatformRecords()
     return records
 end
 
-local function findAssignedHiveSlot()
+function findAssignedHiveSlot()
     -- 0. Кэш своего улья: если на этом сервере позиция уже известна, используем её мгновенно
     if cachedHiveSlot and cachedHiveSlot.pos then
         return cachedHiveSlot
@@ -2245,7 +2245,7 @@ local function findAssignedHiveSlot()
     return nil
 end
 
-local function slotIsFree(slot)
+function slotIsFree(slot)
     if not slot then return false end
     if slot.playerRef and slot.playerRef.Value == nil then return true end
     if slot.model then
@@ -2261,7 +2261,7 @@ local function slotIsFree(slot)
     return false
 end
 
-local function claimHive()
+function claimHive()
     local root = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
     local hum = player.Character and player.Character:FindFirstChildOfClass("Humanoid")
     if not root or not hum or hum.Health <= 0 then return false end
@@ -2412,7 +2412,7 @@ local function claimHive()
     return false
 end
 
-local function findMyHive()
+function findMyHive()
     local owned = findAssignedHiveSlot()
     if not owned then
         local p, pos = findMyHivePromptAndPos()
@@ -2445,9 +2445,9 @@ local function findMyHive()
     return { pos=owned.pos, slot=owned, prompt=nil }
 end
 
-local function stripCommas(s) return (tostring(s):gsub(",", "")) end
+function stripCommas(s) return (tostring(s):gsub(",", "")) end
 
-local function getBackpackPollen()
+function getBackpackPollen()
     -- 1. Самый точный метод: CoreStats игрока в BSS (напрямую от сервера)
     local okCore, info = pcall(function()
         local cs = player:FindFirstChild("CoreStats")
@@ -2527,7 +2527,7 @@ local function getBackpackPollen()
     return best
 end
 
-local function isBackpackFull()
+function isBackpackFull()
     local info = getBackpackPollen()
     if not info or not info.max or info.max <= 0 then return false end
     if not info.current or info.current <= 0 then return false end
@@ -2538,7 +2538,7 @@ end
 local useSprinklerBuilder
 local collectTokensFor
 
-local function triggerMakeHoneyAction(prompt)
+function triggerMakeHoneyAction(prompt)
     if prompt and prompt.Parent then
         pcall(function()
             prompt.Enabled = true
@@ -2592,7 +2592,7 @@ local function triggerMakeHoneyAction(prompt)
     end)
 end
 
-local function makeHoney()
+function makeHoney()
     local char = player.Character
     local root = char and char:FindFirstChild("HumanoidRootPart")
     local hum = char and char:FindFirstChildOfClass("Humanoid")
@@ -2613,11 +2613,17 @@ local function makeHoney()
     local hivePos = loadSavedHivePos()
     if not hivePos then
         local slot = findAssignedHiveSlot()
-        if slot and slot.pos then hivePos = slot.pos saveMyHivePos(slot.pos) end
+        if slot and slot.pos then
+            hivePos = slot.pos
+            saveMyHivePos(slot.pos)
+        end
     end
     if not hivePos then
         local p, pPos = findMyHivePromptAndPos()
-        if pPos then hivePos = pPos saveMyHivePos(pPos) end
+        if pPos then
+            hivePos = pPos
+            saveMyHivePos(pPos)
+        end
     end
     if not hivePos then
         local pads = findYellowHivePads()
@@ -2854,7 +2860,7 @@ local TOKEN_TEXTURE_MAP = {
 }
 
 -- Динамическое авто-построение базы текстур токенов из ReplicatedStorage игры
-local function buildTokenTextureMap()
+function buildTokenTextureMap()
     local rep = game:GetService("ReplicatedStorage")
     local folders = { rep:FindFirstChild("Collectibles"), rep:FindFirstChild("Icons"), rep:FindFirstChild("ItemData") }
     for _, folder in ipairs(folders) do
@@ -2877,7 +2883,7 @@ local function buildTokenTextureMap()
 end
 pcall(buildTokenTextureMap)
 
-local function isHoneyToken(low)
+function isHoneyToken(low)
     local n = string.lower(tostring(low or ""))
     if string.find(n, "honey", 1, true) or string.find(n, "honeydrop", 1, true) or string.find(n, "honeytoken", 1, true) then
         return true
@@ -2891,7 +2897,7 @@ end
 local TOKEN_NAME_CACHE = setmetatable({}, { __mode = "k" })
 local TOKEN_PRIO_CACHE = setmetatable({}, { __mode = "k" })
 
-local function tokenPriority(name)
+function tokenPriority(name)
     local low = string.lower(tostring(name or ""))
     -- Медовые токены: приоритет 99 (игнорируются от целенаправленного бега, собираются только наступая)
     if isHoneyToken(low) then return 99 end
@@ -2907,7 +2913,7 @@ local function tokenPriority(name)
     return 3
 end
 
-local function resolveTokenName(obj)
+function resolveTokenName(obj)
     if not obj then return "token" end
     local cached = TOKEN_NAME_CACHE[obj]
     if cached then return cached end
@@ -2981,7 +2987,7 @@ local function resolveTokenName(obj)
     return result
 end
 
-local function getTokenPriorityForObj(obj)
+function getTokenPriorityForObj(obj)
     if not obj then return 3 end
     local cached = TOKEN_PRIO_CACHE[obj]
     if cached then return cached end
@@ -2994,7 +3000,7 @@ end
 local TOKEN_FOLDERS = { "Collectibles", "Tokens", "Drops" }
 local TOKEN_CACHE, TOKEN_CACHE_AT = {}, 0
 local TOKEN_CACHE_TTL = 0.5
-local function findToolByKeyword(keyword)
+function findToolByKeyword(keyword)
     local needle = string.lower(tostring(keyword or ""))
     local backpack = player:FindFirstChildOfClass("Backpack")
     if backpack then
@@ -3011,7 +3017,7 @@ local function findToolByKeyword(keyword)
     return nil
 end
 
-local function equipTool(tool)
+function equipTool(tool)
     if not tool then return false end
     local char = player.Character
     local hum = char and char:FindFirstChildOfClass("Humanoid")
@@ -3023,7 +3029,7 @@ end
 local cachedHarvestTool = nil
 local lastToolCheckAt = 0
 
-local function ensureHarvestToolEquipped()
+function ensureHarvestToolEquipped()
     local char = player.Character
     if not char then return nil end
     local hum = char:FindFirstChildOfClass("Humanoid")
@@ -3068,13 +3074,13 @@ local function ensureHarvestToolEquipped()
     return nil
 end
 
-local function findHarvestTool()
+function findHarvestTool()
     return ensureHarvestToolEquipped()
 end
 
 local toolCollectRemote = nil
 local lastRemoteCheckAt = 0
-local function getToolCollectRemote()
+function getToolCollectRemote()
     if toolCollectRemote and toolCollectRemote.Parent then return toolCollectRemote end
     local now = os.clock()
     if now - lastRemoteCheckAt < 1.0 then return nil end
@@ -3087,7 +3093,7 @@ local function getToolCollectRemote()
 end
 
 local lastSwingAt = 0
-local function swingDigTool()
+function swingDigTool()
     local now = os.clock()
     if now - lastSwingAt < 0.15 then return end
     lastSwingAt = now
@@ -3114,7 +3120,7 @@ end
 
 local TOKEN_CACHE, TOKEN_CACHE_AT = {}, 0
 local collectedTokens = setmetatable({}, { __mode = "k" })
-local function findFieldTokens(anchorZone, limitX, limitZ, fieldAnchor)
+function findFieldTokens(anchorZone, limitX, limitZ, fieldAnchor)
     local now = os.clock()
     if now - TOKEN_CACHE_AT < 0.08 then
         return TOKEN_CACHE
@@ -3180,7 +3186,7 @@ local patrolTarget = nil
 local activeTokenObj = nil
 local lastPatrolPickAt = 0
 
-local function getActiveFlowerZone(anchorPos)
+function getActiveFlowerZone(anchorPos)
     local zones = Workspace:FindFirstChild("FlowerZones")
     if not zones then return nil end
     local pos = anchorPos or (player.Character and player.Character:FindFirstChild("HumanoidRootPart") and player.Character.HumanoidRootPart.Position)
@@ -3480,7 +3486,7 @@ useSprinklerBuilder = function(fieldAnchor)
 end
 
 local autoDigThread = nil
-local function startAutoDig()
+function startAutoDig()
     if autoDigThread or not CONFIG.ENABLE_AUTO_DIG then return end
     autoDigThread = task.spawn(function()
         while alive() do
@@ -3493,19 +3499,19 @@ local function startAutoDig()
         end
     end)
 end
-local function stopAutoDig()
+function stopAutoDig()
     if autoDigThread then
         pcall(task.cancel, autoDigThread)
         autoDigThread = nil
     end
 end
 
-local function hasOwnHive()
+function hasOwnHive()
     if cachedHivePos or _G.BSS_CLAIMED_HIVE_POS then return true end
     return findAssignedHiveSlot() ~= nil
 end
 
-local function ensureHiveClaimed()
+function ensureHiveClaimed()
     if hasOwnHive() then
         log("Улей", "Свой улей уже есть")
         return true
@@ -3529,7 +3535,7 @@ function Searcher.New()
     }, Searcher)
 end
 
-local function postJson(path, body)
+function postJson(path, body)
     local url = CONFIG.API_URL:gsub("/+$", "") .. path
     local req = (syn and syn.request) or http_request or request
     if type(req) == "function" then
@@ -3549,7 +3555,7 @@ local function postJson(path, body)
     return tostring(responseBody or ""), 200
 end
 
-local function responseRejected(resp)
+function responseRejected(resp)
     local raw = tostring(resp or "")
     local ok, value = pcall(function() return HttpService:JSONDecode(raw) end)
     if ok and type(value) == "table" then
@@ -4488,7 +4494,7 @@ new("TextLabel", {
 })
 new("TextLabel", {
     Size = UDim2.new(0, 220, 0, 25), Position = UDim2.new(0, 58, 0, 10),
-    BackgroundTransparency = 1, Text = "BSS Hopper v1.3.55",
+    BackgroundTransparency = 1, Text = "BSS Hopper v1.3.56",
     TextColor3 = C.text, Font = Enum.Font.GothamBold, TextSize = 22,
     TextXAlignment = Enum.TextXAlignment.Left, Parent = head,
 })
@@ -5339,7 +5345,7 @@ UserInputService.InputBegan:Connect(function(input, processed)
     end)
     if not ok or not center then return end
     local radius = math.max(snake.AbsoluteSize.X, snake.AbsoluteSize.Y)/2 + 8
-    if (input.Position - center).Magnitude <= radius then openMenu() end
+    if (Vector2.new(input.Position.X, input.Position.Y) - center).Magnitude <= radius then openMenu() end
 end)
 
 UserInputService.InputBegan:Connect(function(inp, gpe)
@@ -5567,7 +5573,7 @@ print("=====================================================")
 _G.BSS_Hopper = {
     Switch = Hopper.SwitchMode,
     Toggle = Hopper.Toggle,
-    Open = function() setWindow(true) showPage("main") end,
+    Open = function() setWindow(true); showPage("main") end,
     Close = function() setWindow(false) end,
     Save = saveNow,
     Mode = function() return lastMode end,
