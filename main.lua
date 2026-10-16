@@ -2905,29 +2905,67 @@ local TOKEN_TEXTURE_MAP = {
     ["1674871631"] = "ticket",
     ["2007780065"] = "ticket",
     ["1629547638"] = "honey",
+    ["2314120108"] = "glitter",
+    ["2314120302"] = "glue",
+    ["2314120489"] = "enzymes",
+    ["2314120658"] = "oil",
+    ["2314120800"] = "tropical drink",
+    ["2529094220"] = "star treat",
+    ["2007780188"] = "stinger",
+    ["2007780300"] = "moon charm",
+    ["2007780411"] = "micro-converter",
+    ["1471850800"] = "mythic egg",
 }
 
--- Динамическое авто-построение базы текстур токенов из ReplicatedStorage игры
+-- Динамическое сканирование UI инвентаря и ReplicatedStorage для сопоставления текстур предметов
 function buildTokenTextureMap()
-    local rep = game:GetService("ReplicatedStorage")
-    local folders = { rep:FindFirstChild("Collectibles"), rep:FindFirstChild("Icons"), rep:FindFirstChild("ItemData") }
-    for _, folder in ipairs(folders) do
-        if folder then
-            for _, item in ipairs(folder:GetChildren()) do
-                local itemName = string.lower(item.Name)
-                for _, d in ipairs(item:GetDescendants()) do
-                    if d:IsA("Decal") or d:IsA("Texture") or d:IsA("ImageLabel") then
-                        local tex = tostring(d.Texture or d.Image or "")
-                        if tex ~= "" then
-                            TOKEN_TEXTURE_MAP[string.lower(tex)] = itemName
-                            local id = string.match(tex, "%d+")
-                            if id then TOKEN_TEXTURE_MAP[id] = itemName end
+    pcall(function()
+        local pg = player:FindFirstChild("PlayerGui")
+        if pg then
+            for _, d in ipairs(pg:GetDescendants()) do
+                if d:IsA("ImageLabel") or d:IsA("ImageButton") then
+                    local img = tostring(d.Image or "")
+                    local id = string.match(img, "%d+")
+                    if id and #id >= 6 then
+                        local n = string.lower(tostring(d.Name))
+                        local p = d.Parent and string.lower(tostring(d.Parent.Name)) or ""
+                        local gp = d.Parent and d.Parent.Parent and string.lower(tostring(d.Parent.Parent.Name)) or ""
+                        for _, reg in ipairs(TOKEN_REGISTRY) do
+                            for _, kw in ipairs(reg.keywords) do
+                                if string.find(n, kw, 1, true) or string.find(p, kw, 1, true) or string.find(gp, kw, 1, true) then
+                                    TOKEN_TEXTURE_MAP[id] = kw
+                                    TOKEN_TEXTURE_MAP[string.lower(img)] = kw
+                                    break
+                                end
+                            end
                         end
                     end
                 end
             end
         end
-    end
+    end)
+    pcall(function()
+        local rep = game:GetService("ReplicatedStorage")
+        for _, d in ipairs(rep:GetDescendants()) do
+            if d:IsA("Decal") or d:IsA("Texture") or d:IsA("ImageLabel") or d:IsA("ImageButton") then
+                local tex = tostring(d.Texture or d.Image or "")
+                local id = string.match(tex, "%d+")
+                if id and #id >= 6 then
+                    local n = string.lower(tostring(d.Name))
+                    local p = d.Parent and string.lower(tostring(d.Parent.Name)) or ""
+                    for _, reg in ipairs(TOKEN_REGISTRY) do
+                        for _, kw in ipairs(reg.keywords) do
+                            if string.find(n, kw, 1, true) or string.find(p, kw, 1, true) then
+                                TOKEN_TEXTURE_MAP[id] = kw
+                                TOKEN_TEXTURE_MAP[string.lower(tex)] = kw
+                                break
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end)
 end
 pcall(buildTokenTextureMap)
 
@@ -2975,6 +3013,21 @@ TOKEN_REGISTRY = {
 
 isBurstLootActive = false
 
+function isAbilityToken(low)
+    local n = string.lower(tostring(low or ""))
+    return string.find(n, "focus", 1, true)
+        or string.find(n, "melody", 1, true)
+        or string.find(n, "bomb", 1, true)
+        or string.find(n, "boost", 1, true)
+        or string.find(n, "mark", 1, true)
+        or string.find(n, "scratch", 1, true)
+        or string.find(n, "haste", 1, true)
+        or string.find(n, "rage", 1, true)
+        or string.find(n, "beam", 1, true)
+        or string.find(n, "combo", 1, true)
+        or string.find(n, "link", 1, true)
+end
+
 function tokenPriority(name)
     local low = string.lower(tostring(name or ""))
     local pMap = CONFIG.TOKEN_PRIORITIES
@@ -3001,21 +3054,29 @@ function tokenPriority(name)
     for _, w in ipairs(TOKEN_P2) do
         if string.find(low, w, 1, true) then return 2 end
     end
+    if isAbilityToken(low) then return 3 end
+
+    -- Если токен со спрута не распознан точно, но это не мед и не абилка — считаем его редким лутом (P1)!
+    if low ~= "token" and low ~= "cframe" and low ~= "part" and low ~= "" then
+        return 1
+    end
     return 3
 end
 
 function resolveTokenName(obj)
     if not obj then return "token" end
     local cached = TOKEN_NAME_CACHE[obj]
-    if cached then return cached end
+    if cached and cached ~= "token" and cached ~= "cframe" and cached ~= "part" then
+        return cached
+    end
 
     local name = tostring(obj.Name or "")
     local detectedName = nil
 
-    -- 1. Проверяем декали внутри токена по базе текстур BSS
-    local okC, children = pcall(function() return obj:GetChildren() end)
-    if okC and children then
-        for _, child in ipairs(children) do
+    -- 1. Проверяем декали внутри токена по базе текстур BSS (через GetDescendants)
+    local okC, descendants = pcall(function() return obj:GetDescendants() end)
+    if okC and descendants then
+        for _, child in ipairs(descendants) do
             if child:IsA("Decal") or child:IsA("Texture") then
                 local tex = tostring(child.Texture or "")
                 local lowTex = string.lower(tex)
@@ -3026,6 +3087,13 @@ function resolveTokenName(obj)
                 elseif id and TOKEN_TEXTURE_MAP[id] then
                     detectedName = TOKEN_TEXTURE_MAP[id]
                     break
+                elseif id and #id >= 6 then
+                    -- Мгновенно обновляем базу если попался неизвестный ID
+                    pcall(buildTokenTextureMap)
+                    if TOKEN_TEXTURE_MAP[id] then
+                        detectedName = TOKEN_TEXTURE_MAP[id]
+                        break
+                    end
                 end
                 local cName = string.lower(tostring(child.Name or ""))
                 if cName ~= "frontdecal" and cName ~= "backdecal" and cName ~= "decal" and cName ~= "" then
@@ -3073,18 +3141,35 @@ function resolveTokenName(obj)
         end
     end
 
+    -- 4. Если токен имеет декаль, которая не мед и не абилка — это предмет!
+    if not detectedName and okC and descendants then
+        for _, child in ipairs(descendants) do
+            if child:IsA("Decal") or child:IsA("Texture") then
+                local tex = tostring(child.Texture or "")
+                if tex ~= "" and not isHoneyToken(tex) and not isAbilityToken(tex) then
+                    detectedName = "sprout_item"
+                    break
+                end
+            end
+        end
+    end
+
     local result = detectedName or (name ~= "" and name or "token")
-    TOKEN_NAME_CACHE[obj] = result
+    if result ~= "token" and result ~= "cframe" and result ~= "part" then
+        TOKEN_NAME_CACHE[obj] = result
+    end
     return result
 end
 
 function getTokenPriorityForObj(obj)
     if not obj then return 3 end
     local cached = TOKEN_PRIO_CACHE[obj]
-    if cached then return cached end
+    if cached and cached ~= 3 then return cached end
     local name = resolveTokenName(obj)
     local prio = tokenPriority(name)
-    TOKEN_PRIO_CACHE[obj] = prio
+    if prio ~= 3 or name ~= "token" then
+        TOKEN_PRIO_CACHE[obj] = prio
+    end
     return prio
 end
 
@@ -3220,11 +3305,8 @@ function findFieldTokens(anchorZone, limitX, limitZ, fieldAnchor)
 
     local out = {}
     local zonePos = anchorZone and anchorZone.Position
-    local maxRadiusSq = 55 * 55
-    if anchorZone then
-        local maxR = math.max(anchorZone.Size.X, anchorZone.Size.Z) * 0.5 + 2
-        maxRadiusSq = maxR * maxR
-    end
+    local maxRadius = (anchorZone and math.max(anchorZone.Size.X, anchorZone.Size.Z) * 0.5 + 30) or 65
+    local maxRadiusSq = maxRadius * maxRadius
 
     for _, folderName in ipairs(TOKEN_FOLDERS) do
         local folder = Workspace:FindFirstChild(folderName)
@@ -3241,14 +3323,17 @@ function findFieldTokens(anchorZone, limitX, limitZ, fieldAnchor)
                                 local dz = pos.Z - zonePos.Z
                                 if (dx * dx + dz * dz) <= maxRadiusSq then
                                     local lp = anchorZone.CFrame:PointToObjectSpace(pos)
-                                    if math.abs(lp.X) <= limitX and math.abs(lp.Z) <= limitZ then
+                                    local half = anchorZone.Size * 0.5
+                                    if math.abs(lp.X) <= half.X + 25 and math.abs(lp.Z) <= half.Z + 25 then
                                         inField = true
                                     end
                                 end
                             elseif fieldAnchor then
                                 local dx = pos.X - fieldAnchor.X
                                 local dz = pos.Z - fieldAnchor.Z
-                                inField = (dx * dx + dz * dz) <= 1764
+                                inField = (dx * dx + dz * dz) <= (65 * 65)
+                            else
+                                inField = true
                             end
 
                             if inField then
@@ -3377,7 +3462,7 @@ collectTokensFor = function(maxSeconds, stopFn, fieldAnchor)
                 end
             end
 
-            -- Поиск токенов СТРОГО внутри границ поля (токены за полем ПОЛНОСТЬЮ отсеяны в findFieldTokens)
+            -- Поиск токенов внутри и вокруг поля
             local tokens = findFieldTokens(anchorZone, limitX, limitZ, fieldAnchor)
             local best, bestKey = nil, math.huge
             for _, token in ipairs(tokens) do
@@ -3386,8 +3471,7 @@ collectTokensFor = function(maxSeconds, stopFn, fieldAnchor)
                     local dx = token.pos.X - rootPos.X
                     local dz = token.pos.Z - rootPos.Z
                     local distSq = dx * dx + dz * dz
-                    if distSq <= 16.0 then
-                        -- Персонаж уже коснулся токена: помечаем собранным, не ждем пока BSS его удалит!
+                    if distSq <= 6.25 then
                         collectedTokens[tobj] = true
                     else
                         local p = token.priority
@@ -3408,15 +3492,31 @@ collectTokensFor = function(maxSeconds, stopFn, fieldAnchor)
                 end
             end
 
-            -- Скорость бега: при Burst-сборе до 110, обычно 90
-            local targetSpeed = isBurstLootActive and 110 or 90
+            -- При P1 или Burst-сборе скорость до 110, обычно 90
+            local isP1 = best and best.priority == 1
+            local targetSpeed = (isP1 or isBurstLootActive) and 110 or 90
             if math.abs(humanoid.WalkSpeed - targetSpeed) > 0.05 then
                 humanoid.WalkSpeed = targetSpeed
             end
 
+            -- Не копаем во время охоты за P1 токеном, чтобы не сбивать спринт!
+            if not isP1 and not isBurstLootActive then
+                pcall(swingDigTool)
+            end
+
             if best then
+                if activeTokenObj ~= best.obj and isP1 then
+                    local tName = resolveTokenName(best.obj)
+                    log("Token", string.format("⚡ Бегу за приоритетным токеном: %s (P1) на расстоянии %.1f studs!", tName, math.sqrt(bestKey)))
+                end
                 activeTokenObj = best.obj
-                patrolTarget = Vector3.new(best.pos.X, root.Position.Y, best.pos.Z)
+                patrolTarget = best.pos
+
+                -- Прыжок если токен находится на уступе / холме или если персонаж уперся
+                local myY = root.Position.Y
+                if (best.pos.Y - myY > 2.0) or ((root.Position - best.pos).Magnitude > 3 and root.AssemblyLinearVelocity.Magnitude < 1.0) then
+                    humanoid.Jump = true
+                end
             else
                 activeTokenObj = nil
                 local needNewPatrol = not patrolTarget 
@@ -3444,18 +3544,18 @@ collectTokensFor = function(maxSeconds, stopFn, fieldAnchor)
                         patrolTarget = root.Position
                     end
                 end
+
+                -- Ограничиваем случайный патруль (когда токенов нет), но НЕ обрезаем реальный токен!
+                if anchorZone and patrolTarget then
+                    local lp = anchorZone.CFrame:PointToObjectSpace(patrolTarget)
+                    local safeX = math.clamp(lp.X, -limitX, limitX)
+                    local safeZ = math.clamp(lp.Z, -limitZ, limitZ)
+                    local safeWorld = anchorZone.CFrame:PointToWorldSpace(Vector3.new(safeX, lp.Y, safeZ))
+                    patrolTarget = Vector3.new(safeWorld.X, root.Position.Y, safeWorld.Z)
+                end
             end
 
-            -- Ограничение цели СТРОГО в границы поля
-            if anchorZone and patrolTarget then
-                local lp = anchorZone.CFrame:PointToObjectSpace(patrolTarget)
-                local safeX = math.clamp(lp.X, -limitX, limitX)
-                local safeZ = math.clamp(lp.Z, -limitZ, limitZ)
-                local safeWorld = anchorZone.CFrame:PointToWorldSpace(Vector3.new(safeX, lp.Y, safeZ))
-                patrolTarget = Vector3.new(safeWorld.X, root.Position.Y, safeWorld.Z)
-            end
-
-            -- Бег строго через MoveTo (без конфликтующих вызовов Move, которые отменяли ходьбу)
+            -- Бег строго через MoveTo к цели
             if patrolTarget then
                 humanoid:MoveTo(patrolTarget)
             end
@@ -4742,7 +4842,7 @@ new("TextLabel", {
 })
 new("TextLabel", {
     Size = UDim2.new(0, 220, 0, 25), Position = UDim2.new(0, 58, 0, 10),
-    BackgroundTransparency = 1, Text = "BSS Hopper v1.3.62",
+    BackgroundTransparency = 1, Text = "BSS Hopper v1.3.63",
     TextColor3 = C.text, Font = Enum.Font.GothamBold, TextSize = 22,
     TextXAlignment = Enum.TextXAlignment.Left, Parent = head,
 })
