@@ -298,6 +298,7 @@ local CONFIG = {
     FARM_REGION = "center", -- center / left / right
     ANTI_LAG = true,
     SUPER_OPTIMIZE = false,
+    AVOID_FRIENDS = true,
     ENABLE_AUTO_SPRINKLER = true, SPRINKLER_COUNT = 3,
 
     SPRINKLER_KEYWORD = "sprinkler", DIG_TOOL_KEYWORD = "scooper",
@@ -426,7 +427,7 @@ local SAVED_KEYS = {
     "PUFFSHROOM_CHANNEL_ID","PUFF_MIN_RARITY","PUFF_MIN_LEVEL_COMMON","PUFF_MIN_LEVEL_RARE",
     "PUFF_MIN_LEVEL_EPIC","PUFF_MIN_LEVEL_LEGENDARY","PUFF_MIN_LEVEL_MYTHIC",
     "WALK_SPEED_MULT","FLY_SPEED","JUMP_POWER","BACKPACK_FILL_THRESHOLD","HONEY_MAX_WAIT",
-    "TOKEN_SCAN_INTERVAL","TOKEN_PATROL_TIME","FARM_REGION","ANTI_LAG","SUPER_OPTIMIZE","SPRINKLER_KEYWORD","DIG_TOOL_KEYWORD",
+    "TOKEN_SCAN_INTERVAL","TOKEN_PATROL_TIME","FARM_REGION","ANTI_LAG","SUPER_OPTIMIZE","AVOID_FRIENDS","SPRINKLER_KEYWORD","DIG_TOOL_KEYWORD",
     "ENABLE_AUTO_SPRINKLER","SPRINKLER_COUNT",
     "ENABLE_AUTO_DIG","EMPTY_SLOT_KEYWORD","MY_HIVE_KEYWORD","CLAIM_TIMEOUT",
     "CLAIM_APPROACH","CLAIM_PROMPT_WAIT","ENABLE_BYPASS","BYPASS_RETRY",
@@ -1719,15 +1720,107 @@ function detectViciousKind(obj)
     return "wild"
 end
 
-function getServerList()
-    local ok, res = pcall(function()
-        return game:HttpGet("https://games.roblox.com/v1/games/" ..
-            tostring(CONFIG.PLACE_ID) .. "/servers/Public?sortOrder=Asc&limit=100")
+-- ══════════════════════════════════════════════════════════════════════
+--  ЗАЩИТА ОТ СЕРВЕРОВ ДРУЗЕЙ (АНТИ-ПАЛЕВО)
+-- ══════════════════════════════════════════════════════════════════════
+local friendJobIds = {}
+local friendUserIds = {}
+local lastFriendsCheckAt = 0
+
+function updateFriendsList()
+    if os.clock() - lastFriendsCheckAt < 20 and next(friendUserIds) ~= nil then
+        return friendJobIds, friendUserIds
+    end
+    lastFriendsCheckAt = os.clock()
+    friendJobIds = {}
+    friendUserIds = {}
+
+    -- 1. Получение списка друзей онлайн через Roblox Player API
+    pcall(function()
+        local online = player:GetFriendsOnline(200)
+        if type(online) == "table" then
+            for _, f in ipairs(online) do
+                if f.VisitorId then
+                    friendUserIds[tonumber(f.VisitorId)] = true
+                end
+                if f.GameId and f.GameId ~= "" then
+                    friendJobIds[tostring(f.GameId)] = true
+                end
+            end
+        end
     end)
-    if not ok then return nil end
+
+    -- 2. Получение списка друзей через HTTP API (Roblox Presence)
+    pcall(function()
+        local url = "https://friends.roblox.com/v1/users/" .. tostring(player.UserId) .. "/friends/online"
+        local res = game:HttpGet(url)
+        local d = HttpService:JSONDecode(res)
+        if d and d.data then
+            for _, f in ipairs(d.data) do
+                if f.id then
+                    friendUserIds[tonumber(f.id)] = true
+                end
+                if f.userPresence and f.userPresence.gameId and f.userPresence.gameId ~= "" then
+                    friendJobIds[tostring(f.userPresence.gameId)] = true
+                end
+            end
+        end
+    end)
+
+    return friendJobIds, friendUserIds
+end
+
+function checkFriendInServer()
+    if CONFIG.AVOID_FRIENDS == false then return false end
+    updateFriendsList()
+    for _, plr in ipairs(Players:GetPlayers()) do
+        if plr ~= player then
+            local isFriend = false
+            if friendUserIds[plr.UserId] then
+                isFriend = true
+            else
+                local ok, res = pcall(function() return player:IsFriendsWith(plr.UserId) end)
+                if ok and res then
+                    isFriend = true
+                    friendUserIds[plr.UserId] = true
+                end
+            end
+            if isFriend then
+                return true, plr.Name
+            end
+        end
+    end
+    return false
+end
+
+-- Автоматическая экстренная эвакуация, если друг подключился на сервер во время работы
+safeConnect(Players, "PlayerAdded", function(newPlr)
+    if CONFIG.AVOID_FRIENDS == false or newPlr == player then return end
+    task.wait(0.5)
+    local isFriend = false
+    if friendUserIds[newPlr.UserId] then
+        isFriend = true
+    else
+        local ok, res = pcall(function() return player:IsFriendsWith(newPlr.UserId) end)
+        if ok and res then isFriend = true end
+    end
+    if isFriend then
+        log("Защита", string.format("Друг '%s' зашел на сервер! Немедленно меняю сервер ради приватности...", newPlr.Name))
+        task.spawn(hopRandom)
+    end
+end, "friend_evacuate")
+
+function getServerList(cursor)
+    local url = "https://games.roblox.com/v1/games/" ..
+        tostring(CONFIG.PLACE_ID) .. "/servers/Public?limit=100"
+    if cursor and cursor ~= "" then
+        url = url .. "&cursor=" .. tostring(cursor)
+    end
+    local ok, res = pcall(function() return game:HttpGet(url) end)
+    if not ok or not res or res == "" then return nil, nil end
     local ok2, data = pcall(function() return HttpService:JSONDecode(res) end)
-    if not ok2 or not data or not data.data then return nil end
-    return data.data
+    if not ok2 or not data or not data.data then return nil, nil end
+    return data.data, data.nextPageCursor
 end
 
 -- ══════════════════════════════════════════════════════════════════════
@@ -1799,8 +1892,18 @@ pcall(function() addVisitedServer(game.JobId) end)
 
 function getCandidateServers()
     pruneFailures()
-    local servers = getServerList()
+    updateFriendsList()
+
+    local servers, nextCursor = getServerList()
     if not servers then return nil end
+
+    -- Если на 1 странице мало серверов, догружаем 2 страницу для богатого выбора
+    if nextCursor and #servers < 120 then
+        local p2 = getServerList(nextCursor)
+        if p2 and type(p2) == "table" then
+            for _, s in ipairs(p2) do table.insert(servers, s) end
+        end
+    end
 
     local preferLow = CONFIG.PREFER_LOW_PLAYERS ~= false
     local minP = math.max(2, tonumber(CONFIG.MIN_PLAYERS) or 2)
@@ -1810,32 +1913,56 @@ function getCandidateServers()
     local fallback = {}
 
     for _, s in ipairs(servers) do
-        -- Защита от мертвых/зависших серверов:
-        -- 1. Серверы с 1 игроком часто зависшие призраки (ghost servers)
-        -- 2. Пинг должен быть реальным (< 280)
-        local ping = s.ping or 999
-        local isHealthy = (s.ping ~= nil and ping > 0 and ping < 280) and (not s.fps or s.fps >= 15)
+        local sid = tostring(s.id or "")
 
-        if s.id ~= game.JobId and not isFailed(s.id) and not isVisitedServer(s.id)
-            and s.playing < s.maxPlayers and s.playing >= 2 and isHealthy then
-            local entry = { id = s.id, ping = ping, playing = s.playing }
-            table.insert(fallback, entry)
-            if preferLow then
-                if s.playing >= minP and s.playing <= maxP then
-                    table.insert(out, entry)
-                end
-            else
+        -- 1. СТРОГИЙ ЗАПРЕТ: Серверы друзей
+        if CONFIG.AVOID_FRIENDS ~= false and friendJobIds[sid] then
+            continue
+        end
+
+        -- 2. СТРОГИЙ ЗАПРЕТ: Текущий сервер, посещенные и сбойные
+        if sid == game.JobId or isFailed(sid) or isVisitedServer(sid) then
+            continue
+        end
+
+        -- 3. СТРОГИЙ ЗАПРЕТ: Мертвые серверы (< 2 игроков) и переполненные (>= maxPlayers)
+        local playing = tonumber(s.playing) or 0
+        local maxPlr = tonumber(s.maxPlayers) or 6
+        if playing < 2 or playing >= maxPlr then
+            continue
+        end
+
+        -- 4. Проверка качества: пинг и fps (если переданы API)
+        local ping = tonumber(s.ping) or 0
+        local fps = tonumber(s.fps) or 60
+        if (ping > 0 and ping > 300) or fps < 15 then
+            continue
+        end
+
+        local entry = { id = sid, ping = ping, playing = playing }
+        table.insert(fallback, entry)
+        if preferLow then
+            if playing >= minP and playing <= maxP then
                 table.insert(out, entry)
             end
+        else
+            table.insert(out, entry)
         end
     end
 
-    -- Если все доступные серверы попали в блэклист — берем здоровые серверы без блэклиста
+    -- Резервный пул (если все подходящие уже были посещены)
     if #out == 0 and #fallback == 0 then
         for _, s in ipairs(servers) do
-            local ping = s.ping or 999
-            if s.id ~= game.JobId and not isFailed(s.id) and s.playing < s.maxPlayers and s.playing >= 2 and ping < 280 then
-                table.insert(fallback, { id = s.id, ping = ping, playing = s.playing })
+            local sid = tostring(s.id or "")
+            local playing = tonumber(s.playing) or 0
+            local maxPlr = tonumber(s.maxPlayers) or 6
+            local ping = tonumber(s.ping) or 0
+            local fps = tonumber(s.fps) or 60
+            if sid ~= game.JobId and not isFailed(sid)
+                and (CONFIG.AVOID_FRIENDS == false or not friendJobIds[sid])
+                and playing >= 2 and playing < maxPlr
+                and (ping == 0 or ping < 300) and fps >= 15 then
+                table.insert(fallback, { id = sid, ping = ping, playing = playing })
             end
         end
     end
@@ -1843,18 +1970,22 @@ function getCandidateServers()
     local pool = (#out > 0) and out or fallback
     if #pool == 0 then return {} end
 
+    -- Перемешиваем пул для равномерного распределения, чтобы не долбиться всем ботам в один сервер
+    for i = #pool, 2, -1 do
+        local j = math.random(1, i)
+        pool[i], pool[j] = pool[j], pool[i]
+    end
+
     if preferLow then
         table.sort(pool, function(a, b)
             if a.playing ~= b.playing then
                 return a.playing < b.playing
             end
-            return a.ping < b.ping
+            return (a.ping > 0 and b.ping > 0) and (a.ping < b.ping) or false
         end)
-    else
-        table.sort(pool, function(a, b) return a.ping < b.ping end)
     end
 
-    local limit = math.max(1, math.min(5, #pool))
+    local limit = math.max(1, math.min(8, #pool))
     local best = {}
     for i = 1, limit do table.insert(best, pool[i].id) end
     return best
@@ -1895,22 +2026,41 @@ function hopRandom()
         return false
     end
     armTeleportPersistence()
+
     local candidates = getCandidateServers()
     if candidates and #candidates > 0 then
         local target = candidates[math.random(1, #candidates)]
         if hopTo(target) then return end
     end
-    if attemptCounter >= (tonumber(CONFIG.MAX_ATTEMPTS) or 3) then clearFailures() end
-    lastAttemptId += 1
-    lastTeleportAt = os.clock()
-    markTeleport(nil)
-    flushSettings()
-    armTeleportPersistence()
-    if CONFIG.ENABLE_BYPASS then bypassNotify() end
-    local pid = tonumber(CONFIG.PLACE_ID) or 1537690962
-    pcall(function() TeleportService:Teleport(pid, player) end)
+
+    -- Если все подходящие кандидаты временно сбоили — сбрасываем список сбоев и пробуем снова
+    clearFailures()
+    candidates = getCandidateServers()
+    if candidates and #candidates > 0 then
+        local target = candidates[math.random(1, #candidates)]
+        if hopTo(target) then return end
+    end
+
+    -- АБСОЛЮТНЫЙ ЗАПРЕТ на слепой вызов TeleportService:Teleport(placeId)!
+    -- Именно вызов TeleportService:Teleport без JobId закидывает игрока на серверы друзей
+    -- и приводит к бесконечной загрузке!
+    log("Телепорт", "Повторный безопасный перебор публичных серверов без друзей...")
+    local servers = getServerList()
+    if servers then
+        updateFriendsList()
+        for _, s in ipairs(servers) do
+            local sid = tostring(s.id or "")
+            local p = tonumber(s.playing) or 0
+            local maxP = tonumber(s.maxPlayers) or 6
+            if sid ~= game.JobId and p >= 2 and p < maxP
+                and (CONFIG.AVOID_FRIENDS == false or not friendJobIds[sid]) then
+                if hopTo(sid) then return end
+            end
+        end
+    end
 end
 
+-- СТОРОЖЕВОЙ ТАЙМЕР ЗАВИСШЕГО ПОДКЛЮЧЕНИЯ (ЗАЩИТА ОТ БЕСКОНЕЧНОЙ ЗАГРУЗКИ)
 task.spawn(function()
     while true do
         if not alive() then return end
@@ -1919,16 +2069,33 @@ task.spawn(function()
             if isConvertingHoney then
                 clearTeleport()
             else
-                local timeout = math.clamp(tonumber(CONFIG.CONNECT_TIMEOUT) or 12, 8, 20)
-            if os.clock() - pendingAt >= timeout then
-                local target = pendingTarget
-                clearTeleport()
-                if target then rememberFailure(target) end
-                log("TP", string.format("Таймаут подключения (%dс) к серверу %s! Завис на экране загрузки. Подключаюсь через общий Matchmaker...", timeout, tostring(target)))
-                armTeleportPersistence()
-                local pid = tonumber(CONFIG.PLACE_ID) or 1537690962
-                pcall(function() TeleportService:Teleport(pid, player) end)
-            end
+                local timeout = math.clamp(tonumber(CONFIG.CONNECT_TIMEOUT) or 10, 6, 14)
+                if os.clock() - pendingAt >= timeout then
+                    local target = pendingTarget
+                    clearTeleport()
+                    if target then
+                        rememberFailure(target)
+                        log("TP", string.format("Таймаут подключения (%dс) к серверу %s! Сервер завис на загрузке. Заношу в черный список и подключаюсь к новому серверу...", timeout, tostring(target)))
+                    end
+
+                    pcall(function()
+                        if type(TeleportService.TeleportCancel) == "function" then
+                            TeleportService:TeleportCancel()
+                        end
+                    end)
+
+                    task.wait(0.5)
+                    armTeleportPersistence()
+
+                    -- Подключаемся к другому проверенному живому серверу
+                    local newCandidates = getCandidateServers()
+                    if newCandidates and #newCandidates > 0 then
+                        local nextTarget = newCandidates[math.random(1, #newCandidates)]
+                        hopTo(nextTarget)
+                    else
+                        rejoinSame()
+                    end
+                end
             end
         end
     end
@@ -1939,14 +2106,18 @@ function rejoinSame()
     local servers = getServerList()
     if servers then
         pruneFailures()
+        updateFriendsList()
         for _, s in ipairs(servers) do
-            if s.playing < s.maxPlayers and not isFailed(s.id) then
-                hopTo(s.id); return
+            local sid = tostring(s.id or "")
+            local p = tonumber(s.playing) or 0
+            local maxP = tonumber(s.maxPlayers) or 6
+            if sid ~= game.JobId and p >= 2 and p < maxP
+                and not isFailed(sid)
+                and (CONFIG.AVOID_FRIENDS == false or not friendJobIds[sid]) then
+                hopTo(sid); return
             end
         end
     end
-    armTeleportPersistence()
-    pcall(function() TeleportService:Teleport(CONFIG.PLACE_ID, player) end)
 end
 
 local RETRYABLE_TELEPORT_CODES = { [2]=true, [3]=true, [279]=true, [267]=true }
@@ -4752,6 +4923,19 @@ function Solo:Start()
                 cachedHiveSlot = nil
                 cachedHivePos = nil
 
+                -- Проверка на наличие друзей на сервере (Анти-Палево)
+                if CONFIG.AVOID_FRIENDS ~= false then
+                    local hasFriend, friendName = checkFriendInServer()
+                    if hasFriend then
+                        log("Защита", string.format("На сервере обнаружен друг '%s'! Немедленно покидаю сервер...", tostring(friendName)))
+                        s.currentStatus = "Обнаружен друг " .. tostring(friendName) .. " — меняю сервер..."
+                        task.wait(1.5)
+                        hopRandom()
+                        task.wait(6)
+                        return
+                    end
+                end
+
                 -- Проверяем сервер на наличие ростка или вициуса
                 s.currentStatus = "Проверяю сервер на росток и вициус..."
                 local vicious = CONFIG.CHECK_VICIOUS and findVicious() or nil
@@ -5159,7 +5343,7 @@ new("TextLabel", {
 })
 new("TextLabel", {
     Size = UDim2.new(0, 220, 0, 25), Position = UDim2.new(0, 58, 0, 10),
-    BackgroundTransparency = 1, Text = "BSS Hopper v1.3.66",
+    BackgroundTransparency = 1, Text = "BSS Hopper v1.3.67",
     TextColor3 = C.text, Font = Enum.Font.GothamBold, TextSize = 22,
     TextXAlignment = Enum.TextXAlignment.Left, Parent = head,
 })
@@ -5842,6 +6026,10 @@ local getSuperOpt = makeToggle(pageSettings, "⚡ УЛЬТРА-ОПТИМИЗА�
     applySuperOptimization(v)
     if saveNow then pcall(saveNow) end
 end)
+local getAvoidFriends = makeToggle(pageSettings, "🛡️ АНТИ-ПАЛЕВО: избегать друзей", CONFIG.AVOID_FRIENDS, 56, function(v)
+    CONFIG.AVOID_FRIENDS = v
+    if saveNow then pcall(saveNow) end
+end)
 
 applySettings = function()
     local function num(v, def)
@@ -5878,6 +6066,9 @@ applySettings = function()
     if getSuperOpt then
         CONFIG.SUPER_OPTIMIZE = getSuperOpt()
         applySuperOptimization(CONFIG.SUPER_OPTIMIZE)
+    end
+    if getAvoidFriends then
+        CONFIG.AVOID_FRIENDS = getAvoidFriends()
     end
     applyWalkSpeed()
     if saveNow then pcall(saveNow) end
