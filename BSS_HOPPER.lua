@@ -1818,8 +1818,8 @@ safeConnect(Players, "PlayerAdded", function(newPlr)
 end, "friend_evacuate")
 
 function getServerList(cursor)
-    local url = "https://games.roblox.com/v1/games/" ..
-        tostring(CONFIG.PLACE_ID) .. "/servers/Public?limit=100"
+    local pid = tonumber(CONFIG.PLACE_ID) or (game and game.PlaceId) or 1537690962
+    local url = "https://games.roblox.com/v1/games/" .. tostring(pid) .. "/servers/Public?sortOrder=Asc&limit=100"
     if cursor and cursor ~= "" then
         url = url .. "&cursor=" .. tostring(cursor)
     end
@@ -2004,23 +2004,34 @@ function markTeleport(j) pendingTarget = j; pendingAt = os.clock(); resetRejoinT
 function clearTeleport() pendingTarget = nil; pendingAt = 0 end
 
 function hopTo(jobId, placeId)
+    -- Защита от блокировки прыжка: если рюкзак пуст, флаг конвертации сбрасывается
     if isConvertingHoney then
-        log("Телепорт", "Отмена прыжка: идет конвертация меда в улье!")
-        return false
+        local bp = getBackpackPollen()
+        if not bp or not bp.current or bp.current <= 0 then
+            isConvertingHoney = false
+        else
+            log("Телепорт", "Отмена прыжка: идет конвертация меда в улье!")
+            return false
+        end
     end
-    if not jobId then return false end
+
+    if not jobId or jobId == "" then return false end
     lastAttemptId += 1
     lastTeleportAt = os.clock()
     markTeleport(jobId)
     flushSettings()
     armTeleportPersistence()
     if CONFIG.ENABLE_BYPASS then bypassNotify() end
-    local pid = tonumber(placeId) or tonumber(CONFIG.PLACE_ID) or 1537690962
-    local ok = pcall(function()
+
+    local pid = tonumber(placeId) or tonumber(CONFIG.PLACE_ID) or (game and game.PlaceId) or 1537690962
+    log("Телепорт", string.format("Телепортируюсь на сервер %s (PlaceId: %d)...", tostring(jobId):sub(1, 12), pid))
+
+    local ok, err = pcall(function()
         TeleportService:TeleportToPlaceInstance(pid, jobId, player)
     end)
     if not ok then
         rememberFailure(jobId)
+        log("Телепорт", "Сбой вызова TeleportToPlaceInstance: " .. tostring(err))
         if CONFIG.ENABLE_BYPASS then bypassRecover("teleport_fail") end
         return false
     end
@@ -2028,30 +2039,40 @@ function hopTo(jobId, placeId)
 end
 
 function hopRandom()
+    -- Защита от зависшего флага конвертации
     if isConvertingHoney then
-        log("Телепорт", "Отмена прыжка: идет конвертация меда в улье!")
-        return false
+        local bp = getBackpackPollen()
+        if not bp or not bp.current or bp.current <= 0 then
+            isConvertingHoney = false
+        else
+            log("Телепорт", "Отмена прыжка: идет конвертация меда в улье!")
+            return false
+        end
     end
     armTeleportPersistence()
 
     local candidates = getCandidateServers()
     if candidates and #candidates > 0 then
-        local target = candidates[math.random(1, #candidates)]
-        if hopTo(target) then return end
+        for i = 1, math.min(4, #candidates) do
+            local target = candidates[i]
+            if hopTo(target) then return true end
+            task.wait(0.25)
+        end
     end
 
-    -- Если все подходящие кандидаты временно сбоили — сбрасываем список сбоев и пробуем снова
+    -- Если кандидаты в списке сбоев — очищаем временные ошибки и пробуем снова
     clearFailures()
     candidates = getCandidateServers()
     if candidates and #candidates > 0 then
-        local target = candidates[math.random(1, #candidates)]
-        if hopTo(target) then return end
+        for i = 1, math.min(4, #candidates) do
+            local target = candidates[i]
+            if hopTo(target) then return true end
+            task.wait(0.25)
+        end
     end
 
-    -- АБСОЛЮТНЫЙ ЗАПРЕТ на слепой вызов TeleportService:Teleport(placeId)!
-    -- Именно вызов TeleportService:Teleport без JobId закидывает игрока на серверы друзей
-    -- и приводит к бесконечной загрузке!
-    log("Телепорт", "Повторный безопасный перебор публичных серверов без друзей...")
+    -- Резервный поиск любого живого сервера с открытыми слотами (>= 2 игроков и < maxPlayers)
+    log("Телепорт", "Резервный перебор живых серверов...")
     local servers = getServerList()
     if servers then
         updateFriendsList()
@@ -2061,10 +2082,11 @@ function hopRandom()
             local maxP = tonumber(s.maxPlayers) or 6
             if sid ~= game.JobId and p >= 2 and p < maxP
                 and (CONFIG.AVOID_FRIENDS == false or not friendJobIds[sid]) then
-                if hopTo(sid) then return end
+                if hopTo(sid) then return true end
             end
         end
     end
+    return false
 end
 
 -- СТОРОЖЕВОЙ ТАЙМЕР ЗАВИСШЕГО ПОДКЛЮЧЕНИЯ (ЗАЩИТА ОТ БЕСКОНЕЧНОЙ ЗАГРУЗКИ)
@@ -5347,7 +5369,7 @@ new("TextLabel", {
 })
 new("TextLabel", {
     Size = UDim2.new(0, 220, 0, 25), Position = UDim2.new(0, 58, 0, 10),
-    BackgroundTransparency = 1, Text = "BSS Hopper v1.3.68",
+    BackgroundTransparency = 1, Text = "BSS Hopper v1.3.69",
     TextColor3 = C.text, Font = Enum.Font.GothamBold, TextSize = 22,
     TextXAlignment = Enum.TextXAlignment.Left, Parent = head,
 })
