@@ -1961,6 +1961,10 @@ local function findYellowHivePads()
     return results
 end
 
+-- Кэш назначенного улья (сохраняется на всё время пребывания на текущем сервере)
+local cachedHiveSlot = nil
+local cachedHivePos = nil
+
 -- Прямой поиск промпта Make Honey своего улья в Workspace
 local function findMyHivePromptAndPos()
     local roots = {}
@@ -2027,6 +2031,14 @@ local function getHivePlatformRecords()
                 or model:FindFirstChild("Platform")
                 or model:FindFirstChild("Pad")
                 or model:FindFirstChildWhichIsA("BasePart")
+            if not platform then
+                for _, desc in ipairs(model:GetDescendants()) do
+                    if desc:IsA("BasePart") and (desc.Name == "Circle" or desc.Name == "Pad" or desc.Name == "Platform") then
+                        platform = desc
+                        break
+                    end
+                end
+            end
             if platform and platform:IsA("BasePart") then
                 table.insert(records, {
                     model = model,
@@ -2042,22 +2054,42 @@ local function getHivePlatformRecords()
 end
 
 local function findAssignedHiveSlot()
+    -- 0. Кэш своего улья: если на этом сервере позиция уже известна, используем её мгновенно
+    if cachedHiveSlot and cachedHiveSlot.pos then
+        return cachedHiveSlot
+    end
+    if cachedHivePos then
+        return { pos = cachedHivePos, model = nil, platform = nil, prompt = nil }
+    end
+    if _G.BSS_CLAIMED_HIVE_POS then
+        cachedHivePos = _G.BSS_CLAIMED_HIVE_POS
+        return { pos = cachedHivePos, model = nil, platform = nil, prompt = nil }
+    end
+
     -- 1. Сначала проверяем прямой prompt "Make Honey"
     local prompt, promptPos = findMyHivePromptAndPos()
     if prompt and promptPos then
+        cachedHivePos = promptPos
+        _G.BSS_CLAIMED_HIVE_POS = promptPos
         local records = getHivePlatformRecords()
         for _, slot in ipairs(records) do
             if (slot.pos - promptPos).Magnitude <= 25 then
                 slot.prompt = prompt
+                cachedHiveSlot = slot
                 return slot
             end
         end
-        return { pos = promptPos, prompt = prompt, platform = prompt.Parent, model = prompt.Parent }
+        local res = { pos = promptPos, prompt = prompt, platform = prompt.Parent, model = prompt.Parent }
+        cachedHiveSlot = res
+        return res
     end
 
-    -- 2. Проверяем records в HivePlatforms
+    -- 2. Проверяем records в HivePlatforms (по имени, ID, TextLabel и ProximityPrompt)
     local ok, records = pcall(getHivePlatformRecords)
     if ok and records then
+        local myName = string.lower(player.Name)
+        local myDisplay = player.DisplayName and string.lower(player.DisplayName) or nil
+
         for _, slot in ipairs(records) do
             local val = nil
             if slot.playerRef then
@@ -2066,22 +2098,42 @@ local function findAssignedHiveSlot()
             local isMe = false
             if val == player or (player.Character and val == player.Character) then
                 isMe = true
-            elseif type(val) == "string" and string.lower(val) == string.lower(player.Name) then
+            elseif type(val) == "string" and string.lower(val) == myName then
                 isMe = true
-            elseif tostring(val) == player.Name or string.lower(tostring(val)) == string.lower(player.Name) then
+            elseif tostring(val) == player.Name or string.lower(tostring(val)) == myName then
                 isMe = true
             end
+
             if not isMe and slot.model then
-                local ownerAttr = slot.model:GetAttribute("Owner") or slot.model:GetAttribute("Player")
-                if ownerAttr and (ownerAttr == player.UserId or string.lower(tostring(ownerAttr)) == string.lower(player.Name)) then
+                local ownerAttr = slot.model:GetAttribute("Owner") or slot.model:GetAttribute("Player") or slot.model:GetAttribute("UserId")
+                if ownerAttr and (ownerAttr == player.UserId or tostring(ownerAttr) == tostring(player.UserId) or string.lower(tostring(ownerAttr)) == myName) then
                     isMe = true
                 end
             end
+
+            -- Проверяем TextLabel на платформе Circle / табличке улья
             if not isMe and slot.model then
-                for _, d in ipairs(slot.model:GetChildren()) do
+                for _, d in ipairs(slot.model:GetDescendants()) do
+                    if d:IsA("TextLabel") then
+                        local txt = string.lower(tostring(d.Text or ""))
+                        if txt == myName or (myDisplay and txt == myDisplay)
+                            or string.find(txt, myName, 1, true)
+                            or (myDisplay and string.find(txt, myDisplay, 1, true)) then
+                            isMe = true
+                            break
+                        end
+                    end
+                end
+            end
+
+            -- Проверяем ProximityPrompt внутри модели
+            if not isMe and slot.model then
+                for _, d in ipairs(slot.model:GetDescendants()) do
                     if d:IsA("ProximityPrompt") then
                         local txt = string.lower(tostring(d.ActionText or ""))
-                        if string.find(txt, "honey", 1, true) or string.find(txt, "make", 1, true) then
+                        local objTxt = string.lower(tostring(d.ObjectText or ""))
+                        if string.find(txt, "honey", 1, true) or string.find(txt, "make", 1, true)
+                            or string.find(objTxt, "honey", 1, true) or string.find(objTxt, "make", 1, true) then
                             isMe = true
                             slot.prompt = d
                             break
@@ -2089,11 +2141,73 @@ local function findAssignedHiveSlot()
                     end
                 end
             end
+
             if isMe then
+                cachedHiveSlot = slot
+                cachedHivePos = slot.pos
+                _G.BSS_CLAIMED_HIVE_POS = slot.pos
                 return slot
             end
         end
     end
+
+    -- 3. Проверяем Workspace.Honeycombs (ульи игроков с табличками имени)
+    local hc = Workspace:FindFirstChild("Honeycombs")
+    if hc then
+        local myName = string.lower(player.Name)
+        local myDisplay = player.DisplayName and string.lower(player.DisplayName) or nil
+        for _, hModel in ipairs(hc:GetChildren()) do
+            local isHcMe = false
+            local o = hModel:FindFirstChild("Owner") or hModel:FindFirstChild("Player")
+            if o and (o.Value == player or string.lower(tostring(o.Value)) == myName) then
+                isHcMe = true
+            end
+            if not isHcMe then
+                local oAttr = hModel:GetAttribute("Owner") or hModel:GetAttribute("Player")
+                if oAttr and (oAttr == player.UserId or string.lower(tostring(oAttr)) == myName) then
+                    isHcMe = true
+                end
+            end
+            if not isHcMe then
+                for _, d in ipairs(hModel:GetDescendants()) do
+                    if d:IsA("TextLabel") then
+                        local txt = string.lower(tostring(d.Text or ""))
+                        if txt == myName or (myDisplay and txt == myDisplay)
+                            or string.find(txt, myName, 1, true)
+                            or (myDisplay and string.find(txt, myDisplay, 1, true)) then
+                            isHcMe = true
+                            break
+                        end
+                    end
+                end
+            end
+            if isHcMe then
+                local hcPos = hModel:GetPivot().Position
+                local records = getHivePlatformRecords()
+                local bestSlot, bestDist = nil, math.huge
+                for _, s in ipairs(records) do
+                    local d = (s.pos - hcPos).Magnitude
+                    if d < bestDist then
+                        bestDist = d
+                        bestSlot = s
+                    end
+                end
+                if bestSlot then
+                    cachedHiveSlot = bestSlot
+                    cachedHivePos = bestSlot.pos
+                    _G.BSS_CLAIMED_HIVE_POS = bestSlot.pos
+                    return bestSlot
+                else
+                    local fallbackSlot = { pos = hcPos, model = hModel, platform = hModel, prompt = nil }
+                    cachedHiveSlot = fallbackSlot
+                    cachedHivePos = hcPos
+                    _G.BSS_CLAIMED_HIVE_POS = hcPos
+                    return fallbackSlot
+                end
+            end
+        end
+    end
+
     return nil
 end
 
@@ -2117,7 +2231,15 @@ local function claimHive()
     local root = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
     local hum = player.Character and player.Character:FindFirstChildOfClass("Humanoid")
     if not root or not hum or hum.Health <= 0 then return false end
-    if findAssignedHiveSlot() then
+    if cachedHivePos then
+        log("Улей", "Свой улей уже сохранен")
+        return true
+    end
+    local assigned = findAssignedHiveSlot()
+    if assigned then
+        cachedHiveSlot = assigned
+        cachedHivePos = assigned.pos
+        _G.BSS_CLAIMED_HIVE_POS = assigned.pos
         log("Улей", "Свой улей уже назначен")
         return true
     end
@@ -2135,7 +2257,7 @@ local function claimHive()
         if hp then
             for _, m in ipairs(hp:GetChildren()) do
                 local pref = m:FindFirstChild("PlayerRef") or m:FindFirstChild("Player") or m:FindFirstChild("Owner")
-                local plat = m:FindFirstChild("Platform") or m:FindFirstChild("Pad") or m:FindFirstChildWhichIsA("BasePart")
+                local plat = m:FindFirstChild("Circle") or m:FindFirstChild("Platform") or m:FindFirstChild("Pad") or m:FindFirstChildWhichIsA("BasePart")
                 if plat and plat:IsA("BasePart") then
                     if not pref or pref.Value == nil then
                         table.insert(freeSlots, { model = m, playerRef = pref, platform = plat, pos = plat.Position })
@@ -2193,8 +2315,12 @@ local function claimHive()
 
         local tryStart = os.clock()
         while alive() and os.clock() - tryStart < 2.0 do
-            if findAssignedHiveSlot() then
+            local found = findAssignedHiveSlot()
+            if found then
                 log("Улей", "Улей успешно занят!")
+                cachedHiveSlot = found
+                cachedHivePos = found.pos
+                _G.BSS_CLAIMED_HIVE_POS = found.pos
                 return true
             end
 
@@ -2232,13 +2358,24 @@ local function claimHive()
             task.wait(0.3)
         end
 
-        if findAssignedHiveSlot() then
+        local foundAfter = findAssignedHiveSlot()
+        if foundAfter then
             log("Улей", "Улей успешно занят!")
+            cachedHiveSlot = foundAfter
+            cachedHivePos = foundAfter.pos
+            _G.BSS_CLAIMED_HIVE_POS = foundAfter.pos
             return true
         end
     end
 
-    return findAssignedHiveSlot() ~= nil
+    local finalCheck = findAssignedHiveSlot()
+    if finalCheck then
+        cachedHiveSlot = finalCheck
+        cachedHivePos = finalCheck.pos
+        _G.BSS_CLAIMED_HIVE_POS = finalCheck.pos
+        return true
+    end
+    return false
 end
 
 local function findMyHive()
@@ -2433,6 +2570,11 @@ local function makeHoney()
         return true
     end
 
+    -- Немедленно останавливаем копание и сбор токенов, чтобы не перебивали полет
+    stopAutoDig()
+    tokenCollectorBusy = false
+    patrolTarget = nil
+
     -- Проверяем наличие своего улья (СТРОГО: без своего улья мед не делаем!)
     if not hasOwnHive() then
         log("Honey", "Улей не назначен — сначала занимаю свободный улей...")
@@ -2447,23 +2589,39 @@ local function makeHoney()
     local hive = findMyHive()
     local slot = findAssignedHiveSlot()
     local prompt, promptPos = findMyHivePromptAndPos()
-    local hivePos = (hive and hive.pos) or (slot and slot.pos) or promptPos
+    local hivePos = (hive and hive.pos) or (slot and slot.pos) or promptPos or cachedHivePos or _G.BSS_CLAIMED_HIVE_POS
 
     if not hivePos then
         log("Honey", "Позиция своего улья не найдена, пробую обновить...")
         slot = findAssignedHiveSlot()
         prompt, promptPos = findMyHivePromptAndPos()
-        hivePos = (slot and slot.pos) or promptPos
+        hivePos = (slot and slot.pos) or promptPos or cachedHivePos or _G.BSS_CLAIMED_HIVE_POS
+    end
+
+    -- Если точная позиция стойки еще не подгрузилась из-за дистанции, летим к хабу ульев (HivePlatforms)
+    if not hivePos then
+        local records = getHivePlatformRecords()
+        if records and #records > 0 then
+            hivePos = records[1].pos
+            log("Honey", "Лечу к зоне ульев для обнаружения точной стойки...")
+        end
     end
 
     if not hivePos then
-        log("Honey", "Позиция своего улья не определена!")
+        log("Honey", "Позиция зоны ульев не определена!")
         return false
     end
 
     log("Honey", "Рюкзак полон! Лечу к улью на разгрузку...")
     -- Подлетаем прямо к платформе улья
     moveRootToPosition(root, hivePos + Vector3.new(0, 3.5, 0), 10)
+
+    -- По прилету перепроверяем точный слот, если ранее летели к общей зоне
+    local updatedSlot = findAssignedHiveSlot()
+    if updatedSlot and updatedSlot.pos then
+        hivePos = updatedSlot.pos
+        slot = updatedSlot
+    end
 
     -- Отключаем ноклип и встаем ровно на платформу
     setFlightNoclip(false)
@@ -2474,7 +2632,7 @@ local function makeHoney()
         hum:ChangeState(Enum.HumanoidStateType.Landed)
         hum:ChangeState(Enum.HumanoidStateType.Running)
     end)
-    task.wait(0.3)
+    task.wait(0.2)
 
     -- Ищем Prompt "Make Honey"
     local activePrompt = prompt or (hive and hive.prompt) or (slot and slot.prompt)
@@ -2521,8 +2679,8 @@ local function makeHoney()
             local isConverting = (currentInfo.current < lastPollen)
             lastPollen = currentInfo.current
 
-            -- Если процесс НЕ идет и прошло > 3.5 сек с прошлой попытки, повторяем нажатие
-            if not isConverting and (os.clock() - lastActionAt > 3.5) then
+            -- Если процесс НЕ идет и прошло > 2 сек с прошлой попытки, повторяем нажатие
+            if not isConverting and (os.clock() - lastActionAt > 2.0) then
                 if not activePrompt then
                     local p2, _ = findMyHivePromptAndPos()
                     if p2 then activePrompt = p2 end
@@ -2540,7 +2698,7 @@ local function makeHoney()
             end
         end
 
-        task.wait(0.4)
+        task.wait(0.3)
     end
 
     log("Honey", "Разгрузка завершена")
@@ -3220,6 +3378,7 @@ local function stopAutoDig()
 end
 
 local function hasOwnHive()
+    if cachedHivePos or _G.BSS_CLAIMED_HIVE_POS then return true end
     return findAssignedHiveSlot() ~= nil
 end
 
@@ -3500,6 +3659,9 @@ function Looter:harvest()
     -- Фаза 1: Росток жив. Бегаем постоянно, машем инструментом, собираем токены
     while alive() and isSproutAlive(sprout, sproutAnchor) do
         if isBackpackFull() then
+            stopAutoDig()
+            tokenCollectorBusy = false
+            patrolTarget = nil
             while isBackpackFull() and alive() do
                 s.currentStatus = "Рюкзак полный — делаю Honey на улье..."
                 makeHoney()
@@ -3518,10 +3680,15 @@ function Looter:harvest()
 
     -- Фаза 2: Росток сломан! Лутаем оставшиеся ценные токены (игнорируя honey tokens)
     if alive() and sproutAnchor then
-        while isBackpackFull() and alive() do
-            s.currentStatus = "Рюкзак полный — делаю Honey"
-            makeHoney()
-            task.wait(1)
+        if isBackpackFull() then
+            stopAutoDig()
+            tokenCollectorBusy = false
+            patrolTarget = nil
+            while isBackpackFull() and alive() do
+                s.currentStatus = "Рюкзак полный — делаю Honey"
+                makeHoney()
+                task.wait(1)
+            end
         end
         if alive() and not isBackpackFull() then
             s.currentStatus = "Росток сломан — собираю ценные токены..."
@@ -3531,10 +3698,15 @@ function Looter:harvest()
         end
     end
 
-    while isBackpackFull() and alive() do
-        s.currentStatus = "Рюкзак полный — делаю Honey"
-        makeHoney()
-        task.wait(1)
+    if isBackpackFull() then
+        stopAutoDig()
+        tokenCollectorBusy = false
+        patrolTarget = nil
+        while isBackpackFull() and alive() do
+            s.currentStatus = "Рюкзак полный — делаю Honey"
+            makeHoney()
+            task.wait(1)
+        end
     end
     return true
 end
@@ -3871,15 +4043,20 @@ function Solo:Start()
                 end
 
                 -- Проверка рюкзака перед поиском целей
-                while isBackpackFull() and alive() do
-                    if not hasOwnHive() then
-                        s.currentStatus = "Рюкзак полон — занимаю свободный улей..."
-                        ensureHiveClaimed()
-                        task.wait(1)
-                    else
-                        s.currentStatus = "Рюкзак полный — делаю Honey на улье..."
-                        makeHoney()
-                        task.wait(1)
+                if isBackpackFull() then
+                    stopAutoDig()
+                    tokenCollectorBusy = false
+                    patrolTarget = nil
+                    while isBackpackFull() and alive() do
+                        if not hasOwnHive() then
+                            s.currentStatus = "Рюкзак полон — занимаю свободный улей..."
+                            ensureHiveClaimed()
+                            task.wait(1)
+                        else
+                            s.currentStatus = "Рюкзак полный — делаю Honey на улье..."
+                            makeHoney()
+                            task.wait(1)
+                        end
                     end
                 end
 
@@ -3907,6 +4084,9 @@ function Solo:Start()
                         -- Фаза 1: Росток жив. Бегает всегда, машет палкой 100%, собирает токены
                         while alive() and isSproutAlive(sprout, sproutAnchor) do
                             if isBackpackFull() then
+                                stopAutoDig()
+                                tokenCollectorBusy = false
+                                patrolTarget = nil
                                 while isBackpackFull() and alive() do
                                     if not hasOwnHive() then
                                         s.currentStatus = "Рюкзак полон — занимаю свободный улей..."
@@ -3934,15 +4114,20 @@ function Solo:Start()
 
                         -- Фаза 2: Росток сломан! Лутаем оставшиеся ценные токены (игнорируя honey tokens)
                         if alive() and sproutAnchor and not (CONFIG.CHECK_VICIOUS and findVicious()) then
-                            while isBackpackFull() and alive() do
-                                if not hasOwnHive() then
-                                    s.currentStatus = "Рюкзак полон — занимаю свободный улей..."
-                                    ensureHiveClaimed()
-                                    task.wait(1)
-                                else
-                                    s.currentStatus = "Рюкзак полный — делаю Honey"
-                                    makeHoney()
-                                    task.wait(1)
+                            if isBackpackFull() then
+                                stopAutoDig()
+                                tokenCollectorBusy = false
+                                patrolTarget = nil
+                                while isBackpackFull() and alive() do
+                                    if not hasOwnHive() then
+                                        s.currentStatus = "Рюкзак полон — занимаю свободный улей..."
+                                        ensureHiveClaimed()
+                                        task.wait(1)
+                                    else
+                                        s.currentStatus = "Рюкзак полный — делаю Honey"
+                                        makeHoney()
+                                        task.wait(1)
+                                    end
                                 end
                             end
                             if alive() and not isBackpackFull() then
@@ -3955,15 +4140,20 @@ function Solo:Start()
                     end
 
                     -- Разгрузка перед переходом на следующий сервер
-                    while isBackpackFull() and alive() do
-                        if not hasOwnHive() then
-                            s.currentStatus = "Рюкзак полон — занимаю свободный улей..."
-                            ensureHiveClaimed()
-                            task.wait(1)
-                        else
-                            s.currentStatus = "Рюкзак полный — делаю Honey перед переходом"
-                            makeHoney()
-                            task.wait(1)
+                    if isBackpackFull() then
+                        stopAutoDig()
+                        tokenCollectorBusy = false
+                        patrolTarget = nil
+                        while isBackpackFull() and alive() do
+                            if not hasOwnHive() then
+                                s.currentStatus = "Рюкзак полон — занимаю свободный улей..."
+                                ensureHiveClaimed()
+                                task.wait(1)
+                            else
+                                s.currentStatus = "Рюкзак полный — делаю Honey перед переходом"
+                                makeHoney()
+                                task.wait(1)
+                            end
                         end
                     end
 
@@ -4199,7 +4389,7 @@ new("TextLabel", {
 })
 new("TextLabel", {
     Size = UDim2.new(0, 220, 0, 25), Position = UDim2.new(0, 58, 0, 10),
-    BackgroundTransparency = 1, Text = "BSS Hopper v1.3.50",
+    BackgroundTransparency = 1, Text = "BSS Hopper v1.3.52",
     TextColor3 = C.text, Font = Enum.Font.GothamBold, TextSize = 22,
     TextXAlignment = Enum.TextXAlignment.Left, Parent = head,
 })
