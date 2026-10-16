@@ -1359,18 +1359,7 @@ function fightVicious(vicious)
             continue
         end
 
-        -- Если персонаж возродился далеко от Вициуса (> 50 стадс) — летим сквозь стены на скорости обратно!
-        if (targetPos - root.Position).Magnitude > 50 then
-            log("Vicious", "Персонаж возродился далеко от Вициуса. Лечу обратно сквозь стены...")
-            moveRootToPosition(root, targetPos + Vector3.new(0, hoverHeight, 0), 8)
-            character = player.Character
-            hum = character and character:FindFirstChildOfClass("Humanoid")
-            root = character and character:FindFirstChild("HumanoidRootPart")
-            if not root or not hum or hum.Health <= 0 then
-                task.wait(0.25)
-                continue
-            end
-        end
+
 
         local dt = RunService.Heartbeat:Wait()
         dt = math.clamp(dt, 1/240, 1/20)
@@ -3254,19 +3243,7 @@ collectTokensFor = function(maxSeconds, stopFn, fieldAnchor)
                 break
             end
 
-            -- Если персонаж оказался далеко от поля (например, после смерти на спавне) — ЛЕТИМ ОБРАТНО, А НЕ БЕЖИМ!
-            if fieldAnchor then
-                local dx = fieldAnchor.X - root.Position.X
-                local dz = fieldAnchor.Z - root.Position.Z
-                if (dx * dx + dz * dz) > 2025 then -- дистанция > 45 стадс
-                    log("Навигация", "Персонаж далеко от поля после смерти. Лечу обратно на поле...")
-                    moveRootToPosition(root, getGroundPos(fieldAnchor), 10)
-                    char = player.Character
-                    root = char and char:FindFirstChild("HumanoidRootPart")
-                    humanoid = char and char:FindFirstChildOfClass("Humanoid")
-                    if not root or not humanoid or humanoid.Health <= 0 then break end
-                end
-            end
+
 
             if not anchorZone then
                 anchorZone = getActiveFlowerZone(root.Position)
@@ -3828,9 +3805,7 @@ function Looter:harvest()
                 s.currentStatus = "Возвращаюсь к ростку после смерти..."
                 moveToSprout(sprout)
             end
-        elseif sproutAnchor and (root.Position - sproutAnchor).Magnitude > 50 then
-            s.currentStatus = "Лечу обратно к ростку..."
-            moveToSprout(sprout)
+
         end
 
         if isBackpackFull() then
@@ -3865,8 +3840,7 @@ function Looter:harvest()
             if newRoot and sproutAnchor then
                 moveRootToPosition(newRoot, getGroundPos(sproutAnchor), 10)
             end
-        elseif root and (root.Position - sproutAnchor).Magnitude > 50 then
-            moveRootToPosition(root, getGroundPos(sproutAnchor), 10)
+
         end
 
         if isBackpackFull() then
@@ -4278,9 +4252,7 @@ function Solo:Start()
                                     s.currentStatus = "Возвращаюсь к ростку после смерти..."
                                     moveToSprout(sprout)
                                 end
-                            elseif sproutAnchor and (root.Position - sproutAnchor).Magnitude > 50 then
-                                s.currentStatus = "Лечу обратно к ростку..."
-                                moveToSprout(sprout)
+
                             end
 
                             if isBackpackFull() then
@@ -4318,8 +4290,7 @@ function Solo:Start()
                                 if newRoot and sproutAnchor then
                                     moveRootToPosition(newRoot, getGroundPos(sproutAnchor), 10)
                                 end
-                            elseif root and (root.Position - sproutAnchor).Magnitude > 50 then
-                                moveRootToPosition(root, getGroundPos(sproutAnchor), 10)
+
                             end
 
                             if isBackpackFull() then
@@ -4585,7 +4556,7 @@ new("TextLabel", {
 })
 new("TextLabel", {
     Size = UDim2.new(0, 220, 0, 25), Position = UDim2.new(0, 58, 0, 10),
-    BackgroundTransparency = 1, Text = "BSS Hopper v1.3.59",
+    BackgroundTransparency = 1, Text = "BSS Hopper v1.3.60",
     TextColor3 = C.text, Font = Enum.Font.GothamBold, TextSize = 22,
     TextXAlignment = Enum.TextXAlignment.Left, Parent = head,
 })
