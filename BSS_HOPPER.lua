@@ -310,6 +310,14 @@ local CONFIG = {
 
     PUFF_MIN_LEVEL_COMMON=0, PUFF_MIN_LEVEL_RARE=0,
     PUFF_MIN_LEVEL_EPIC=0, PUFF_MIN_LEVEL_LEGENDARY=0, PUFF_MIN_LEVEL_MYTHIC=0,
+
+    -- Burst-сбор, фильтрация серверов и кастомные приоритеты токенов
+    BURST_LOOT_ENABLED = true,
+    BURST_LOOT_TIME = 7,
+    PREFER_LOW_PLAYERS = true,
+    MAX_PLAYERS = 5,
+    MIN_PLAYERS = 1,
+    TOKEN_PRIORITIES = {},
 }
 
 local SAVE_FILE = "bss_hopper_config.json"
@@ -388,6 +396,19 @@ function log(tag, msg)
     print(string.format("[BSS Hopper][%s][%.1f] %s", tostring(tag), os.clock(), tostring(msg)))
 end
 
+-- Защита от 20-минутного AFK-кика Roblox (Anti-AFK)
+pcall(function()
+    trackConn(player.Idled:Connect(function()
+        pcall(function()
+            local vu = game:GetService("VirtualUser")
+            if vu then
+                vu:CaptureController()
+                vu:ClickButton2(Vector2.zero)
+            end
+        end)
+    end))
+end)
+
 -- ══════════════════════════════════════════════════════════════════════
 --  СОХРАНЕНИЕ
 -- ══════════════════════════════════════════════════════════════════════
@@ -407,6 +428,7 @@ local SAVED_KEYS = {
     "ENABLE_AUTO_SPRINKLER","SPRINKLER_COUNT",
     "ENABLE_AUTO_DIG","EMPTY_SLOT_KEYWORD","MY_HIVE_KEYWORD","CLAIM_TIMEOUT",
     "CLAIM_APPROACH","CLAIM_PROMPT_WAIT","ENABLE_BYPASS","BYPASS_RETRY",
+    "BURST_LOOT_ENABLED","BURST_LOOT_TIME","PREFER_LOW_PLAYERS","MAX_PLAYERS","MIN_PLAYERS","TOKEN_PRIORITIES",
 }
 
 function applySavedData(data, source)
@@ -1449,22 +1471,104 @@ function pruneFailures()
     end
 end
 
+-- Черный список последних посещенных серверов (Blacklist последних 20 серверов)
+local VISITED_SERVERS_FILE = "bss_recent_servers.json"
+local recentVisitedServers = {}
+
+function loadRecentVisited()
+    pcall(function()
+        if _G.BSS_VISITED_SERVERS and type(_G.BSS_VISITED_SERVERS) == "table" then
+            recentVisitedServers = _G.BSS_VISITED_SERVERS
+        elseif HAS_FS and isfile and isfile(VISITED_SERVERS_FILE) then
+            local raw = readfile(VISITED_SERVERS_FILE)
+            local decoded = HttpService:JSONDecode(raw)
+            if type(decoded) == "table" then recentVisitedServers = decoded end
+        end
+    end)
+end
+loadRecentVisited()
+
+function addVisitedServer(jobId)
+    if not jobId or jobId == "" then return end
+    for i, id in ipairs(recentVisitedServers) do
+        if id == jobId then table.remove(recentVisitedServers, i); break end
+    end
+    table.insert(recentVisitedServers, 1, jobId)
+    while #recentVisitedServers > 25 do
+        table.remove(recentVisitedServers)
+    end
+    _G.BSS_VISITED_SERVERS = recentVisitedServers
+    pcall(function()
+        if HAS_FS and writefile then
+            writefile(VISITED_SERVERS_FILE, HttpService:JSONEncode(recentVisitedServers))
+        end
+    end)
+end
+
+function isVisitedServer(jobId)
+    if not jobId then return false end
+    for _, id in ipairs(recentVisitedServers) do
+        if id == jobId then return true end
+    end
+    return false
+end
+
+-- Добавляем текущий сервер в список посещенных
+pcall(function() addVisitedServer(game.JobId) end)
+
 function getCandidateServers()
     pruneFailures()
     local servers = getServerList()
     if not servers then return nil end
+
+    local preferLow = CONFIG.PREFER_LOW_PLAYERS ~= false
+    local minP = tonumber(CONFIG.MIN_PLAYERS) or 1
+    local maxP = tonumber(CONFIG.MAX_PLAYERS) or 5
+
     local out = {}
+    local fallback = {}
+
     for _, s in ipairs(servers) do
-        if s.id ~= game.JobId and not isFailed(s.id)
+        if s.id ~= game.JobId and not isFailed(s.id) and not isVisitedServer(s.id)
             and s.playing < s.maxPlayers and s.playing > 0 then
-            table.insert(out, { id = s.id, ping = s.ping or 999 })
+            local entry = { id = s.id, ping = s.ping or 999, playing = s.playing }
+            table.insert(fallback, entry)
+            if preferLow then
+                if s.playing >= minP and s.playing <= maxP then
+                    table.insert(out, entry)
+                end
+            else
+                table.insert(out, entry)
+            end
         end
     end
-    if #out == 0 then return out end
-    table.sort(out, function(a, b) return a.ping < b.ping end)
-    local limit = math.max(1, math.floor(#out / 2))
+
+    -- Если все доступные серверы попали в блэклист — снимаем ограничение блэклиста
+    if #out == 0 and #fallback == 0 then
+        for _, s in ipairs(servers) do
+            if s.id ~= game.JobId and not isFailed(s.id) and s.playing < s.maxPlayers and s.playing > 0 then
+                table.insert(fallback, { id = s.id, ping = s.ping or 999, playing = s.playing })
+            end
+        end
+    end
+
+    local pool = (#out > 0) and out or fallback
+    if #pool == 0 then return {} end
+
+    if preferLow then
+        table.sort(pool, function(a, b)
+            if a.playing ~= b.playing then
+                return a.playing < b.playing
+            end
+            return a.ping < b.ping
+        end)
+    else
+        table.sort(pool, function(a, b) return a.ping < b.ping end)
+    end
+
+    local limit = math.max(1, math.min(5, #pool))
     local best = {}
-    for i = 1, limit do table.insert(best, out[i].id) end
+    for i = 1, limit do table.insert(best, pool[i].id) end
     return best
 end
 
@@ -1606,10 +1710,20 @@ function checkAndBypassError()
 
     local isError2 = string.find(fullText, "Error Code: 2")
         or string.find(fullText, "Error Code: 279")
+        or string.find(fullText, "Error Code: 277")
+        or string.find(fullText, "Error Code: 268")
+        or string.find(fullText, "Error Code: 273")
         or string.find(fullText, "Error Code: 267")
+        or string.find(fullText, "Error Code: 260")
+        or string.find(fullText, "Error Code: 261")
+        or string.find(fullText, "Error Code: 262")
         or string.find(fullText, "Connection Failed")
         or string.find(fullText, "Failed to connect")
         or string.find(fullText, "Disconnected")
+        or string.find(fullText, "Lost connection")
+        or string.find(fullText, "kicked")
+        or string.find(fullText, "unexpected client")
+        or string.find(fullText, "shut down")
 
     if isError2 then
         lastErrorBypass = os.clock()
@@ -2831,19 +2945,62 @@ end
 local TOKEN_NAME_CACHE = setmetatable({}, { __mode = "k" })
 local TOKEN_PRIO_CACHE = setmetatable({}, { __mode = "k" })
 
+-- Реестр всех токенов со спрутов в Bee Swarm Simulator
+TOKEN_REGISTRY = {
+    { id = "star_treat", name = "Star Treat", icon = "⭐", keywords = { "star treat" }, defaultPrio = 1 },
+    { id = "eggs", name = "Mythic / Diamond Eggs", icon = "🥚", keywords = { "egg", "diamond egg", "gold egg", "silver egg", "mythic egg" }, defaultPrio = 1 },
+    { id = "star_jelly", name = "Star Jelly", icon = "🌟", keywords = { "star jelly" }, defaultPrio = 1 },
+    { id = "night_bell", name = "Night Bell", icon = "🔔", keywords = { "night bell" }, defaultPrio = 1 },
+    { id = "atomic_treat", name = "Atomic Treat", icon = "☢️", keywords = { "atomic treat" }, defaultPrio = 1 },
+    { id = "magic_bean", name = "Magic Bean", icon = "🌱", keywords = { "magic bean", "bean" }, defaultPrio = 1 },
+    { id = "glitter", name = "Glitter", icon = "✨", keywords = { "glitter" }, defaultPrio = 1 },
+    { id = "glue", name = "Glue", icon = "🧴", keywords = { "glue" }, defaultPrio = 1 },
+    { id = "enzymes", name = "Enzymes", icon = "🧪", keywords = { "enzymes", "enzyme" }, defaultPrio = 1 },
+    { id = "oil", name = "Oil", icon = "🛢️", keywords = { "oil" }, defaultPrio = 1 },
+    { id = "tropical_drink", name = "Tropical Drink", icon = "🍹", keywords = { "tropical drink", "tropical" }, defaultPrio = 1 },
+    { id = "micro_converter", name = "Micro-Converter", icon = "⚡", keywords = { "micro-converter", "converter" }, defaultPrio = 1 },
+    { id = "tickets", name = "Tickets", icon = "🎟️", keywords = { "ticket" }, defaultPrio = 1 },
+    { id = "stinger", name = "Stinger", icon = "🗡️", keywords = { "stinger" }, defaultPrio = 1 },
+    { id = "gumdrops", name = "Gumdrops", icon = "🍬", keywords = { "gumdrop", "gumdrops" }, defaultPrio = 2 },
+    { id = "moon_charm", name = "Moon Charm", icon = "🌙", keywords = { "moon charm" }, defaultPrio = 2 },
+    { id = "royal_jelly", name = "Royal Jelly", icon = "👑", keywords = { "royal jelly" }, defaultPrio = 2 },
+    { id = "dice_smoothie", name = "Field Dice / Smoothie", icon = "🎲", keywords = { "dice", "smoothie", "whirligig" }, defaultPrio = 2 },
+    { id = "berries", name = "Berries (Blue/Straw/Pine/Seed)", icon = "🍓", keywords = { "strawberry", "blueberry", "pineapple", "sunflower", "seed" }, defaultPrio = 2 },
+    { id = "bitter_neon", name = "Bitterberry & Neonberry", icon = "🫐", keywords = { "bitterberry", "neonberry" }, defaultPrio = 2 },
+    { id = "coconut", name = "Coconut", icon = "🥥", keywords = { "coconut" }, defaultPrio = 2 },
+    { id = "treats", name = "Treats (Печенья)", icon = "🍪", keywords = { "treat" }, defaultPrio = 3 },
+    { id = "festive", name = "Gingerbread / Snowflake", icon = "❄️", keywords = { "gingerbread", "snowflake", "festive" }, defaultPrio = 2 },
+    { id = "honey_tokens", name = "Honey Tokens (Жетоны мёда)", icon = "🍯", keywords = { "honey", "honeydrop", "honeytoken" }, defaultPrio = 0 },
+}
+
+isBurstLootActive = false
+
 function tokenPriority(name)
     local low = string.lower(tostring(name or ""))
-    -- Медовые токены: приоритет 99 (игнорируются от целенаправленного бега, собираются только наступая)
+    local pMap = CONFIG.TOKEN_PRIORITIES
+
+    -- 1. Пользовательские приоритеты из настроек
+    if pMap and type(pMap) == "table" then
+        for _, def in ipairs(TOKEN_REGISTRY) do
+            local userPrio = pMap[def.id]
+            local prio = (userPrio ~= nil) and userPrio or def.defaultPrio
+            for _, kw in ipairs(def.keywords) do
+                if string.find(low, kw, 1, true) then
+                    if prio == 0 then return 999 end -- Полный пропуск токена
+                    return prio -- 1, 2 или 3
+                end
+            end
+        end
+    end
+
+    -- 2. Стандартный fallback
     if isHoneyToken(low) then return 99 end
-    -- N1: Супер редкие предметы (Tickets, Eggs, Glue, Extract, Glitter, Star Jelly, Magic Beans и т.д.)
     for _, w in ipairs(TOKEN_P1) do
         if string.find(low, w, 1, true) then return 1 end
     end
-    -- N2: Фрукты, семена, сладости (Blueberry, Strawberry, Seeds, Treats, Bitterberries)
     for _, w in ipairs(TOKEN_P2) do
         if string.find(low, w, 1, true) then return 2 end
     end
-    -- N3: Все остальные токены на поле (способности пчёл, бомбы, бусты, баффы)
     return 3
 end
 
@@ -3195,8 +3352,10 @@ collectTokensFor = function(maxSeconds, stopFn, fieldAnchor)
                 refreshZoneLimits()
             end
 
-            -- Автосвинг палкой (с лимитом вызовов)
-            pcall(swingDigTool)
+            -- Во время Burst-сбора отключаем копание, чтобы не тормозить бег!
+            if not isBurstLootActive then
+                pcall(swingDigTool)
+            end
 
             local rootPos = root.Position
             -- Мгновенно исключаем только что взятый токен, не дожидаясь пока BSS его удалит
@@ -3227,22 +3386,30 @@ collectTokensFor = function(maxSeconds, stopFn, fieldAnchor)
                     local dx = token.pos.X - rootPos.X
                     local dz = token.pos.Z - rootPos.Z
                     local distSq = dx * dx + dz * dz
-                    if distSq <= 14.44 then
+                    if distSq <= 16.0 then
                         -- Персонаж уже коснулся токена: помечаем собранным, не ждем пока BSS его удалит!
                         collectedTokens[tobj] = true
                     else
-                        local score = (token.priority == 1 and 0) or (token.priority == 2 and 100000) or 200000
-                        local key = score + distSq
-                        if key < bestKey then
-                            best = token
-                            bestKey = key
+                        local p = token.priority
+                        if p < 999 then
+                            local score
+                            if isBurstLootActive then
+                                score = (p == 1 and 0) or 5000000
+                            else
+                                score = (p == 1 and 0) or (p == 2 and 100000) or 200000
+                            end
+                            local key = score + distSq
+                            if key < bestKey then
+                                best = token
+                                bestKey = key
+                            end
                         end
                     end
                 end
             end
 
-            -- Скорость бега: статично 90
-            local targetSpeed = 90
+            -- Скорость бега: при Burst-сборе до 110, обычно 90
+            local targetSpeed = isBurstLootActive and 110 or 90
             if math.abs(humanoid.WalkSpeed - targetSpeed) > 0.05 then
                 humanoid.WalkSpeed = targetSpeed
             end
@@ -3799,10 +3966,27 @@ function Looter:harvest()
             end
         end
         if alive() and not isBackpackFull() then
-            s.currentStatus = "Росток сломан — собираю ценные токены..."
-            collectTokensFor(tonumber(CONFIG.BROKEN_WAIT) or 20, function()
-                return not alive() or isBackpackFull()
-            end, sproutAnchor)
+            -- BURST-РЕЖИМ СБОРА
+            if CONFIG.BURST_LOOT_ENABLED ~= false then
+                s.currentStatus = "⚡ BURST-СБОР: Сверхбыстрый сбор редкого лута!"
+                stopAutoDig()
+                tokenCollectorBusy = false
+                patrolTarget = nil
+                isBurstLootActive = true
+                local burstTime = tonumber(CONFIG.BURST_LOOT_TIME) or 7
+                local burstStart = os.clock()
+                collectTokensFor(burstTime, function()
+                    return not alive() or isBackpackFull() or (os.clock() - burstStart >= burstTime)
+                end, sproutAnchor)
+                isBurstLootActive = false
+            end
+
+            if alive() and not isBackpackFull() then
+                s.currentStatus = "Росток сломан — собираю оставшиеся токены..."
+                collectTokensFor(tonumber(CONFIG.BROKEN_WAIT) or 20, function()
+                    return not alive() or isBackpackFull()
+                end, sproutAnchor)
+            end
         end
     end
 
@@ -4287,10 +4471,29 @@ function Solo:Start()
                                 end
                             end
                             if alive() and not isBackpackFull() then
-                                s.currentStatus = "Росток сломан — собираю ценные токены..."
-                                collectTokensFor(tonumber(CONFIG.BROKEN_WAIT) or 20, function()
-                                    return not alive() or isBackpackFull() or (CONFIG.CHECK_VICIOUS and findVicious() ~= nil)
-                                end, sproutAnchor)
+                                -- BURST-РЕЖИМ СБОРА
+                                if CONFIG.BURST_LOOT_ENABLED ~= false then
+                                    s.currentStatus = "⚡ BURST-СБОР: Сверхбыстрый сбор редкого лута!"
+                                    stopAutoDig()
+                                    tokenCollectorBusy = false
+                                    patrolTarget = nil
+                                    isBurstLootActive = true
+                                    local burstTime = tonumber(CONFIG.BURST_LOOT_TIME) or 7
+                                    local burstStart = os.clock()
+                                    collectTokensFor(burstTime, function()
+                                        return not alive() or isBackpackFull()
+                                            or (CONFIG.CHECK_VICIOUS and findVicious() ~= nil)
+                                            or (os.clock() - burstStart >= burstTime)
+                                    end, sproutAnchor)
+                                    isBurstLootActive = false
+                                end
+
+                                if alive() and not isBackpackFull() and not (CONFIG.CHECK_VICIOUS and findVicious()) then
+                                    s.currentStatus = "Росток сломан — собираю оставшиеся токены..."
+                                    collectTokensFor(tonumber(CONFIG.BROKEN_WAIT) or 20, function()
+                                        return not alive() or isBackpackFull() or (CONFIG.CHECK_VICIOUS and findVicious() ~= nil)
+                                    end, sproutAnchor)
+                                end
                             end
                         end
                     end
@@ -4539,7 +4742,7 @@ new("TextLabel", {
 })
 new("TextLabel", {
     Size = UDim2.new(0, 220, 0, 25), Position = UDim2.new(0, 58, 0, 10),
-    BackgroundTransparency = 1, Text = "BSS Hopper v1.3.61",
+    BackgroundTransparency = 1, Text = "BSS Hopper v1.3.62",
     TextColor3 = C.text, Font = Enum.Font.GothamBold, TextSize = 22,
     TextXAlignment = Enum.TextXAlignment.Left, Parent = head,
 })
@@ -5015,6 +5218,141 @@ new("TextLabel", {
     TextWrapped = true, TextXAlignment = Enum.TextXAlignment.Left,
     LayoutOrder = 3, Parent = PAGE_SPROUTS,
 })
+
+do
+    section("⚡ BURST-СБОР (ПРИ ВЗРЫВЕ РОСТКА)", 10).Parent = PAGE_SPROUTS
+
+    makeToggle(PAGE_SPROUTS, "⚡ Включить Burst-сбор редкого лута", CONFIG.BURST_LOOT_ENABLED ~= false, 11, function(v)
+        CONFIG.BURST_LOOT_ENABLED = v
+        saveNow()
+    end)
+
+    local fBurstTime = makeField(PAGE_SPROUTS, "ДЛИТЕЛЬНОСТЬ BURST-СБОРА (СЕК)", CONFIG.BURST_LOOT_TIME or 7, "7", 12)
+    fBurstTime.FocusLost:Connect(function()
+        local n = tonumber(string.gsub(tostring(fBurstTime.Text), ",", "."))
+        CONFIG.BURST_LOOT_TIME = (n and n > 0) and n or 7
+        saveNow()
+    end)
+
+    section("🌐 ФИЛЬТР СЕРВЕРОВ (LOW PLAYER COUNT & BLACKLIST)", 20).Parent = PAGE_SPROUTS
+
+    makeToggle(PAGE_SPROUTS, "👥 Искать серверы с малым числом игроков", CONFIG.PREFER_LOW_PLAYERS ~= false, 21, function(v)
+        CONFIG.PREFER_LOW_PLAYERS = v
+        saveNow()
+    end)
+
+    local fMaxP = makeField(PAGE_SPROUTS, "МАКС. ИГРОКОВ НА СЕРВЕРЕ (1-6)", CONFIG.MAX_PLAYERS or 5, "5", 22)
+    fMaxP.FocusLost:Connect(function()
+        local n = tonumber(fMaxP.Text)
+        CONFIG.MAX_PLAYERS = (n and n >= 1 and n <= 10) and n or 5
+        saveNow()
+    end)
+
+    section("🎯 ПРИОРИТЕТЫ ТОКЕНОВ СО СПРУТОВ", 30).Parent = PAGE_SPROUTS
+
+    new("TextLabel", {
+        Size = UDim2.new(1, 0, 0, 28), BackgroundTransparency = 1,
+        Text = "Нажимайте на кнопку приоритета [P1 / P2 / P3 / ВЫКЛ] для каждого предмета.\nP1 = Топ лут (Burst), P2 = Средний, P3 = Низкий, ВЫКЛ = Пропуск. Автосохранение.",
+        TextColor3 = C.dim, Font = Enum.Font.Gotham, TextSize = 9,
+        TextWrapped = true, TextXAlignment = Enum.TextXAlignment.Left,
+        LayoutOrder = 31, Parent = PAGE_SPROUTS,
+    })
+
+    local tokensContainer = new("Frame", {
+        Size = UDim2.new(1, 0, 0, 0),
+        AutomaticSize = Enum.AutomaticSize.Y,
+        BackgroundTransparency = 1,
+        LayoutOrder = 32,
+        Parent = PAGE_SPROUTS,
+    })
+    new("UIListLayout", {
+        SortOrder = Enum.SortOrder.LayoutOrder,
+        Padding = UDim.new(0, 4),
+        Parent = tokensContainer,
+    })
+
+    local prioLabels = {
+        [1] = "[ P1: Топ ]",
+        [2] = "[ P2: Средн ]",
+        [3] = "[ P3: Низк ]",
+        [0] = "[ ВЫКЛ ]",
+    }
+    local prioColors = {
+        [1] = Color3.fromRGB(255, 215, 0),   -- Gold
+        [2] = Color3.fromRGB(105, 190, 255), -- Cyan
+        [3] = Color3.fromRGB(175, 180, 195), -- Dim
+        [0] = Color3.fromRGB(255, 85, 85),   -- Red
+    }
+    local prioBgColors = {
+        [1] = Color3.fromRGB(48, 42, 24),
+        [2] = Color3.fromRGB(24, 38, 52),
+        [3] = Color3.fromRGB(28, 30, 40),
+        [0] = Color3.fromRGB(45, 20, 25),
+    }
+
+    CONFIG.TOKEN_PRIORITIES = CONFIG.TOKEN_PRIORITIES or {}
+
+    for idx, item in ipairs(TOKEN_REGISTRY) do
+        local curPrio = CONFIG.TOKEN_PRIORITIES[item.id]
+        if curPrio == nil then curPrio = item.defaultPrio end
+
+        local row = new("Frame", {
+            Size = UDim2.new(1, 0, 0, 28),
+            BackgroundColor3 = C.card,
+            BorderSizePixel = 0,
+            LayoutOrder = idx,
+            Parent = tokensContainer,
+        })
+        round(row, 6)
+
+        new("TextLabel", {
+            Size = UDim2.new(1, -95, 1, 0),
+            Position = UDim2.new(0, 8, 0, 0),
+            BackgroundTransparency = 1,
+            Text = item.icon .. "  " .. item.name,
+            TextColor3 = C.text,
+            Font = Enum.Font.GothamSemibold,
+            TextSize = 10,
+            TextXAlignment = Enum.TextXAlignment.Left,
+            TextYAlignment = Enum.TextYAlignment.Center,
+            TextTruncate = Enum.TextTruncate.AtEnd,
+            Parent = row,
+        })
+
+        local btn = new("TextButton", {
+            Size = UDim2.new(0, 80, 0, 20),
+            Position = UDim2.new(1, -85, 0.5, -10),
+            BackgroundColor3 = prioBgColors[curPrio] or C.field,
+            Text = prioLabels[curPrio] or "[ P" .. tostring(curPrio) .. " ]",
+            TextColor3 = prioColors[curPrio] or C.text,
+            Font = Enum.Font.GothamBold,
+            TextSize = 9,
+            BorderSizePixel = 0,
+            AutoButtonColor = false,
+            Parent = row,
+        })
+        round(btn, 4)
+        stroke(btn, prioColors[curPrio] or C.dim, 1)
+
+        btn.MouseButton1Click:Connect(function()
+            local nowP = CONFIG.TOKEN_PRIORITIES[item.id]
+            if nowP == nil then nowP = item.defaultPrio end
+            local nextP
+            if nowP == 1 then nextP = 2
+            elseif nowP == 2 then nextP = 3
+            elseif nowP == 3 then nextP = 0
+            else nextP = 1 end
+
+            CONFIG.TOKEN_PRIORITIES[item.id] = nextP
+            btn.Text = prioLabels[nextP] or "[ P" .. tostring(nextP) .. " ]"
+            btn.TextColor3 = prioColors[nextP] or C.text
+            btn.BackgroundColor3 = prioBgColors[nextP] or C.field
+            local st = btn:FindFirstChildOfClass("UIStroke")
+            if st then st.Color = prioColors[nextP] or C.dim end
+            saveNow()
+        end)
+    end
+end
 
 -- ══════════════════════════════════════════════════════════════════════
 --  НАСТРОЙКИ
