@@ -355,6 +355,11 @@ function trackConn(conn)
     return conn
 end
 
+function safeConnect(obj, signal, fn, name)
+    local ok = pcall(function() trackConn(obj[signal]:Connect(fn)) end)
+    if not ok and log then pcall(log, "TP", "Не удалось подписаться: " .. tostring(name or signal)) end
+end
+
 -- Hold primary mouse button while the hopper is enabled. This uses the executor's
 -- input bridge when available; tool:Activate() remains the fallback for harvesting.
 local leftMouseHeld = false
@@ -1806,7 +1811,9 @@ safeConnect(Players, "PlayerAdded", function(newPlr)
     end
     if isFriend then
         log("Защита", string.format("Друг '%s' зашел на сервер! Немедленно меняю сервер ради приватности...", newPlr.Name))
-        task.spawn(hopRandom)
+        task.spawn(function()
+            if hopRandom then hopRandom() end
+        end)
     end
 end, "friend_evacuate")
 
@@ -2242,10 +2249,7 @@ task.spawn(function()
     end
 end)
 
-function safeConnect(obj, signal, fn, name)
-    local ok = pcall(function() trackConn(obj[signal]:Connect(fn)) end)
-    if not ok then log("TP", "Не удалось подписаться: " .. name) end
-end
+-- safeConnect уже объявлен в начале файла (для ранних подписок)
 
 safeConnect(TeleportService, "TeleportInitFailed", function(plr, result, msg)
     if plr ~= player then return end
@@ -5343,7 +5347,7 @@ new("TextLabel", {
 })
 new("TextLabel", {
     Size = UDim2.new(0, 220, 0, 25), Position = UDim2.new(0, 58, 0, 10),
-    BackgroundTransparency = 1, Text = "BSS Hopper v1.3.67",
+    BackgroundTransparency = 1, Text = "BSS Hopper v1.3.68",
     TextColor3 = C.text, Font = Enum.Font.GothamBold, TextSize = 22,
     TextXAlignment = Enum.TextXAlignment.Left, Parent = head,
 })
