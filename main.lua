@@ -3510,13 +3510,7 @@ collectTokensFor = function(maxSeconds, stopFn, fieldAnchor)
                     log("Token", string.format("⚡ Бегу за приоритетным токеном: %s (P1) на расстоянии %.1f studs!", tName, math.sqrt(bestKey)))
                 end
                 activeTokenObj = best.obj
-                patrolTarget = best.pos
-
-                -- Прыжок если токен находится на уступе / холме или если персонаж уперся
-                local myY = root.Position.Y
-                if (best.pos.Y - myY > 2.0) or ((root.Position - best.pos).Magnitude > 3 and root.AssemblyLinearVelocity.Magnitude < 1.0) then
-                    humanoid.Jump = true
-                end
+                patrolTarget = Vector3.new(best.pos.X, root.Position.Y, best.pos.Z)
             else
                 activeTokenObj = nil
                 local needNewPatrol = not patrolTarget 
@@ -4842,7 +4836,7 @@ new("TextLabel", {
 })
 new("TextLabel", {
     Size = UDim2.new(0, 220, 0, 25), Position = UDim2.new(0, 58, 0, 10),
-    BackgroundTransparency = 1, Text = "BSS Hopper v1.3.63",
+    BackgroundTransparency = 1, Text = "BSS Hopper v1.3.64",
     TextColor3 = C.text, Font = Enum.Font.GothamBold, TextSize = 22,
     TextXAlignment = Enum.TextXAlignment.Left, Parent = head,
 })
