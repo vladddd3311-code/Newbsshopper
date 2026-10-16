@@ -1,6 +1,6 @@
 --[[
 ═══════════════════════════════════════════════════════════════════════
-  🐍 BSS HOPPER v1.3.48 Harvest Sprout First Before Bot Poll
+  🐍 BSS HOPPER v1.3.49 Standby Solo Farm for Looter
 ═══════════════════════════════════════════════════════════════════════
   ЛКМ по змейке  → вкл / выкл
   ПКМ по змейке  → меню    |    F — меню    |    P — вкл/выкл
@@ -3068,11 +3068,11 @@ function Looter:Start()
 
     stopAutoDig()
     self.thread = task.spawn(function()
-        -- 1. Сначала при заходе на сервер обязательно ищем и лутаем росток/вициус на ЭТОМ сервере!
-        s.currentStatus = "Проверяю сервер на росток / вициус..."
+        -- 1. Сначала при заходе на сервер ищем росток/вициус ровно 5 секунд
+        s.currentStatus = "Проверяю сервер на росток / вициус (5с)..."
 
-        -- Даем до 8 секунд на полную прогрузку мира и появление цели
-        for checkSec = 1, 8 do
+        local initialTargetFound = false
+        for checkSec = 1, 5 do
             if not alive() then return end
 
             if CONFIG.CHECK_SPROUTS then
@@ -3080,6 +3080,7 @@ function Looter:Start()
                 if sprout then
                     s.currentStatus = "Росток найден — начинаю лутать!"
                     pcall(function() self:harvest() end)
+                    initialTargetFound = true
                     break
                 end
             end
@@ -3089,69 +3090,108 @@ function Looter:Start()
                 if v then
                     s.currentStatus = "Vicious найден — начинаю бой!"
                     pcall(function() fightVicious(v) end)
+                    initialTargetFound = true
                     break
                 end
             end
 
             if CONFIG.CHECK_PUFFSHROOMS and #findEligiblePuffshrooms() > 0 then
                 pcall(function() self:harvestPuffshrooms() end)
+                initialTargetFound = true
                 break
             end
 
             task.wait(1)
         end
 
-        -- Если рюкзак заполнился во время сбора ростка — разгружаем на улье
+        -- Если рюкзак заполнился во время сбора начального ростка — разгружаем на улье
         if isBackpackFull() then
             s.currentStatus = "Рюкзак полный — делаю Honey"
             pcall(makeHoney)
         end
 
-        -- 2. ТОЛЬКО ПОСЛЕ ТОГО как росток залутан — подключаемся к боту за новой задачей!
-        s.currentStatus = "Росток залутан — подключаюсь к боту..."
-        task.wait(1.5)
-
         local taskAttempts = {}
+        local standbyFieldZone = nil
+        local standbyFieldAnchor = nil
+        local standbySprinklerPlaced = false
+
+        local function getStandbyField()
+            if standbyFieldZone and standbyFieldZone.Parent then
+                return standbyFieldZone, standbyFieldAnchor
+            end
+            local zones = Workspace:FindFirstChild("FlowerZones")
+            if zones then
+                -- Приоритетные поля для стендбай фарма
+                local candidates = { "Pineapple", "Clover", "Spider", "Bamboo", "Strawberry", "Sunflower", "Mushroom" }
+                for _, name in ipairs(candidates) do
+                    local z = zones:FindFirstChild(name)
+                    if z and z:IsA("BasePart") then
+                        standbyFieldZone = z
+                        standbyFieldAnchor = z.Position
+                        return standbyFieldZone, standbyFieldAnchor
+                    end
+                end
+                for _, z in ipairs(zones:GetChildren()) do
+                    if z:IsA("BasePart") then
+                        standbyFieldZone = z
+                        standbyFieldAnchor = z.Position
+                        return standbyFieldZone, standbyFieldAnchor
+                    end
+                end
+            end
+            return nil, nil
+        end
+
+        -- Если за 5 секунд целей не было, сообщаем о переходе в режим соло-ожидания
+        if not initialTargetFound then
+            s.currentStatus = "Целей нет — включаю режим соло до находки ищущих..."
+            log("Лутающий", "Нет целей за 5с. Перехожу в режим соло-ожидания на текущем сервере.")
+        else
+            s.currentStatus = "Росток залутан — подключаюсь к боту..."
+        end
 
         while true do
             if not alive() then return end
             local ok, err = pcall(function()
                 s.serversChecked += 1
 
-                -- Проверка локальных целей (если новый росток вырос прямо на этом сервере пока ждали)
+                -- Проверка локальных целей (если новый росток или вициус вырос прямо на этом сервере)
                 if CONFIG.CHECK_SPROUTS and findLootableSprout() then
+                    stopAutoDig()
+                    tokenCollectorBusy = false
                     s.currentStatus = "Новый росток на сервере — лутаю!"
                     pcall(function() self:harvest() end)
                     if isBackpackFull() then pcall(makeHoney) end
+                    standbySprinklerPlaced = false
                     return
                 end
 
                 if CONFIG.CHECK_VICIOUS then
                     local v = findVicious()
                     if v then
+                        stopAutoDig()
+                        tokenCollectorBusy = false
                         s.currentStatus = "Vicious на сервере — лечу!"
                         pcall(function() fightVicious(v) end)
+                        standbySprinklerPlaced = false
                         return
                     end
                 end
 
+                -- Если рюкзак полон — разгружаем в мед на улье
                 if isBackpackFull() then
+                    stopAutoDig()
+                    tokenCollectorBusy = false
                     s.currentStatus = "Рюкзак полный — делаю Honey"
                     pcall(makeHoney)
+                    standbySprinklerPlaced = false
                     return
                 end
 
                 -- Опрашиваем бота о новых задачах от Ищущего
-                s.currentStatus = "Жду новую задачу от Ищущего..."
                 local taskData, skipReason = self:fetchNextVicious()
                 if not taskData and not skipReason and CONFIG.CHECK_SPROUTS then
                     taskData, skipReason = self:fetchNext()
-                end
-
-                if skipReason then
-                    s.currentStatus = skipReason
-                    task.wait(tonumber(CONFIG.POLL_INTERVAL) or 3)
-                    return
                 end
 
                 if taskData and taskData.jobId then
@@ -3160,6 +3200,8 @@ function Looter:Start()
 
                     -- Если бот выдал сервер, на котором мы УЖЕ находимся
                     if targetJob ~= "" and targetJob == currentJob then
+                        stopAutoDig()
+                        tokenCollectorBusy = false
                         s.currentStatus = "Сервер задачи — ищу цель..."
                         local found = false
                         for _ = 1, 8 do
@@ -3178,7 +3220,7 @@ function Looter:Start()
                         end
                         if not found then
                             self:returnTask(taskData, "not_found")
-                            task.wait(tonumber(CONFIG.POLL_INTERVAL) or 3)
+                            task.wait(1)
                         end
                         return
                     end
@@ -3190,18 +3232,22 @@ function Looter:Start()
                         log("Лутающий", "Сервер задачи недоступен (попыток: " .. tostring(attempts) .. "), пропускаю")
                         rememberFailure(taskData.jobId)
                         self:returnTask(taskData, "unreachable")
-                        task.wait(tonumber(CONFIG.POLL_INTERVAL) or 3)
+                        task.wait(1)
                         return
                     end
 
+                    -- Ищущие нашли задачу! Моментально прекращаем соло-фарм и телепортируемся
+                    stopAutoDig()
+                    tokenCollectorBusy = false
                     s.tasksReceived += 1
                     s.lastTask = {
                         fieldName = taskData.isVicious and ("Vicious @ "..tostring(taskData.fieldName or "?"))
                             or (RARITY_LABEL[taskData.level] or taskData.level or "спрут"),
                         jobId = taskData.jobId, age = taskData.age,
                     }
-                    s.currentStatus = "Телепорт к задаче..."
+                    s.currentStatus = "Ищущие нашли задачу! Телепортируюсь..."
                     s.teleports += 1
+                    log("Лутающий", "Ищущие нашли задачу! Немедленный переход на сервер: " .. tostring(taskData.jobId))
                     if not hopTo(taskData.jobId, taskData.placeId) then
                         self:returnTask(taskData, "teleport failed")
                         task.wait(tonumber(CONFIG.POLL_INTERVAL) or 3)
@@ -3212,14 +3258,49 @@ function Looter:Start()
                     return
                 end
 
-                -- Лутающий НЕ ищет случайные сервера и НЕ собирает токены без задачи.
-                -- Переходит только по задачам, опубликованным Ищущим.
-                s.currentStatus = "Жду задачу от Ищущего — без цели ничего не собираю"
-                task.wait(math.max(2, tonumber(CONFIG.POLL_INTERVAL) or 3))
+                -- ЗАДАЧ НЕТ: режим соло на текущем сервере (фармим поле, копаем, собираем токены)
+                local fieldZone, fieldAnchor = getStandbyField()
+                local char = player.Character
+                local root = char and char:FindFirstChild("HumanoidRootPart")
+
+                if root and fieldZone and fieldAnchor then
+                    -- Если еще далеко от поля — прилетаем
+                    local distToField = (root.Position - fieldAnchor).Magnitude
+                    if distToField > 80 then
+                        s.currentStatus = "Режим соло (ожидание): лечу на " .. tostring(fieldZone.Name)
+                        local safeGround = getGroundPos(fieldAnchor)
+                        moveRootToPosition(root, safeGround, 6)
+                        task.wait(0.2)
+                    end
+
+                    -- Ставим поливалку на поле один раз
+                    if not standbySprinklerPlaced then
+                        s.currentStatus = "Режим соло: ставлю поливалку на поле..."
+                        if useSprinklerBuilder then pcall(useSprinklerBuilder, fieldAnchor) end
+                        standbySprinklerPlaced = true
+                        ensureHarvestToolEquipped()
+                    end
+
+                    -- Включаем автокопание
+                    startAutoDig()
+
+                    -- Собираем токены и копаем в течение 2.5 секунд, затем сразу проверяем бота
+                    s.currentStatus = "Режим соло: фармлю " .. tostring(fieldZone.Name) .. " (жду задачу от ищущих)"
+                    collectTokensFor(2.5, function()
+                        return not alive()
+                            or isBackpackFull()
+                            or (CONFIG.CHECK_SPROUTS and findLootableSprout() ~= nil)
+                            or (CONFIG.CHECK_VICIOUS and findVicious() ~= nil)
+                    end, fieldAnchor)
+                else
+                    -- Если FlowerZones не найдены — просто ждем опрос
+                    s.currentStatus = "Режим соло: жду задачу от ищущих..."
+                    task.wait(2.5)
+                end
             end)
             if not ok then
                 log("Лутающий", "Ошибка: " .. tostring(err))
-                task.wait(3)
+                task.wait(2)
             end
         end
     end)
@@ -3582,7 +3663,7 @@ new("TextLabel", {
 })
 new("TextLabel", {
     Size = UDim2.new(0, 220, 0, 25), Position = UDim2.new(0, 58, 0, 10),
-    BackgroundTransparency = 1, Text = "🐍 BSS Hopper v1.3.48",
+    BackgroundTransparency = 1, Text = "🐍 BSS Hopper v1.3.49",
     TextColor3 = C.text, Font = Enum.Font.GothamBold, TextSize = 22,
     TextXAlignment = Enum.TextXAlignment.Left, Parent = head,
 })
@@ -4641,7 +4722,7 @@ end
 trace("Запуск завершён")
 
 print("=====================================================")
-print("  BSS HOPPER v1.3.48 ЗАГРУЖЕН")
+print("  BSS HOPPER v1.3.49 ЗАГРУЖЕН")
 print("  Bypass  : " .. (_G.BSS_BYPASS_ACTIVE and "session_bypass.lua" or "встроенный"))
 print("  Тег     : " .. tostring(CONFIG.SELF_TAG))
 print("  Бот     : " .. tostring(CONFIG.API_URL))
