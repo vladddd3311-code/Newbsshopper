@@ -297,6 +297,7 @@ local CONFIG = {
     TOKEN_SCAN_INTERVAL = 0.14, TOKEN_PATROL_TIME = 20,
     FARM_REGION = "center", -- center / left / right
     ANTI_LAG = true,
+    SUPER_OPTIMIZE = false,
     ENABLE_AUTO_SPRINKLER = true, SPRINKLER_COUNT = 3,
 
     SPRINKLER_KEYWORD = "sprinkler", DIG_TOOL_KEYWORD = "scooper",
@@ -356,6 +357,7 @@ end
 -- Hold primary mouse button while the hopper is enabled. This uses the executor's
 -- input bridge when available; tool:Activate() remains the fallback for harvesting.
 local leftMouseHeld = false
+local isConvertingHoney = false
 function setLeftMouseHeld(shouldHold)
     local vim
     pcall(function() vim = game:GetService("VirtualInputManager") end)
@@ -424,7 +426,7 @@ local SAVED_KEYS = {
     "PUFFSHROOM_CHANNEL_ID","PUFF_MIN_RARITY","PUFF_MIN_LEVEL_COMMON","PUFF_MIN_LEVEL_RARE",
     "PUFF_MIN_LEVEL_EPIC","PUFF_MIN_LEVEL_LEGENDARY","PUFF_MIN_LEVEL_MYTHIC",
     "WALK_SPEED_MULT","FLY_SPEED","JUMP_POWER","BACKPACK_FILL_THRESHOLD","HONEY_MAX_WAIT",
-    "TOKEN_SCAN_INTERVAL","TOKEN_PATROL_TIME","FARM_REGION","ANTI_LAG","SPRINKLER_KEYWORD","DIG_TOOL_KEYWORD",
+    "TOKEN_SCAN_INTERVAL","TOKEN_PATROL_TIME","FARM_REGION","ANTI_LAG","SUPER_OPTIMIZE","SPRINKLER_KEYWORD","DIG_TOOL_KEYWORD",
     "ENABLE_AUTO_SPRINKLER","SPRINKLER_COUNT",
     "ENABLE_AUTO_DIG","EMPTY_SLOT_KEYWORD","MY_HIVE_KEYWORD","CLAIM_TIMEOUT",
     "CLAIM_APPROACH","CLAIM_PROMPT_WAIT","ENABLE_BYPASS","BYPASS_RETRY",
@@ -469,6 +471,273 @@ function loadSaved()
 end
 loadSaved()
 
+-- ══════════════════════════════════════════════════════════════════════
+--  СИСТЕМА КОНФИГУРАЦИЙ И ПРИВЯЗКИ К НИКАМ (PROFILE / NICK-BIND ENGINE)
+-- ══════════════════════════════════════════════════════════════════════
+local CFG_PREFIX = "bss_hopper_cfg_"
+local BIND_FILE = "bss_hopper_nick_binds.json"
+local INDEX_FILE = "bss_hopper_cfg_list.json"
+local currentActiveConfig = "default"
+local nickBinds = {}
+local syncGuiWithConfig = nil
+
+local function loadNickBinds()
+    if not HAS_FS then return {} end
+    local ok, content = pcall(readfile, BIND_FILE)
+    if ok and content and content ~= "" then
+        local okJ, data = pcall(function() return HttpService:JSONDecode(content) end)
+        if okJ and type(data) == "table" then
+            nickBinds = data
+            return nickBinds
+        end
+    end
+    nickBinds = {}
+    return nickBinds
+end
+
+local function saveNickBinds()
+    if not HAS_FS then return false end
+    local ok, json = pcall(function() return HttpService:JSONEncode(nickBinds) end)
+    if ok and json then
+        return pcall(writefile, BIND_FILE, json)
+    end
+    return false
+end
+
+local function getSavedConfigList()
+    local list = {}
+    local seen = {}
+    local function add(name)
+        if name and name ~= "" and not seen[name] then
+            seen[name] = true
+            table.insert(list, name)
+        end
+    end
+
+    if HAS_FS then
+        local ok, content = pcall(readfile, INDEX_FILE)
+        if ok and content and content ~= "" then
+            local okJ, arr = pcall(function() return HttpService:JSONDecode(content) end)
+            if okJ and type(arr) == "table" then
+                for _, n in ipairs(arr) do add(tostring(n)) end
+            end
+        end
+        if type(listfiles) == "function" then
+            pcall(function()
+                for _, file in ipairs(listfiles("")) do
+                    local name = string.match(tostring(file), "bss_hopper_cfg_([%w_%-]+)%.json$")
+                    if name then add(name) end
+                end
+            end)
+        end
+    end
+    add("default")
+    table.sort(list)
+    return list
+end
+
+local function saveConfigList(list)
+    if not HAS_FS then return end
+    pcall(function()
+        local json = HttpService:JSONEncode(list)
+        writefile(INDEX_FILE, json)
+    end)
+end
+
+local function saveNamedConfig(cfgName)
+    cfgName = string.gsub(tostring(cfgName or ""), "[^%w_%-]", "")
+    if cfgName == "" then return false, "Введите корректное имя конфига!" end
+
+    local data = {}
+    for _, key in ipairs(SAVED_KEYS) do data[key] = CONFIG[key] end
+    local valid = { searcher=true, looter=true, solo=true }
+    data.MODE = valid[lastMode] and lastMode or (valid[CONFIG.MODE] and CONFIG.MODE or "searcher")
+    data.LAST_ACTIVE_MODE = data.MODE
+    data.snakePos = packPosition(uiState.snakePos)
+    data.winPos = packPosition(uiState.winPos)
+    data.winOpen = uiState.winOpen ~= false
+    data.CONFIG_NAME = cfgName
+
+    if not HAS_FS then
+        pcall(function() PERSIST_ENV["BSS_HOPPER_CFG_" .. cfgName] = data end)
+        currentActiveConfig = cfgName
+        return true, "Конфиг '" .. cfgName .. "' сохранен в память!"
+    end
+
+    local encoded, json = pcall(function() return HttpService:JSONEncode(data) end)
+    if not encoded then return false, "Ошибка кодирования JSON" end
+
+    local ok = pcall(writefile, CFG_PREFIX .. cfgName .. ".json", json)
+    if not ok then return false, "Ошибка записи файла" end
+
+    local list = getSavedConfigList()
+    local found = false
+    for _, n in ipairs(list) do if n == cfgName then found = true; break end end
+    if not found then table.insert(list, cfgName); saveConfigList(list) end
+
+    currentActiveConfig = cfgName
+    log("CFG", "Конфиг '" .. cfgName .. "' успешно сохранен на диск!")
+    return true, "Конфиг '" .. cfgName .. "' успешно сохранен!"
+end
+
+local function loadNamedConfig(cfgName)
+    cfgName = string.gsub(tostring(cfgName or ""), "[^%w_%-]", "")
+    if cfgName == "" then return false, "Не указано имя конфига" end
+
+    local data = nil
+    if HAS_FS then
+        local ok, content = pcall(readfile, CFG_PREFIX .. cfgName .. ".json")
+        if ok and content and content ~= "" then
+            local okJ, decoded = pcall(function() return HttpService:JSONDecode(content) end)
+            if okJ and type(decoded) == "table" then
+                data = decoded
+            end
+        end
+    end
+
+    if not data then
+        pcall(function()
+            local envData = PERSIST_ENV["BSS_HOPPER_CFG_" .. cfgName]
+            if type(envData) == "table" then data = envData end
+        end)
+    end
+
+    if not data then
+        return false, "Конфиг '" .. cfgName .. "' не найден!"
+    end
+
+    applySavedData(data, "профиль " .. cfgName)
+    currentActiveConfig = cfgName
+    if syncGuiWithConfig then pcall(syncGuiWithConfig) end
+    if refresh then pcall(refresh) end
+    log("CFG", "Конфиг '" .. cfgName .. "' успешно загружен и применен!")
+    return true, "Конфиг '" .. cfgName .. "' успешно загружен!"
+end
+
+local function deleteNamedConfig(cfgName)
+    cfgName = string.gsub(tostring(cfgName or ""), "[^%w_%-]", "")
+    if cfgName == "" or cfgName == "default" then return false, "Нельзя удалить стандартный конфиг" end
+
+    if HAS_FS and type(delfile) == "function" then
+        pcall(delfile, CFG_PREFIX .. cfgName .. ".json")
+    end
+
+    local list = getSavedConfigList()
+    local newList = {}
+    for _, n in ipairs(list) do
+        if n ~= cfgName then table.insert(newList, n) end
+    end
+    saveConfigList(newList)
+
+    log("CFG", "Конфиг '" .. cfgName .. "' удален")
+    return true, "Конфиг '" .. cfgName .. "' удален"
+end
+
+local function bindNickToConfig(nick, cfgName)
+    nick = string.gsub(tostring(nick or ""), "^%s*(.-)%s*$", "%1")
+    cfgName = string.gsub(tostring(cfgName or ""), "[^%w_%-]", "")
+    if nick == "" then return false, "Введите никнейм!" end
+    if cfgName == "" then return false, "Введите имя конфига!" end
+
+    loadNickBinds()
+    nickBinds[string.lower(nick)] = cfgName
+    saveNickBinds()
+    log("CFG", string.format("Привязка сохранена: ник '%s' -> конфиг '%s'", nick, cfgName))
+    return true, string.format("Ник '%s' привязан к конфигу '%s'!", nick, cfgName)
+end
+
+local function unbindNick(nick)
+    nick = string.gsub(tostring(nick or ""), "^%s*(.-)%s*$", "%1")
+    loadNickBinds()
+    nickBinds[string.lower(nick)] = nil
+    saveNickBinds()
+    return true, "Привязка для ника '" .. nick .. "' удалена"
+end
+
+local function checkAutoLoadNickConfig()
+    loadNickBinds()
+    local myName = player and player.Name
+    local myDisplay = player and player.DisplayName
+    local targetCfg = (myName and nickBinds[string.lower(myName)])
+                   or (myDisplay and nickBinds[string.lower(myDisplay)])
+                   or (myName and nickBinds[myName])
+    if targetCfg and targetCfg ~= "" then
+        log("CFG", string.format("🎯 Найден привязанный конфиг '%s' для игрока '%s' (%s)! Авто-загрузка...", targetCfg, tostring(myName), tostring(myDisplay)))
+        local ok, msg = loadNamedConfig(targetCfg)
+        if ok then
+            currentActiveConfig = targetCfg
+        end
+        return targetCfg
+    end
+    return nil
+end
+
+-- Авто-загрузка конфига по нику при инжекте
+checkAutoLoadNickConfig()
+
+-- ══════════════════════════════════════════════════════════════════════
+--  СВЕРХ-ОПТИМИЗАЦИЯ (FPS BOOSTER & ОЧИСТКА ПАМЯТИ)
+-- ══════════════════════════════════════════════════════════════════════
+function applySuperOptimization(enabled)
+    CONFIG.SUPER_OPTIMIZE = (enabled == true)
+    pcall(function()
+        local Lighting = game:GetService("Lighting")
+        local Terrain = Workspace:FindFirstChildOfClass("Terrain")
+
+        if CONFIG.SUPER_OPTIMIZE then
+            Lighting.GlobalShadows = false
+            Lighting.FogEnd = 9e9
+            Lighting.Brightness = 1
+            for _, effect in ipairs(Lighting:GetChildren()) do
+                if effect:IsA("PostEffect") or effect:IsA("BloomEffect") or effect:IsA("BlurEffect")
+                    or effect:IsA("ColorCorrectionEffect") or effect:IsA("DepthOfFieldEffect")
+                    or effect:IsA("SunRaysEffect") then
+                    effect.Enabled = false
+                end
+            end
+            if Terrain then
+                Terrain.WaterWaveSize = 0
+                Terrain.WaterWaveSpeed = 0
+                Terrain.WaterReflectance = 0
+                Terrain.WaterTransparency = 1
+                pcall(function() Terrain.Decoration = false end)
+            end
+            for _, obj in ipairs(Workspace:GetDescendants()) do
+                if obj:IsA("ParticleEmitter") or obj:IsA("Smoke") or obj:IsA("Fire")
+                    or obj:IsA("Sparkles") or obj:IsA("Trail") or obj:IsA("Beam") then
+                    obj.Enabled = false
+                elseif obj:IsA("Highlight") then
+                    obj.Enabled = false
+                elseif obj:IsA("BasePart") then
+                    obj.CastShadow = false
+                end
+            end
+            pcall(function() settings().Rendering.QualityLevel = Enum.QualityLevel.Level01 end)
+            pcall(function() settings().Network.IncomingReplicationLag = 0 end)
+            if type(setfpscap) == "function" then
+                pcall(setfpscap, 999)
+            end
+            pcall(function() collectgarbage("collect") end)
+            log("Оптимизация", "⚡ Ультра-оптимизация включена: тени, частицы и тяжелые эффекты отключены, FPS разблокирован!")
+        else
+            Lighting.GlobalShadows = true
+            pcall(function() settings().Rendering.QualityLevel = Enum.QualityLevel.Automatic end)
+            if Terrain then
+                pcall(function() Terrain.Decoration = true end)
+            end
+            log("Оптимизация", "Оптимизация отключена: возвращена стандартная графика")
+        end
+    end)
+end
+
+-- Фоновая периодическая очистка мусора ОЗУ каждые 60 секунд
+task.spawn(function()
+    while alive() do
+        task.wait(60)
+        pcall(function() collectgarbage("collect") end)
+    end
+end)
+
 -- Оптимизация графики клиента. Не удаляет игровые объекты/токены и не меняет логику фарма.
 function applyAntiLag(enabled)
     CONFIG.ANTI_LAG = enabled == true
@@ -500,6 +769,7 @@ function applyAntiLag(enabled)
     end)
 end
 if CONFIG.ANTI_LAG then applyAntiLag(true) end
+if CONFIG.SUPER_OPTIMIZE then applySuperOptimization(true) end
 
 saveNow = function()
     local data = {}
@@ -1596,6 +1866,10 @@ function markTeleport(j) pendingTarget = j; pendingAt = os.clock(); resetRejoinT
 function clearTeleport() pendingTarget = nil; pendingAt = 0 end
 
 function hopTo(jobId, placeId)
+    if isConvertingHoney then
+        log("Телепорт", "Отмена прыжка: идет конвертация меда в улье!")
+        return false
+    end
     if not jobId then return false end
     lastAttemptId += 1
     lastTeleportAt = os.clock()
@@ -1616,6 +1890,10 @@ function hopTo(jobId, placeId)
 end
 
 function hopRandom()
+    if isConvertingHoney then
+        log("Телепорт", "Отмена прыжка: идет конвертация меда в улье!")
+        return false
+    end
     armTeleportPersistence()
     local candidates = getCandidateServers()
     if candidates and #candidates > 0 then
@@ -1638,7 +1916,10 @@ task.spawn(function()
         if not alive() then return end
         task.wait(1)
         if pendingAt > 0 then
-            local timeout = math.clamp(tonumber(CONFIG.CONNECT_TIMEOUT) or 12, 8, 20)
+            if isConvertingHoney then
+                clearTeleport()
+            else
+                local timeout = math.clamp(tonumber(CONFIG.CONNECT_TIMEOUT) or 12, 8, 20)
             if os.clock() - pendingAt >= timeout then
                 local target = pendingTarget
                 clearTeleport()
@@ -1647,6 +1928,7 @@ task.spawn(function()
                 armTeleportPersistence()
                 local pid = tonumber(CONFIG.PLACE_ID) or 1537690962
                 pcall(function() TeleportService:Teleport(pid, player) end)
+            end
             end
         end
     end
@@ -2733,6 +3015,8 @@ function makeHoney()
         return false
     end
 
+    isConvertingHoney = true
+
     -- Немедленно останавливаем копание и сбор токенов, чтобы не перебивали полет
     stopAutoDig()
     tokenCollectorBusy = false
@@ -2860,10 +3144,15 @@ function makeHoney()
     local lastEngageAt = os.clock()
 
     while alive() and (os.clock() - t0 < maxWait) do
-        -- Удерживаем персонажа точно на платформе улья
+        -- Плавное удержание персонажа на улье (БЕЗ дерганья и постоянного CFrame-телепорта)
         pcall(function()
-            root.CFrame = CFrame.new(hivePos + Vector3.new(0, 3.2, 0))
-            root.AssemblyLinearVelocity = Vector3.zero
+            local curPos = root.Position
+            local dist = (curPos - hivePos).Magnitude
+            if dist > 8 then
+                hum:MoveTo(hivePos + Vector3.new(0, 3.2, 0))
+            else
+                root.AssemblyLinearVelocity = Vector3.new(0, root.AssemblyLinearVelocity.Y, 0)
+            end
         end)
 
         -- Каждые 0.4 сек повторно укрепляем удержание (InputHoldBegin + KeyDown)
@@ -2877,6 +3166,7 @@ function makeHoney()
             -- Полная разгрузка: пыльцы 0 (или менее 1% от объема)
             if currentInfo.current <= 0 or currentInfo.ratio <= 0.01 then
                 releaseMakeHoney()
+                isConvertingHoney = false
                 log("Honey", string.format("Рюкзак ПОЛНОСТЬЮ разгружен (0 / %d)! Отжимаю Make Honey и возвращаюсь к фарму.", currentInfo.max))
                 task.wait(0.3)
                 return true
@@ -2884,6 +3174,7 @@ function makeHoney()
         else
             if os.clock() - t0 > 15 then
                 releaseMakeHoney()
+                isConvertingHoney = false
                 log("Honey", "Индикатор пыльцы пуст, разгрузка завершена")
                 return true
             end
@@ -2894,6 +3185,7 @@ function makeHoney()
 
     -- В случае таймаута отпускаем
     releaseMakeHoney()
+    isConvertingHoney = false
     log("Honey", "Разгрузка завершена по таймауту")
     return true
 end
@@ -3637,14 +3929,15 @@ useSprinklerBuilder = function(fieldAnchor)
         table.insert(targetOffsets, Vector3.new(spanX, 0, -spanZ))
     end
 
-    -- 1. Экипируем Sprinkler Builder в руки ДО начала расстановки
+    -- 1. Экипируем Sprinkler Builder в руки ДО начала расстановки (минимальная задержка экипировки)
     if tool and tool.Parent ~= char then
         equipTool(tool)
+        task.wait(0.15)
     end
-    -- 2. Ждем 1.5 секунды, чтобы инструмент "анкдшенулся" (прошел cooldown взятия из рюкзака)
-    task.wait(1.5)
 
     local placed = 0
+    local lastSprinklerPlacedAt = 0
+
     for i, offset in ipairs(targetOffsets) do
         if not alive() or not root.Parent then break end
 
@@ -3658,14 +3951,23 @@ useSprinklerBuilder = function(fieldAnchor)
         local safeGround = getGroundPos(worldTarget)
         local goal = Vector3.new(safeGround.X, safeGround.Y, safeGround.Z)
 
-        -- Летим прямо на нужную точку расстановки (гарантированное прибытие на точку, без таймаута бега)
+        -- Летим на нужную точку расстановки (время полета засчитывается в 1.5 сек кд!)
         moveRootToPosition(root, goal, 2.5)
-        task.wait(0.2)
 
         -- Убеждаемся что инструмент все еще в руках
         if tool and tool.Parent ~= char then
             equipTool(tool)
-            task.wait(1.5)
+            task.wait(0.1)
+        end
+
+        -- ЭКОНОМИЯ ВРЕМЕНИ: ровно 1.5 секунды с момента установки предыдущей поливалки!
+        -- Если полет занял 0.8 сек, ждем только оставшиеся 0.7 сек.
+        -- Для первой поливалки (i == 1) задержки нет вообще!
+        if i > 1 and lastSprinklerPlacedAt > 0 then
+            local elapsed = os.clock() - lastSprinklerPlacedAt
+            if elapsed < 1.5 then
+                task.wait(1.5 - elapsed)
+            end
         end
 
         -- 1. Вызов серверного RemoteEvent размещения поливалки
@@ -3691,13 +3993,7 @@ useSprinklerBuilder = function(fieldAnchor)
         end
 
         placed += 1
-
-        -- Задержка 1.5 секунды между установками поливалок (откат сервера BSS на установку следующей поливалки)
-        if i < #targetOffsets then
-            task.wait(1.5)
-        else
-            task.wait(0.3)
-        end
+        lastSprinklerPlacedAt = os.clock()
     end
 
     log("Инструмент", string.format("Sprinkler Builder: размещено %d/%d (режим: %d поливалки)", placed, count, count))
@@ -4863,7 +5159,7 @@ new("TextLabel", {
 })
 new("TextLabel", {
     Size = UDim2.new(0, 220, 0, 25), Position = UDim2.new(0, 58, 0, 10),
-    BackgroundTransparency = 1, Text = "BSS Hopper v1.3.65",
+    BackgroundTransparency = 1, Text = "BSS Hopper v1.3.66",
     TextColor3 = C.text, Font = Enum.Font.GothamBold, TextSize = 22,
     TextXAlignment = Enum.TextXAlignment.Left, Parent = head,
 })
@@ -4997,6 +5293,7 @@ end
 makeTab("⌂", "Главная", "main")
 makeTab("🌱", "Спруты", "sprouts")
 makeTab("⚙", "Настройки", "settings")
+makeTab("📁", "Конфиги", "configs")
 makeTab("🐝", "Vicious Bee", "vicious")
 makeTab("🍄", "Puffshrooms", "puffshrooms")
 
@@ -5540,6 +5837,11 @@ local getAuto = makeToggle(pageSettings, "Автозапуск после пер
 local getAntiLag = makeToggle(pageSettings, "ANTI-LAG: снизить графику", CONFIG.ANTI_LAG, 54, function(v)
     applyAntiLag(v); if saveNow then pcall(saveNow) end
 end)
+local getSuperOpt = makeToggle(pageSettings, "⚡ УЛЬТРА-ОПТИМИЗАЦИЯ (FPS Boost & ОЗУ)", CONFIG.SUPER_OPTIMIZE, 55, function(v)
+    CONFIG.SUPER_OPTIMIZE = v
+    applySuperOptimization(v)
+    if saveNow then pcall(saveNow) end
+end)
 
 applySettings = function()
     local function num(v, def)
@@ -5572,6 +5874,10 @@ applySettings = function()
     if getAntiLag then
         CONFIG.ANTI_LAG = getAntiLag()
         applyAntiLag(CONFIG.ANTI_LAG)
+    end
+    if getSuperOpt then
+        CONFIG.SUPER_OPTIMIZE = getSuperOpt()
+        applySuperOptimization(CONFIG.SUPER_OPTIMIZE)
     end
     applyWalkSpeed()
     if saveNow then pcall(saveNow) end
@@ -5793,10 +6099,265 @@ paintPuffRarity()
 -- ══════════════════════════════════════════════════════════════════════
 --  ПЕРЕКЛЮЧЕНИЕ РАЗДЕЛОВ
 -- ══════════════════════════════════════════════════════════════════════
+-- ══════════════════════════════════════════════════════════════════════
+--  ВКЛАДКА КОНФИГУРАЦИЙ (PAGE_CONFIGS)
+-- ══════════════════════════════════════════════════════════════════════
+local PAGE_CONFIGS = new("Frame", {
+    Size = UDim2.new(1, 0, 0, 0),
+    AutomaticSize = Enum.AutomaticSize.Y,
+    BackgroundTransparency = 1, Visible = false, Parent = content,
+})
+new("UIListLayout", {
+    SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0, 8),
+    Parent = PAGE_CONFIGS,
+})
+
+-- Баннер текущего состояния
+local cfgHeaderBox = new("Frame", {
+    Size = UDim2.new(1, 0, 0, 56), BackgroundColor3 = C.card,
+    BorderSizePixel = 0, LayoutOrder = 1, Parent = PAGE_CONFIGS,
+})
+round(cfgHeaderBox, 12)
+stroke(cfgHeaderBox)
+new("TextLabel", {
+    Size = UDim2.new(0, 36, 1, 0), Position = UDim2.new(0, 12, 0, 0),
+    BackgroundTransparency = 1, Text = "📁", Font = Enum.Font.GothamBold,
+    TextSize = 22, TextColor3 = C.accent, Parent = cfgHeaderBox,
+})
+local cfgHeaderTitle = new("TextLabel", {
+    Size = UDim2.new(1, -60, 0, 22), Position = UDim2.new(0, 52, 0, 8),
+    BackgroundTransparency = 1, Text = "Менеджер конфигураций и авто-профилей",
+    TextColor3 = C.text, Font = Enum.Font.GothamBold, TextSize = 13,
+    TextXAlignment = Enum.TextXAlignment.Left, Parent = cfgHeaderBox,
+})
+local cfgHeaderSub = new("TextLabel", {
+    Size = UDim2.new(1, -60, 0, 18), Position = UDim2.new(0, 52, 0, 30),
+    BackgroundTransparency = 1,
+    Text = "Аккаунт: " .. tostring(player.Name) .. "  |  Активный конфиг: " .. tostring(currentActiveConfig or "default"),
+    TextColor3 = C.dim, Font = Enum.Font.Gotham, TextSize = 11,
+    TextXAlignment = Enum.TextXAlignment.Left, Parent = cfgHeaderBox,
+})
+
+-- Раздел 1: Сохранение и загрузка конфигов
+section("СОХРАНЕНИЕ / ЗАГРУЗКА КОНФИГА", 10).Parent = PAGE_CONFIGS
+
+local fCfgName = makeField(PAGE_CONFIGS, "ИМЯ КОНФИГА", currentActiveConfig or "gg", "например: gg или solo_farm", 11)
+
+local cfgBtnRow = new("Frame", {
+    Size = UDim2.new(1, 0, 0, 36), BackgroundTransparency = 1,
+    LayoutOrder = 12, Parent = PAGE_CONFIGS,
+})
+new("UIListLayout", {
+    FillDirection = Enum.FillDirection.Horizontal,
+    Padding = UDim.new(0, 8), Parent = cfgBtnRow,
+})
+
+local cfgStatusLabel = new("TextLabel", {
+    Size = UDim2.new(1, 0, 0, 24), BackgroundTransparency = 1,
+    Text = "Готов к работе с конфигурациями", TextColor3 = C.dim,
+    Font = Enum.Font.Gotham, TextSize = 11, TextXAlignment = Enum.TextXAlignment.Left,
+    LayoutOrder = 13, Parent = PAGE_CONFIGS,
+})
+
+local cfgListContainer = new("Frame", {
+    Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y,
+    BackgroundTransparency = 1, LayoutOrder = 15, Parent = PAGE_CONFIGS,
+})
+new("UIListLayout", {
+    FillDirection = Enum.FillDirection.Horizontal,
+    Padding = UDim.new(0, 6), Parent = cfgListContainer,
+})
+
+local function refreshConfigButtons()
+    for _, child in ipairs(cfgListContainer:GetChildren()) do
+        if child:IsA("TextButton") then child:Destroy() end
+    end
+    local list = getSavedConfigList()
+    for _, cfg in ipairs(list) do
+        local b = new("TextButton", {
+            Size = UDim2.new(0, math.max(65, #cfg * 9 + 20), 0, 28),
+            BackgroundColor3 = (cfg == currentActiveConfig) and C.cardHi or C.field,
+            Text = "📁 " .. cfg, TextColor3 = (cfg == currentActiveConfig) and C.accent or C.text,
+            Font = Enum.Font.GothamBold, TextSize = 11,
+            BorderSizePixel = 0, Parent = cfgListContainer,
+        })
+        round(b, 6)
+        stroke(b, (cfg == currentActiveConfig) and C.accent2 or Color3.fromRGB(48,62,72))
+        b.MouseButton1Click:Connect(function()
+            fCfgName.Text = cfg
+            cfgStatusLabel.Text = "Выбран конфиг: " .. cfg .. ". Нажмите 'Загрузить' или 'Сохранить'."
+            cfgStatusLabel.TextColor3 = C.text
+        end)
+    end
+    cfgHeaderSub.Text = "Аккаунт: " .. tostring(player.Name) .. "  |  Активный конфиг: " .. tostring(currentActiveConfig or "default")
+end
+
+makeBtn(cfgBtnRow, "💾 Сохранить", function()
+    local name = (fCfgName.Text ~= "" and fCfgName.Text) or "default"
+    applySettings()
+    local ok, msg = saveNamedConfig(name)
+    cfgStatusLabel.Text = msg
+    cfgStatusLabel.TextColor3 = ok and C.accent or C.danger
+    refreshConfigButtons()
+end, C.accent2)
+
+makeBtn(cfgBtnRow, "📂 Загрузить", function()
+    local name = (fCfgName.Text ~= "" and fCfgName.Text) or "default"
+    local ok, msg = loadNamedConfig(name)
+    cfgStatusLabel.Text = msg
+    cfgStatusLabel.TextColor3 = ok and C.accent or C.danger
+    refreshConfigButtons()
+end, Color3.fromRGB(45, 110, 200))
+
+makeBtn(cfgBtnRow, "🗑️ Удалить", function()
+    local name = (fCfgName.Text ~= "" and fCfgName.Text) or ""
+    local ok, msg = deleteNamedConfig(name)
+    cfgStatusLabel.Text = msg
+    cfgStatusLabel.TextColor3 = ok and C.warn or C.danger
+    refreshConfigButtons()
+end, Color3.fromRGB(120, 45, 45))
+
+section("СОХРАНЕННЫЕ КОНФИГИ (КЛИК ДЛЯ ВЫБОРА)", 14).Parent = PAGE_CONFIGS
+refreshConfigButtons()
+
+-- Раздел 2: Привязка ника к конфигу (Авто-инжект по нику)
+section("ПРИВЯЗКА К НИКУ (АВТО-ИНЖЕКТ КОНФИГА)", 20).Parent = PAGE_CONFIGS
+
+local nickInfoLabel = new("TextLabel", {
+    Size = UDim2.new(1, 0, 0, 36), BackgroundColor3 = C.card,
+    Text = "  Укажите ник игрока и конфиг (например 'gg'). При входе с этого аккаунта бот автоматически активирует именно этот конфиг!",
+    TextColor3 = C.dim, Font = Enum.Font.Gotham, TextSize = 10,
+    TextWrapped = true, TextXAlignment = Enum.TextXAlignment.Left,
+    BorderSizePixel = 0, LayoutOrder = 21, Parent = PAGE_CONFIGS,
+})
+round(nickInfoLabel, 8)
+stroke(nickInfoLabel)
+
+local bindRow = new("Frame", {
+    Size = UDim2.new(1, 0, 0, 60), BackgroundTransparency = 1,
+    LayoutOrder = 22, Parent = PAGE_CONFIGS,
+})
+new("UIListLayout", {
+    FillDirection = Enum.FillDirection.Horizontal,
+    Padding = UDim.new(0, 8), Parent = bindRow,
+})
+
+local colNick = new("Frame", { Size = UDim2.new(0.5, -4, 1, 0), BackgroundTransparency = 1, Parent = bindRow })
+local colCfg = new("Frame", { Size = UDim2.new(0.5, -4, 1, 0), BackgroundTransparency = 1, Parent = bindRow })
+
+local fBindNick = makeField(colNick, "НИКНЕЙМ АККАУНТА", player.Name, "Имя аккаунта")
+local fBindCfg = makeField(colCfg, "ИМЯ КОНФИГА", currentActiveConfig or "gg", "например: gg")
+
+local bindBtnRow = new("Frame", {
+    Size = UDim2.new(1, 0, 0, 34), BackgroundTransparency = 1,
+    LayoutOrder = 23, Parent = PAGE_CONFIGS,
+})
+new("UIListLayout", { FillDirection = Enum.FillDirection.Horizontal, Padding = UDim.new(0, 8), Parent = bindBtnRow })
+
+local bindsContainer = new("Frame", {
+    Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y,
+    BackgroundTransparency = 1, LayoutOrder = 25, Parent = PAGE_CONFIGS,
+})
+new("UIListLayout", {
+    SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0, 4),
+    Parent = bindsContainer,
+})
+
+local function refreshBindsList()
+    for _, child in ipairs(bindsContainer:GetChildren()) do
+        if child:IsA("Frame") then child:Destroy() end
+    end
+    local binds = loadNickBinds()
+    local count = 0
+    for nick, cfg in pairs(binds) do
+        count += 1
+        local item = new("Frame", {
+            Size = UDim2.new(1, 0, 0, 32), BackgroundColor3 = C.card,
+            BorderSizePixel = 0, Parent = bindsContainer,
+        })
+        round(item, 6)
+        stroke(item)
+        new("TextLabel", {
+            Size = UDim2.new(1, -70, 1, 0), Position = UDim2.new(0, 10, 0, 0),
+            BackgroundTransparency = 1,
+            Text = string.format("👤 %s  ➔  📁 %s", nick, cfg),
+            TextColor3 = (string.lower(nick) == string.lower(player.Name)) and C.accent or C.text,
+            Font = Enum.Font.GothamMedium, TextSize = 11,
+            TextXAlignment = Enum.TextXAlignment.Left, Parent = item,
+        })
+        local unbindBtn = new("TextButton", {
+            Size = UDim2.new(0, 56, 0, 22), Position = UDim2.new(1, -62, 0.5, -11),
+            BackgroundColor3 = Color3.fromRGB(100, 40, 40), Text = "Отвязать",
+            TextColor3 = C.text, Font = Enum.Font.GothamBold, TextSize = 9,
+            BorderSizePixel = 0, Parent = item,
+        })
+        round(unbindBtn, 4)
+        unbindBtn.MouseButton1Click:Connect(function()
+            unbindNick(nick)
+            refreshBindsList()
+        end)
+    end
+    if count == 0 then
+        local empty = new("Frame", {
+            Size = UDim2.new(1, 0, 0, 26), BackgroundTransparency = 1,
+            Parent = bindsContainer,
+        })
+        new("TextLabel", {
+            Size = UDim2.new(1, 0, 1, 0), BackgroundTransparency = 1,
+            Text = "Нет активных привязок к никам", TextColor3 = C.dim,
+            Font = Enum.Font.Gotham, TextSize = 10, Parent = empty,
+        })
+    end
+end
+
+makeBtn(bindBtnRow, "🔗 Привязать ник к конфигу", function()
+    local n = fBindNick.Text
+    local c = fBindCfg.Text
+    local ok, msg = bindNickToConfig(n, c)
+    cfgStatusLabel.Text = msg
+    cfgStatusLabel.TextColor3 = ok and C.accent or C.danger
+    refreshBindsList()
+end, C.accent2)
+
+section("АКТИВНЫЕ ПРИВЯЗКИ НИКОВ", 24).Parent = PAGE_CONFIGS
+refreshBindsList()
+
+syncGuiWithConfig = function()
+    pcall(function()
+        if fTag and CONFIG.SELF_TAG ~= nil then fTag.Text = tostring(CONFIG.SELF_TAG) end
+        if fUrl and CONFIG.API_URL ~= nil then fUrl.Text = tostring(CONFIG.API_URL) end
+        if fKey and CONFIG.API_KEY ~= nil then fKey.Text = tostring(CONFIG.API_KEY) end
+        if fViciousChannel and CONFIG.VICIOUS_CHANNEL_ID ~= nil then fViciousChannel.Text = tostring(CONFIG.VICIOUS_CHANNEL_ID) end
+        if fHop and CONFIG.HOP_DELAY ~= nil then fHop.Text = tostring(CONFIG.HOP_DELAY) end
+        if fPoll and CONFIG.POLL_INTERVAL ~= nil then fPoll.Text = tostring(CONFIG.POLL_INTERVAL) end
+        if fWait and CONFIG.BROKEN_WAIT ~= nil then fWait.Text = tostring(CONFIG.BROKEN_WAIT) end
+        if fConn and CONFIG.CONNECT_TIMEOUT ~= nil then fConn.Text = tostring(CONFIG.CONNECT_TIMEOUT) end
+        if fPlace and CONFIG.PLACE_ID ~= nil then fPlace.Text = tostring(CONFIG.PLACE_ID) end
+        if fWalk and CONFIG.WALK_SPEED_MULT ~= nil then fWalk.Text = tostring(CONFIG.WALK_SPEED_MULT) end
+        if fFly and CONFIG.FLY_SPEED ~= nil then fFly.Text = tostring(CONFIG.FLY_SPEED) end
+        if fSprinkler and CONFIG.SPRINKLER_KEYWORD ~= nil then fSprinkler.Text = tostring(CONFIG.SPRINKLER_KEYWORD) end
+        if fSprinklerCount and CONFIG.SPRINKLER_COUNT ~= nil then fSprinklerCount.Text = tostring(CONFIG.SPRINKLER_COUNT) end
+        if fRegion and CONFIG.FARM_REGION ~= nil then fRegion.Text = tostring(CONFIG.FARM_REGION) end
+        if fDigTool and CONFIG.DIG_TOOL_KEYWORD ~= nil then fDigTool.Text = tostring(CONFIG.DIG_TOOL_KEYWORD) end
+        if fSlotKeyword and CONFIG.EMPTY_SLOT_KEYWORD ~= nil then fSlotKeyword.Text = tostring(CONFIG.EMPTY_SLOT_KEYWORD) end
+        if fHoneyKeyword and CONFIG.MY_HIVE_KEYWORD ~= nil then fHoneyKeyword.Text = tostring(CONFIG.MY_HIVE_KEYWORD) end
+        if fCfgName then fCfgName.Text = tostring(currentActiveConfig or "default") end
+        if paintSproutRarity then paintSproutRarity() end
+        if paintPuffRarity then paintPuffRarity() end
+        if saveViciousRange then saveViciousRange() end
+        if applyWalkSpeed then applyWalkSpeed() end
+        if applyAntiLag then applyAntiLag(CONFIG.ANTI_LAG) end
+        if applySuperOptimization then applySuperOptimization(CONFIG.SUPER_OPTIMIZE) end
+        if refreshConfigButtons then refreshConfigButtons() end
+        if refreshBindsList then refreshBindsList() end
+    end)
+end
+
 local pages = {
     main = PAGE_HOME,
     sprouts = PAGE_SPROUTS,
     settings = pageSettings,
+    configs = PAGE_CONFIGS,
     vicious = PAGE_VICIOUS,
     puffshrooms = PAGE_PUFF,
 }
