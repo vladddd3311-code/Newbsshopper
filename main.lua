@@ -1,6 +1,6 @@
 --[[
 ═══════════════════════════════════════════════════════════════════════
-  🐍 BSS HOPPER v1.3.49 Standby Solo Farm for Looter
+  🐍 BSS HOPPER v1.1 Standby Solo Farm for Looter
 ═══════════════════════════════════════════════════════════════════════
   ЛКМ по змейке  → вкл / выкл
   ПКМ по змейке  → меню    |    F — меню    |    P — вкл/выкл
@@ -63,6 +63,177 @@ local function bypassRecover(reason)
         pcall(Bypass.Recover, Bypass, reason)
     end
 end
+
+-- ──────────────────────────────────────────────────────────────────────
+--  1.1 ЧИСТАЯ ПЕРСИСТЕНТНОСТЬ В ПАМЯТИ (QUEUE_ON_TELEPORT & BYPASS 267)
+--  Скрипт остается заинжекченным при перезаходе БЕЗ участия autoexec!
+-- ──────────────────────────────────────────────────────────────────────
+local queueOnTeleport = (syn and syn.queue_on_teleport)
+    or queue_on_teleport
+    or (fluxus and fluxus.queue_on_teleport)
+    or (identifyexecutor and queue_on_teleport)
+    or queueonteleport
+
+-- Читаем исходный код скрипта из файла (если доступен), чтобы передать его целиком в память экзекутора
+local cachedScriptSource = nil
+pcall(function()
+    if isfile and readfile then
+        local candidates = {
+            "BSS_HOPPER_v1.3.33_hard_stop_toggle.lua",
+            "BSS_HOPPER_v1.3.33_hard_stop_toggle (1).lua",
+            "Hopper.lua",
+            "bss_hopper.lua",
+            "bss_hopper_autorun.lua",
+            "Bss_hop/Hopper.lua",
+            "Bss_hop/BSS_HOPPER_v1.3.33_hard_stop_toggle.lua",
+            "BSS_HOPPER_v1.3.34_sprout_claim_loot_fix.lua"
+        }
+        for _, fname in ipairs(candidates) do
+            if isfile(fname) then
+                local ok, content = pcall(readfile, fname)
+                if ok and content and #content > 5000 and string.find(content, "BSS_HOPPER", 1, true) then
+                    cachedScriptSource = content
+                    break
+                end
+            end
+        end
+    end
+end)
+
+local PERSIST_PAYLOAD = [==[
+task.spawn(function()
+    repeat task.wait(0.5) until game:IsLoaded()
+
+    -- 1. Инициализация Session Lock Bypass Engine на новом сервере
+    pcall(function()
+        local Bypass = _G.ExtraHopBypass
+        if not Bypass then
+            if isfile and isfile("session_bypass.lua") then
+                Bypass = loadstring(readfile("session_bypass.lua"))()
+            elseif isfile and isfile("Bss_hop/session_bypass.lua") then
+                Bypass = loadstring(readfile("Bss_hop/session_bypass.lua"))()
+            end
+            if Bypass and Bypass.init then pcall(function() Bypass:init() end) end
+            _G.ExtraHopBypass = Bypass
+        end
+    end)
+
+    -- 2. Автозапуск скрипта BSS Hopper прямо из памяти экзекутора
+    local loaded = false
+    if isfile and readfile then
+        local candidates = {
+            "BSS_HOPPER_v1.3.33_hard_stop_toggle.lua",
+            "BSS_HOPPER_v1.3.33_hard_stop_toggle (1).lua",
+            "Hopper.lua",
+            "bss_hopper.lua",
+            "bss_hopper_autorun.lua",
+            "Bss_hop/Hopper.lua",
+            "Bss_hop/BSS_HOPPER_v1.3.33_hard_stop_toggle.lua",
+            "BSS_HOPPER_v1.3.34_sprout_claim_loot_fix.lua"
+        }
+        for _, fname in ipairs(candidates) do
+            if isfile(fname) then
+                local ok, code = pcall(readfile, fname)
+                if ok and code and #code > 2000 and string.find(code, "BSS_HOPPER", 1, true) then
+                    local fn, err = loadstring(code)
+                    if fn then
+                        task.spawn(fn)
+                        loaded = true
+                        break
+                    end
+                end
+            end
+        end
+    end
+
+    -- 3. Резервный вызов через Bypass Engine
+    if not loaded then
+        pcall(function()
+            if _G.ExtraHopBypass and _G.ExtraHopBypass.Run then
+                _G.ExtraHopBypass:Run()
+            end
+        end)
+    end
+end)
+]==]
+
+local saveNow, applySettings
+
+local function armTeleportPersistence()
+    if applySettings then pcall(applySettings) end
+    if saveNow then pcall(saveNow) end
+
+    local cfgPrefix = ""
+    pcall(function()
+        if CONFIG and SAVED_KEYS and HttpService then
+            local data = {}
+            for _, key in ipairs(SAVED_KEYS) do data[key] = CONFIG[key] end
+            if lastMode then data.LAST_ACTIVE_MODE = lastMode end
+            local json = HttpService:JSONEncode(data)
+            if json and json ~= "" then
+                cfgPrefix = "pcall(function() _G.BSS_HOPPER_PERSIST_CONFIG = [==[" .. json .. "]==] end)\n"
+            end
+        end
+    end)
+
+    local payload = cfgPrefix .. (cachedScriptSource or PERSIST_PAYLOAD)
+    local okQueue = false
+    if type(queueOnTeleport) == "function" then
+        local ok = pcall(queueOnTeleport, payload)
+        if ok then okQueue = true end
+    end
+    if bypassActive then
+        if Bypass.Queue then pcall(Bypass.Queue, Bypass, payload) end
+        if Bypass.Persist then pcall(Bypass.Persist, Bypass) end
+        if Bypass.ArmTeleport then pcall(Bypass.ArmTeleport, Bypass) end
+    end
+    return okQueue
+end
+
+-- Хуки перехвата на уровне игры (MetaMethod & Function Hooks)
+-- Перехватывают вызов Kick (ошибка 267) и любые Teleport напрямую в памяти!
+pcall(function()
+    if hookmetamethod and typeof(game) == "Instance" then
+        local oldNamecall
+        oldNamecall = hookmetamethod(game, "__namecall", function(self, ...)
+            local method = getnamecallmethod()
+            if (method == "Kick" or method == "kick") and (self == player or self == game:GetService("Players").LocalPlayer) then
+                armTeleportPersistence()
+                task.spawn(function()
+                    task.wait(0.5)
+                    if rejoinSame then rejoinSame() end
+                end)
+                return nil
+            end
+            if method == "Teleport" or method == "TeleportToPlaceInstance" or method == "teleport" then
+                armTeleportPersistence()
+            end
+            return oldNamecall(self, ...)
+        end)
+    end
+end)
+
+pcall(function()
+    if hookfunction and TeleportService then
+        if TeleportService.Teleport then
+            local oldTP
+            oldTP = hookfunction(TeleportService.Teleport, function(self, ...)
+                armTeleportPersistence()
+                return oldTP(self, ...)
+            end)
+        end
+        if TeleportService.TeleportToPlaceInstance then
+            local oldTPInstance
+            oldTPInstance = hookfunction(TeleportService.TeleportToPlaceInstance, function(self, ...)
+                armTeleportPersistence()
+                return oldTPInstance(self, ...)
+            end)
+        end
+    end
+end)
+
+-- Сразу вооружаем очередь телепорта в памяти экзекутора
+armTeleportPersistence()
 
 -- ══════════════════════════════════════════════════════════════════════
 --  2. СТАНДАРТНЫЙ ЗАПУСК
@@ -134,9 +305,9 @@ local CONFIG = {
     MIN_RARITY = "basic",
     PLACE_ID = 1537690962,
 
-    HOP_DELAY = 3, POLL_INTERVAL = 3, BROKEN_WAIT = 20,
+    HOP_DELAY = 1.5, POLL_INTERVAL = 3, BROKEN_WAIT = 20,
     INITIAL_CHECK = 1, REPORT_DELAY = 2.5,
-    CONNECT_TIMEOUT = 3, MAX_ATTEMPTS = 3, FAILED_TTL = 180,
+    CONNECT_TIMEOUT = 20, MAX_ATTEMPTS = 3, FAILED_TTL = 180,
 
     DEBUG_SPROUT = true, CHECK_VICIOUS = true, CHECK_SPROUTS = true,
     AUTO_START = true,
@@ -277,6 +448,14 @@ local function applySavedData(data, source)
 end
 
 local function loadSaved()
+    pcall(function()
+        if _G.BSS_HOPPER_PERSIST_CONFIG and _G.BSS_HOPPER_PERSIST_CONFIG ~= "" then
+            local okD, d = pcall(function() return HttpService:JSONDecode(_G.BSS_HOPPER_PERSIST_CONFIG) end)
+            if okD and type(d) == "table" then
+                applySavedData(d, "память телепорта queue_on_teleport")
+            end
+        end
+    end)
     local envData
     pcall(function() envData = PERSIST_ENV.BSS_HOPPER_SAVED_CONFIG end)
     applySavedData(envData, "память executor")
@@ -322,7 +501,7 @@ local function applyAntiLag(enabled)
 end
 if CONFIG.ANTI_LAG then applyAntiLag(true) end
 
-local function saveNow()
+saveNow = function()
     local data = {}
     for _, key in ipairs(SAVED_KEYS) do data[key] = CONFIG[key] end
     local valid = { searcher=true, looter=true, solo=true }
@@ -337,7 +516,10 @@ local function saveNow()
     if not encoded then return false end
     return pcall(writefile, SAVE_FILE, json)
 end
-local function flushSettings() saveNow() end
+local function flushSettings()
+    if applySettings then pcall(applySettings) end
+    if saveNow then pcall(saveNow) end
+end
 
 -- Периодически фиксируем конфигурацию на диск, чтобы переживала телепорт/перезаход.
 task.spawn(function()
@@ -382,6 +564,15 @@ isSprout = function(obj)
     end)
     if not ok or type(name) ~= "string" or not parent then return false end
     if string.lower(name) ~= "sprout" then return false end
+
+    -- Строго отсекаем любые плантеры (Pesticide Planter, Paper Planter и т.д.)
+    local cur = obj
+    while cur and cur ~= Workspace do
+        local n = string.lower(cur.Name or "")
+        if string.find(n, "planter", 1, true) then return false end
+        cur = cur.Parent
+    end
+
     if isPart then return true end
     if isModel or isFolder then
         local okParts, descendants = pcall(function() return obj:GetDescendants() end)
@@ -394,17 +585,21 @@ isSprout = function(obj)
     return false
 end
 
+local watchedFolders = {}
 local function watchFolders()
     for _, p in ipairs({ "Particles.Folder2", "Happenings.Sprouts", "Sprouts" }) do
         addFolder(p)
     end
     for _, folder in ipairs(sproutFolders) do
-        pcall(function()
-            trackConn(folder.ChildAdded:Connect(function(child)
-                if not alive() then return end
-                if isSprout(child) then freshSprout = child end
-            end))
-        end)
+        if not watchedFolders[folder] then
+            watchedFolders[folder] = true
+            pcall(function()
+                trackConn(folder.ChildAdded:Connect(function(child)
+                    if not alive() then return end
+                    if isSprout(child) then freshSprout = child end
+                end))
+            end)
+        end
     end
 end
 watchFolders()
@@ -614,6 +809,29 @@ local function moveRootToPosition(root, destination, maxDuration)
     return not flightStopRequested and root.Parent ~= nil and (root.Position - destination).Magnitude < 18
 end
 
+local function waitForGameReady(timeout)
+    local t0 = os.clock()
+    timeout = timeout or 25
+    while not game:IsLoaded() and os.clock() - t0 < timeout do
+        if not alive() then return end
+        task.wait(0.3)
+    end
+    while os.clock() - t0 < timeout do
+        if not alive() then return end
+        local char = player.Character
+        local root = char and char:FindFirstChild("HumanoidRootPart")
+        local hum = char and char:FindFirstChildOfClass("Humanoid")
+        if root and hum and hum.Health > 0 then
+            local zones = Workspace:FindFirstChild("FlowerZones")
+            if zones and #zones:GetChildren() > 5 then
+                break
+            end
+        end
+        task.wait(0.5)
+    end
+    if alive() then task.wait(2.0) end
+end
+
 local function moveToSprout(sprout)
     if not sprout then return false end
     local targetPos = worldPos(sprout)
@@ -802,13 +1020,26 @@ local function findPuffshroomTimer(root)
 end
 
 local function findPuffshrooms()
-    local ok, descendants = pcall(function() return Workspace:GetDescendants() end)
-    if not ok then return {} end
+    local searchRoots = {}
+    local h = Workspace:FindFirstChild("Happenings")
+    if h then
+        local hp = h:FindFirstChild("Puffshrooms")
+        if hp then table.insert(searchRoots, hp) else table.insert(searchRoots, h) end
+    end
+    local p = Workspace:FindFirstChild("Puffshrooms")
+    if p then table.insert(searchRoots, p) end
+    if #searchRoots == 0 then return {} end
+
     local candidates, results, seen = {}, {}, {}
-    for _, obj in ipairs(descendants) do
-        if isPuffshroomRoot(obj) then
-            if obj:IsA("Model") then table.insert(candidates, 1, obj)
-            else table.insert(candidates, obj) end
+    for _, rootFolder in ipairs(searchRoots) do
+        local ok, descendants = pcall(function() return rootFolder:GetDescendants() end)
+        if ok and descendants then
+            for _, obj in ipairs(descendants) do
+                if isPuffshroomRoot(obj) then
+                    if obj:IsA("Model") then table.insert(candidates, 1, obj)
+                    else table.insert(candidates, obj) end
+                end
+            end
         end
     end
     for _, root in ipairs(candidates) do
@@ -860,29 +1091,29 @@ local VICIOUS_FIELD_ORDER = {
 local function isPlayerBee(obj)
     if not obj then return false end
     local ok, res = pcall(function()
-        -- 1. Descendant of any player's Character
-        for _, plr in ipairs(game:GetService("Players"):GetPlayers()) do
-            if plr.Character and obj:IsDescendantOf(plr.Character) then return true end
-        end
-        -- 2. Descendant of Workspace.Bees
-        local beesFolder = Workspace:FindFirstChild("Bees")
-        if beesFolder and obj:IsDescendantOf(beesFolder) then return true end
-        -- 3. Ancestors check
-        local cur = obj
-        while cur and cur ~= Workspace do
-            local n = string.lower(cur.Name)
-            if n == "bees" or n == "characters" or n == "hiveplatforms" or n == "hives" then
-                return true
-            end
-            cur = cur.Parent
-        end
-        -- 4. Attributes / child values
+        -- 1. Быстрые атрибуты и маркеры
         if obj:FindFirstChild("Owner") or obj:FindFirstChild("Player") or obj:FindFirstChild("Bot") then
             return true
         end
         if obj:GetAttribute("Owner") or obj:GetAttribute("Player") then
             return true
         end
+        -- 2. Быстрая проверка предков (ульи, персонажи, пчелы)
+        local cur = obj
+        while cur and cur ~= Workspace do
+            local n = string.lower(cur.Name)
+            if n == "bees" or n == "characters" or n == "hiveplatforms" or n == "hives" or n == "honeycombs" then
+                return true
+            end
+            cur = cur.Parent
+        end
+        -- 3. Descendant of any player's Character
+        for _, plr in ipairs(game:GetService("Players"):GetPlayers()) do
+            if plr.Character and obj:IsDescendantOf(plr.Character) then return true end
+        end
+        -- 4. Descendant of Workspace.Bees
+        local beesFolder = Workspace:FindFirstChild("Bees")
+        if beesFolder and obj:IsDescendantOf(beesFolder) then return true end
         return false
     end)
     return ok and res
@@ -951,7 +1182,10 @@ end
 local function findViciousSpikeInAllowedFields()
     local searchRoots = {}
     local p = Workspace:FindFirstChild("Particles")
-    if p then table.insert(searchRoots, p) end
+    if p then
+        local f2 = p:FindFirstChild("Folder2")
+        if f2 then table.insert(searchRoots, f2) end
+    end
     local m = Workspace:FindFirstChild("Monsters")
     if m then table.insert(searchRoots, m) end
     local h = Workspace:FindFirstChild("Happenings")
@@ -961,16 +1195,14 @@ local function findViciousSpikeInAllowedFields()
         local ok, children = pcall(function() return root:GetDescendants() end)
         if ok and children then
             for _, obj in ipairs(children) do
-                if not isPlayerBee(obj) then
-                    local name = string.lower(tostring(obj.Name or ""))
-                    local isSpike = (name == "spike") or string.find(name, "vicious", 1, true)
-                    if isSpike then
-                        local pos = worldPos(obj)
-                        if pos then
-                            local allowed, fieldName = isViciousFieldAllowed(obj)
-                            if allowed then
-                                return obj, pos, fieldName
-                            end
+                local name = string.lower(tostring(obj.Name or ""))
+                local isSpike = (name == "spike") or string.find(name, "vicious", 1, true)
+                if isSpike and not isPlayerBee(obj) then
+                    local pos = worldPos(obj)
+                    if pos then
+                        local allowed, fieldName = isViciousFieldAllowed(obj)
+                        if allowed then
+                            return obj, pos, fieldName
                         end
                     end
                 end
@@ -1003,21 +1235,22 @@ local function findVicious()
     local okW, wChildren = pcall(function() return Workspace:GetChildren() end)
     if okW and wChildren then
         for _, obj in ipairs(wChildren) do
-            if obj:IsA("Model") and not isPlayerBee(obj) then
-                table.insert(candidates, obj)
+            if obj:IsA("Model") then
+                local n = string.lower(tostring(obj.Name or ""))
+                if string.find(n, "vicious", 1, true) and not isPlayerBee(obj) then
+                    table.insert(candidates, obj)
+                end
             end
         end
     end
 
     for _, cand in ipairs(candidates) do
-        if not isPlayerBee(cand) then
-            local n = string.lower(tostring(cand.Name or ""))
-            if string.find(n, "vicious", 1, true) then
-                local root = getViciousTargetRoot(cand) or cand
-                if root and root.Parent and isViciousFieldAllowed(root) then
-                    freshVicious = root
-                    return root
-                end
+        local n = string.lower(tostring(cand.Name or ""))
+        if string.find(n, "vicious", 1, true) and not isPlayerBee(cand) then
+            local root = getViciousTargetRoot(cand) or cand
+            if root and root.Parent and isViciousFieldAllowed(root) then
+                freshVicious = root
+                return root
             end
         end
     end
@@ -1031,21 +1264,20 @@ task.spawn(function()
     for _ = 1, 60 do
         if not alive() then return end
         local particles = Workspace:FindFirstChild("Particles")
-        if particles then
+        local f2 = particles and particles:FindFirstChild("Folder2")
+        if f2 then
             local function onAdded(obj)
-                if not alive() or isPlayerBee(obj) then return end
+                if not alive() then return end
                 local name = string.lower(tostring(obj.Name or ""))
-                if string.find(name, "spike", 1, true) or string.find(name, "vicious", 1, true) then
+                if (name == "spike" or string.find(name, "vicious", 1, true)) and not isPlayerBee(obj) then
                     freshVicious = obj
                 end
             end
             local function onRemoving(obj)
                 if freshVicious == obj then freshVicious = nil end
             end
-            trackConn(particles.ChildAdded:Connect(onAdded))
-            trackConn(particles.DescendantAdded:Connect(onAdded))
-            trackConn(particles.ChildRemoved:Connect(onRemoving))
-            trackConn(particles.DescendantRemoving:Connect(onRemoving))
+            trackConn(f2.ChildAdded:Connect(onAdded))
+            trackConn(f2.ChildRemoved:Connect(onRemoving))
             findVicious(); return
         end
         task.wait(1)
@@ -1241,6 +1473,7 @@ local function hopTo(jobId, placeId)
     lastTeleportAt = os.clock()
     markTeleport(jobId)
     flushSettings()
+    armTeleportPersistence()
     if CONFIG.ENABLE_BYPASS then bypassNotify() end
     local pid = tonumber(placeId) or tonumber(CONFIG.PLACE_ID) or 1537690962
     local ok = pcall(function()
@@ -1255,6 +1488,7 @@ local function hopTo(jobId, placeId)
 end
 
 function hopRandom()
+    armTeleportPersistence()
     local candidates = getCandidateServers()
     if candidates and #candidates > 0 then
         local target = candidates[math.random(1, #candidates)]
@@ -1265,6 +1499,7 @@ function hopRandom()
     lastTeleportAt = os.clock()
     markTeleport(nil)
     flushSettings()
+    armTeleportPersistence()
     if CONFIG.ENABLE_BYPASS then bypassNotify() end
     local pid = tonumber(CONFIG.PLACE_ID) or 1537690962
     pcall(function() TeleportService:Teleport(pid, player) end)
@@ -1275,8 +1510,7 @@ task.spawn(function()
         if not alive() then return end
         task.wait(1)
         if pendingAt > 0 then
-            -- Даем Roblox 20 секунд на установку соединения и загрузку нового сервера
-            local timeout = 20
+            local timeout = tonumber(CONFIG.CONNECT_TIMEOUT) or 3
             if os.clock() - pendingAt >= timeout then
                 local target = pendingTarget
                 clearTeleport()
@@ -1293,6 +1527,7 @@ task.spawn(function()
 end)
 
 local function rejoinSame()
+    armTeleportPersistence()
     local servers = getServerList()
     if servers then
         pruneFailures()
@@ -1302,6 +1537,7 @@ local function rejoinSame()
             end
         end
     end
+    armTeleportPersistence()
     pcall(function() TeleportService:Teleport(CONFIG.PLACE_ID, player) end)
 end
 
@@ -1311,6 +1547,7 @@ local function rejoinRetry(code)
     rejoinTries += 1
     local attempt = rejoinTries
     task.wait(3) -- Таймаут перезахода: статично 3 секунды
+    armTeleportPersistence()
     if CONFIG.ENABLE_BYPASS then bypassRecover("code_" .. tostring(code)) end
     if attempt >= MAX_REJOIN_TRIES then
         rejoinTries = 0; clearTeleport(); hopRandom(); return
@@ -1324,37 +1561,96 @@ local function handleTeleportFailure(reason)
     teleportLock = true
     clearTeleport()
     task.wait(3) -- Таймаут перезахода: статично 3 секунды
+    armTeleportPersistence()
     if CONFIG.ENABLE_BYPASS then bypassRecover(tostring(reason)) end
     if attemptCounter >= (tonumber(CONFIG.MAX_ATTEMPTS) or 3) then clearFailures() end
     rejoinSame()
     teleportLock = false
 end
 
--- Автоматический перезаход при дисконнекте (ErrorPrompt) ровно через 3 секунды
-task.spawn(function()
+-- Автоматический обход Ошибки 2 (Connection Failed / Reconnect) и дисконнектов
+local lastErrorBypass = 0
+local function checkAndBypassError()
+    if os.clock() - lastErrorBypass < 2 then return end
+
+    local promptGui = nil
     pcall(function()
-        local robloxPromptGui = CoreGui:WaitForChild("RobloxPromptGui", 5)
-        if robloxPromptGui then
-            local promptOverlay = robloxPromptGui:WaitForChild("promptOverlay", 5)
-            if promptOverlay then
-                promptOverlay.ChildAdded:Connect(function(child)
-                    if child.Name == "ErrorPrompt" then
-                        log("Watchdog", "Обнаружен экран ошибки/дисконнекта. Перезаход через 3 секунды...")
-                        task.wait(3)
-                        clearTeleport()
-                        rejoinSame()
-                    end
-                end)
-                local existing = promptOverlay:FindFirstChild("ErrorPrompt")
-                if existing then
-                    log("Watchdog", "Обнаружен экран ошибки. Перезаход через 3 секунды...")
-                    task.wait(3)
-                    clearTeleport()
-                    rejoinSame()
-                end
+        promptGui = CoreGui:FindFirstChild("RobloxPromptGui") or (gethui and gethui():FindFirstChild("RobloxPromptGui"))
+    end)
+    if not promptGui then return end
+
+    local overlay = promptGui:FindFirstChild("promptOverlay")
+    if not overlay then return end
+
+    local errorPrompt = overlay:FindFirstChild("ErrorPrompt")
+    if not errorPrompt then return end
+
+    local fullText = ""
+    local retryBtn = nil
+    for _, d in ipairs(errorPrompt:GetDescendants()) do
+        if d:IsA("TextLabel") and d.Text and d.Text ~= "" then
+            fullText = fullText .. " " .. d.Text
+        elseif (d:IsA("TextButton") or d:IsA("ImageButton")) and d.Visible then
+            local bText = string.lower(tostring(d.Text or ""))
+            if string.find(bText, "retry") or string.find(bText, "reconnect") or string.find(bText, "повтор") or string.find(bText, "переподключ") then
+                retryBtn = d
             end
         end
+    end
+
+    local isError2 = string.find(fullText, "Error Code: 2")
+        or string.find(fullText, "Error Code: 279")
+        or string.find(fullText, "Error Code: 267")
+        or string.find(fullText, "Connection Failed")
+        or string.find(fullText, "Failed to connect")
+        or string.find(fullText, "Disconnected")
+
+    if isError2 then
+        lastErrorBypass = os.clock()
+        log("TP", "[ОБХОД 267/279/DISCONNECT] Найдено окно сбоя подключения: " .. fullText:sub(1, 80))
+
+        -- Вооружаем персистентность (queue_on_teleport) перед перезаходом,
+        -- чтобы скрипт автоматически оставался и выполнялся на новом сервере без повторного инжекта!
+        armTeleportPersistence()
+        if CONFIG.ENABLE_BYPASS then bypassRecover("error_kick_267") end
+        if bypassActive and Bypass.Recover then pcall(Bypass.Recover, Bypass, "error_kick_267") end
+        if bypassActive and Bypass.Bypass267 then pcall(Bypass.Bypass267, Bypass) end
+
+        if retryBtn then
+            log("TP", "[ОБХОД 267/279] Нажимаю Reconnect / Retry (скрипт сохранен в queue_on_teleport)...")
+            pcall(function()
+                if type(firesignal) == "function" then
+                    firesignal(retryBtn.MouseButton1Click)
+                end
+                retryBtn.MouseButton1Click:Fire()
+            end)
+            task.wait(1.5)
+        end
+
+        if overlay:FindFirstChild("ErrorPrompt") then
+            log("TP", "[ОБХОД 267/279] Перезапускаю подключение к серверу (скрипт сохранен в queue_on_teleport)...")
+            pcall(function() errorPrompt.Visible = false end)
+            task.wait(2.5)
+            clearTeleport()
+            armTeleportPersistence()
+            rejoinSame()
+        end
+    end
+end
+
+pcall(function()
+    local GuiService = game:GetService("GuiService")
+    GuiService.ErrorMessageChanged:Connect(function()
+        task.wait(0.5)
+        pcall(checkAndBypassError)
     end)
+end)
+
+task.spawn(function()
+    while true do
+        pcall(checkAndBypassError)
+        task.wait(1)
+    end
 end)
 
 local function safeConnect(obj, signal, fn, name)
@@ -1389,7 +1685,7 @@ end, "game.Close")
 -- ══════════════════════════════════════════════════════════════════════
 --  РАЗНОВИДНОСТИ СПРУТОВ
 -- ══════════════════════════════════════════════════════════════════════
-local RARITY_PRIORITY = { legendary=6, epic=5, gummy=4, rare=3, moon=2, basic=1, common=0 }
+local RARITY_PRIORITY = { mythic=7, legendary=6, epic=5, gummy=4, rare=3, moon=2, basic=1, common=1, normal=1, unknown=1 }
 local RARITY_LABEL = {
     gummy="🍬 Gummy", legendary="💠 Legendary", epic="🥇 Epic",
     rare="🥈 Rare", basic="🌱 Basic", moon="🌙 Moon", common="⚪ Common",
@@ -1578,39 +1874,47 @@ end
 -- ══════════════════════════════════════════════════════════════════════
 
 local function promptWorldPos(prompt)
-    if not prompt then return nil end
-    local parent = prompt.Parent
-    if parent then
-        local ok, pos = pcall(function()
-            if parent:IsA("Attachment") then return parent.WorldPosition end
-            if parent:IsA("BasePart") then return parent.Position end
-            if parent:IsA("Model") then return parent:GetPivot().Position end
-            local part = parent:FindFirstAncestorWhichIsA("BasePart")
-            if part then return part.Position end
-            local model = parent:FindFirstAncestorWhichIsA("Model")
-            if model then return model:GetPivot().Position end
-            return nil
-        end)
-        if ok and pos then return pos end
-    end
-    return worldPos(parent)
-end
-
-local function promptWorldPos(prompt)
     if not prompt or not prompt.Parent then return nil end
     local parent = prompt.Parent
-    if parent:IsA("BasePart") then return parent.Position end
-    if parent:IsA("Attachment") then return parent.WorldPosition end
+    local ok, pos = pcall(function()
+        if parent:IsA("Attachment") then return parent.WorldPosition end
+        if parent:IsA("BasePart") then return parent.Position end
+        if parent:IsA("Model") then return parent:GetPivot().Position end
+        local part = parent:FindFirstAncestorWhichIsA("BasePart")
+        if part then return part.Position end
+        local model = parent:FindFirstAncestorWhichIsA("Model")
+        if model then return model:GetPivot().Position end
+        return nil
+    end)
+    if ok and pos then return pos end
     return worldPos(parent)
 end
 
 local function findPromptByKeyword(keyword)
     local needle = string.lower(tostring(keyword or ""))
     local results = {}
-    local ok, descendants = pcall(function() return Workspace:GetDescendants() end)
-    if not ok then return results end
+    local searchRoots = {}
+    local hp = Workspace:FindFirstChild("HivePlatforms")
+    if hp then table.insert(searchRoots, hp) end
+    local npc = Workspace:FindFirstChild("NPCs")
+    if npc then table.insert(searchRoots, npc) end
+    local hap = Workspace:FindFirstChild("Happenings")
+    if hap then table.insert(searchRoots, hap) end
+
+    local descendants = {}
+    for _, root in ipairs(searchRoots) do
+        local ok, desc = pcall(function() return root:GetDescendants() end)
+        if ok and desc then
+            for _, d in ipairs(desc) do table.insert(descendants, d) end
+        end
+    end
+    if #descendants == 0 then
+        local ok, d = pcall(function() return Workspace:GetChildren() end)
+        if ok and d then descendants = d end
+    end
     local words = {}
     for word in string.gmatch(needle, "%S+") do table.insert(words, word) end
+    local isLookingForClaim = string.find(needle, "claim", 1, true) or string.find(needle, "занять", 1, true)
     for _, obj in ipairs(descendants) do
         if obj:IsA("ProximityPrompt") then
             local parts = {
@@ -1623,16 +1927,18 @@ local function findPromptByKeyword(keyword)
                 ancestor = ancestor.Parent
             end
             local haystack = string.lower(table.concat(parts, " "))
-            local isClaimPrompt = string.find(haystack, "claim", 1, true)
-                or string.find(haystack, "hive", 1, true)
-                or string.find(haystack, "занять", 1, true)
-                or string.find(haystack, "улей", 1, true)
-                or string.find(haystack, "стойк", 1, true)
-            local matched = isClaimPrompt or needle == "" or string.find(haystack, needle, 1, true) ~= nil
-            if not matched and #words > 0 then
+            local matched = false
+            if needle == "" then
                 matched = true
-                for _, word in ipairs(words) do
-                    if not string.find(haystack, word, 1, true) then matched = false; break end
+            elseif isLookingForClaim then
+                matched = string.find(haystack, "claim", 1, true) or string.find(haystack, "занять", 1, true)
+            else
+                matched = string.find(haystack, needle, 1, true) ~= nil
+                if not matched and #words > 0 then
+                    matched = true
+                    for _, word in ipairs(words) do
+                        if not string.find(haystack, word, 1, true) then matched = false; break end
+                    end
                 end
             end
             if matched then
@@ -1645,9 +1951,24 @@ local function findPromptByKeyword(keyword)
     return results
 end
 
+local function findPromptNearPosition(keyword, position, maxDistance)
+    if not position then return nil end
+    local best, bestD = nil, maxDistance or 25
+    local prompts = findPromptByKeyword(keyword)
+    for _, entry in ipairs(prompts) do
+        local d = (entry.pos - position).Magnitude
+        if d < bestD then
+            best, bestD = entry, d
+        end
+    end
+    return best
+end
+
 local function findYellowHivePads()
     local results = {}
-    local ok, descendants = pcall(function() return Workspace:GetDescendants() end)
+    local hp = Workspace:FindFirstChild("HivePlatforms")
+    if not hp then return results end
+    local ok, descendants = pcall(function() return hp:GetDescendants() end)
     if not ok then return results end
     for _, obj in ipairs(descendants) do
         if obj:IsA("BasePart")
@@ -1662,19 +1983,77 @@ local function findYellowHivePads()
     return results
 end
 
+-- Прямой поиск промпта Make Honey своего улья в Workspace
+local function findMyHivePromptAndPos()
+    local roots = {}
+    local hp = Workspace:FindFirstChild("HivePlatforms")
+    if hp then table.insert(roots, hp) end
+    local hc = Workspace:FindFirstChild("Honeycombs")
+    if hc then table.insert(roots, hc) end
+
+    for _, root in ipairs(roots) do
+        local ok, children = pcall(function() return root:GetDescendants() end)
+        if ok and children then
+            for _, obj in ipairs(children) do
+                if obj:IsA("ProximityPrompt") then
+                    local act = string.lower(tostring(obj.ActionText or ""))
+                    local objTxt = string.lower(tostring(obj.ObjectText or ""))
+                    if string.find(act, "make", 1, true) or string.find(act, "honey", 1, true)
+                        or string.find(objTxt, "make", 1, true) or string.find(objTxt, "honey", 1, true) then
+                        local p = promptWorldPos(obj)
+                        if p then return obj, p end
+                    end
+                end
+            end
+        end
+    end
+
+    -- Fallback: смотрим все модели в Workspace с именем hive
+    local okW, wChildren = pcall(function() return Workspace:GetChildren() end)
+    if okW and wChildren then
+        for _, obj in ipairs(wChildren) do
+            local n = string.lower(obj.Name)
+            if string.find(n, "hive", 1, true) or string.find(n, "honey", 1, true) then
+                local okD, d = pcall(function() return obj:GetDescendants() end)
+                if okD and d then
+                    for _, x in ipairs(d) do
+                        if x:IsA("ProximityPrompt") then
+                            local act = string.lower(tostring(x.ActionText or ""))
+                            if string.find(act, "make", 1, true) or string.find(act, "honey", 1, true) then
+                                local p = promptWorldPos(x)
+                                if p then return x, p end
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+    return nil, nil
+end
+
 local function getHivePlatformRecords()
     local records = {}
-    local folder = Workspace:FindFirstChild("HivePlatforms")
+    local folder = Workspace:FindFirstChild("HivePlatforms") or Workspace:FindFirstChild("Hives")
     if not folder then return records end
     for _, model in ipairs(folder:GetChildren()) do
-        if model:IsA("Model") then
+        if model:IsA("Model") or model:IsA("Folder") then
             local hiveRef = model:FindFirstChild("Hive")
             local playerRef = model:FindFirstChild("PlayerRef")
-            local platform = model:FindFirstChild("Platform") or model:FindFirstChildWhichIsA("BasePart")
-            if playerRef and playerRef:IsA("ObjectValue") and platform and platform:IsA("BasePart") then
+                or model:FindFirstChild("Player")
+                or model:FindFirstChild("Owner")
+                or model:FindFirstChildWhichIsA("ObjectValue")
+                or model:FindFirstChildWhichIsA("StringValue")
+            local platform = model:FindFirstChild("Platform")
+                or model:FindFirstChild("Pad")
+                or model:FindFirstChildWhichIsA("BasePart")
+            if platform and platform:IsA("BasePart") then
                 table.insert(records, {
-                    model=model, hiveRef=hiveRef, playerRef=playerRef,
-                    platform=platform, pos=platform.Position,
+                    model = model,
+                    hiveRef = hiveRef,
+                    playerRef = playerRef,
+                    platform = platform,
+                    pos = platform.Position,
                 })
             end
         end
@@ -1683,11 +2062,54 @@ local function getHivePlatformRecords()
 end
 
 local function findAssignedHiveSlot()
+    -- 1. Сначала проверяем прямой prompt "Make Honey"
+    local prompt, promptPos = findMyHivePromptAndPos()
+    if prompt and promptPos then
+        local records = getHivePlatformRecords()
+        for _, slot in ipairs(records) do
+            if (slot.pos - promptPos).Magnitude <= 25 then
+                slot.prompt = prompt
+                return slot
+            end
+        end
+        return { pos = promptPos, prompt = prompt, platform = prompt.Parent, model = prompt.Parent }
+    end
+
+    -- 2. Проверяем records в HivePlatforms
     local ok, records = pcall(getHivePlatformRecords)
     if ok and records then
         for _, slot in ipairs(records) do
-            local val = slot.playerRef and slot.playerRef.Value
-            if val == player or (typeof(val) == "Instance" and val == player) or tostring(val) == player.Name then
+            local val = nil
+            if slot.playerRef then
+                val = slot.playerRef.Value
+            end
+            local isMe = false
+            if val == player or (player.Character and val == player.Character) then
+                isMe = true
+            elseif type(val) == "string" and string.lower(val) == string.lower(player.Name) then
+                isMe = true
+            elseif tostring(val) == player.Name or string.lower(tostring(val)) == string.lower(player.Name) then
+                isMe = true
+            end
+            if not isMe and slot.model then
+                local ownerAttr = slot.model:GetAttribute("Owner") or slot.model:GetAttribute("Player")
+                if ownerAttr and (ownerAttr == player.UserId or string.lower(tostring(ownerAttr)) == string.lower(player.Name)) then
+                    isMe = true
+                end
+            end
+            if not isMe and slot.model then
+                for _, d in ipairs(slot.model:GetChildren()) do
+                    if d:IsA("ProximityPrompt") then
+                        local txt = string.lower(tostring(d.ActionText or ""))
+                        if string.find(txt, "honey", 1, true) or string.find(txt, "make", 1, true) then
+                            isMe = true
+                            slot.prompt = d
+                            break
+                        end
+                    end
+                end
+            end
+            if isMe then
                 return slot
             end
         end
@@ -1696,7 +2118,19 @@ local function findAssignedHiveSlot()
 end
 
 local function slotIsFree(slot)
-    return slot and slot.playerRef and slot.playerRef.Value == nil
+    if not slot then return false end
+    if slot.playerRef and slot.playerRef.Value == nil then return true end
+    if slot.model then
+        for _, d in ipairs(slot.model:GetChildren()) do
+            if d:IsA("ProximityPrompt") then
+                local txt = string.lower(tostring(d.ActionText or ""))
+                if string.find(txt, "claim", 1, true) or string.find(txt, "занять", 1, true) then
+                    return true
+                end
+            end
+        end
+    end
+    return false
 end
 
 local function claimHive()
@@ -1720,12 +2154,20 @@ local function claimHive()
         local hp = Workspace:FindFirstChild("HivePlatforms")
         if hp then
             for _, m in ipairs(hp:GetChildren()) do
-                local pref = m:FindFirstChild("PlayerRef")
-                local plat = m:FindFirstChild("Platform") or m:FindFirstChildWhichIsA("BasePart")
-                if pref and pref:IsA("ObjectValue") and pref.Value == nil and plat then
-                    table.insert(freeSlots, { model = m, playerRef = pref, platform = plat, pos = plat.Position })
+                local pref = m:FindFirstChild("PlayerRef") or m:FindFirstChild("Player") or m:FindFirstChild("Owner")
+                local plat = m:FindFirstChild("Platform") or m:FindFirstChild("Pad") or m:FindFirstChildWhichIsA("BasePart")
+                if plat and plat:IsA("BasePart") then
+                    if not pref or pref.Value == nil then
+                        table.insert(freeSlots, { model = m, playerRef = pref, platform = plat, pos = plat.Position })
+                    end
                 end
             end
+        end
+    end
+
+    if #freeSlots == 0 then
+        for _, entry in ipairs(findPromptByKeyword("claim")) do
+            table.insert(freeSlots, { model = entry.slot, platform = entry.slot, pos = entry.pos, prompt = entry.prompt })
         end
     end
 
@@ -1742,10 +2184,9 @@ local function claimHive()
         if not alive() then return false end
         if findAssignedHiveSlot() then return true end
 
-        log("Улей", "Встаю на платформу улья: " .. tostring(slot.model.Name))
+        log("Улей", "Встаю на платформу улья: " .. tostring(slot.model and slot.model.Name or "Pad"))
         local standPos = slot.pos + Vector3.new(0, 3.2, 0)
 
-        -- Летим прямо на платформу
         moveRootToPosition(root, standPos, 4)
         task.wait(0.15)
 
@@ -1753,7 +2194,6 @@ local function claimHive()
         hum = player.Character and player.Character:FindFirstChildOfClass("Humanoid")
         if not root or not hum or hum.Health <= 0 then return false end
 
-        -- Отключаем ноклип и физически встаем на платформу
         setFlightNoclip(false)
         pcall(function()
             root.CFrame = CFrame.new(standPos)
@@ -1764,23 +2204,20 @@ local function claimHive()
         end)
         task.wait(0.2)
 
-        -- Ищем ProximityPrompt для захвата улья только внутри слота
-        local prompt = slot.platform:FindFirstChildWhichIsA("ProximityPrompt")
-        if not prompt then
+        local prompt = slot.prompt or (slot.platform and slot.platform:FindFirstChildWhichIsA("ProximityPrompt"))
+        if not prompt and slot.model then
             prompt = slot.model:FindFirstChildWhichIsA("ProximityPrompt", true)
         end
 
         log("Улей", prompt and "ProximityPrompt найден — активирую..." or "Активирую захват стойки...")
 
-        -- Пробуем захватить этот улей (до 1.5 секунд)
         local tryStart = os.clock()
-        while alive() and os.clock() - tryStart < 1.5 do
+        while alive() and os.clock() - tryStart < 2.0 do
             if findAssignedHiveSlot() then
                 log("Улей", "Улей успешно занят!")
                 return true
             end
 
-            -- 1. ProximityPrompt
             if prompt and prompt.Parent then
                 pcall(function()
                     prompt.Enabled = true
@@ -1792,7 +2229,6 @@ local function claimHive()
                 end
             end
 
-            -- 2. Клавиша 'E' через VirtualInputManager
             pcall(function()
                 local vim = game:GetService("VirtualInputManager")
                 if vim then
@@ -1802,7 +2238,6 @@ local function claimHive()
                 end
             end)
 
-            -- 3. Безопасное событие ReplicatedStorage (только готовый RemoteEvent, без рекурсивного сканирования и без InvokeServer)
             pcall(function()
                 local rep = game:GetService("ReplicatedStorage")
                 local ev = rep:FindFirstChild("Events")
@@ -1828,15 +2263,34 @@ end
 
 local function findMyHive()
     local owned = findAssignedHiveSlot()
-    if not owned then return nil end
-    local prompts = findPromptByKeyword(CONFIG.MY_HIVE_KEYWORD or "make honey")
-    local scoped = {}
-    for _, entry in ipairs(prompts) do
-        if entry.prompt:IsDescendantOf(owned.model) or (owned.hiveRef and owned.hiveRef.Value and entry.prompt:IsDescendantOf(owned.hiveRef.Value)) then
-            table.insert(scoped, entry)
+    if not owned then
+        local p, pos = findMyHivePromptAndPos()
+        if p and pos then
+            return { pos = pos, slot = nil, prompt = p }
+        end
+        return nil
+    end
+    if owned.prompt then
+        return { pos = owned.pos, slot = owned, prompt = owned.prompt }
+    end
+    if owned.model then
+        for _, desc in ipairs(owned.model:GetDescendants()) do
+            if desc:IsA("ProximityPrompt") then
+                return { pos=owned.pos, slot=owned, prompt=desc }
+            end
         end
     end
-    if #scoped > 0 then return scoped[1] end
+    if owned.hiveRef and owned.hiveRef.Value then
+        for _, desc in ipairs(owned.hiveRef.Value:GetDescendants()) do
+            if desc:IsA("ProximityPrompt") then
+                return { pos=owned.pos, slot=owned, prompt=desc }
+            end
+        end
+    end
+    local p, pos = findMyHivePromptAndPos()
+    if p then
+        return { pos = pos or owned.pos, slot = owned, prompt = p }
+    end
     return { pos=owned.pos, slot=owned, prompt=nil }
 end
 
@@ -1993,10 +2447,10 @@ local function makeHoney()
     local hum = char and char:FindFirstChildOfClass("Humanoid")
     if not root or not hum or hum.Health <= 0 then return false end
 
-    -- Если пыльцы нет вообще (0), не занимаем улей и не разгружаемся
+    -- Если пыльцы нет вообще (0), не разгружаемся
     local info = getBackpackPollen()
     if not info or not info.current or info.current <= 0 then
-        return false
+        return true
     end
 
     -- Проверяем наличие своего улья
@@ -2007,14 +2461,33 @@ local function makeHoney()
 
     local hive = findMyHive()
     local slot = findAssignedHiveSlot()
-    local hivePos = (hive and hive.pos) or (slot and slot.pos)
+    local prompt, promptPos = findMyHivePromptAndPos()
+    local hivePos = (hive and hive.pos) or (slot and slot.pos) or promptPos
+
     if not hivePos then
-        log("Honey", "Позиция своего улья не найдена")
+        log("Honey", "Позиция своего улья не найдена, пробую захватить свободный...")
+        ensureHiveClaimed()
+        slot = findAssignedHiveSlot()
+        prompt, promptPos = findMyHivePromptAndPos()
+        hivePos = (slot and slot.pos) or promptPos
+    end
+
+    if not hivePos then
+        -- Fallback: летим к любой свободной платформе улья
+        local pads = findYellowHivePads()
+        if #pads > 0 then
+            table.sort(pads, function(a, b) return (a.pos - root.Position).Magnitude < (b.pos - root.Position).Magnitude end)
+            hivePos = pads[1].pos
+        end
+    end
+
+    if not hivePos then
+        log("Honey", "Позиция своего улья не найдена!")
         return false
     end
 
     log("Honey", "Рюкзак полон! Лечу к улью на разгрузку...")
-    -- Подлетаем к платформе улья
+    -- Подлетаем прямо к платформе улья
     moveRootToPosition(root, hivePos + Vector3.new(0, 3.5, 0), 10)
 
     -- Отключаем ноклип и встаем ровно на платформу
@@ -2029,15 +2502,15 @@ local function makeHoney()
     task.wait(0.3)
 
     -- Ищем Prompt "Make Honey"
-    local prompt = (hive and hive.prompt)
-    if not prompt then
-        local near = findPromptNearPosition(CONFIG.MY_HIVE_KEYWORD or "make honey", hivePos, 30)
-        if near then prompt = near.prompt end
+    local activePrompt = prompt or (hive and hive.prompt) or (slot and slot.prompt)
+    if not activePrompt then
+        local near = findPromptNearPosition(CONFIG.MY_HIVE_KEYWORD or "make honey", hivePos, 35)
+        if near then activePrompt = near.prompt end
     end
-    if not prompt and slot and slot.model then
+    if not activePrompt and slot and slot.model then
         for _, desc in ipairs(slot.model:GetDescendants()) do
             if desc:IsA("ProximityPrompt") then
-                prompt = desc
+                activePrompt = desc
                 break
             end
         end
@@ -2045,7 +2518,7 @@ local function makeHoney()
 
     -- Нажимаем Make Honey
     log("Honey", "Активирую Make Honey (клавиша E)...")
-    triggerMakeHoneyAction(prompt)
+    triggerMakeHoneyAction(activePrompt)
 
     -- Ждём ПОЛНОЙ разгрузки рюкзака (пыльца -> 0)
     local maxWait = tonumber(CONFIG.HONEY_MAX_WAIT) or 120
@@ -2060,34 +2533,32 @@ local function makeHoney()
             root.AssemblyLinearVelocity = Vector3.zero
         end)
 
-        local info = getBackpackPollen()
-        if info then
-            -- Полная разгрузка: пыльцы 0 (или менее 0.5% от объема)
-            if info.current <= 0 or info.ratio <= 0.005 then
-                log("Honey", string.format("Рюкзак ПОЛНОСТЬЮ разгружен (0 / %d)! Возвращаюсь к фарму.", info.max))
+        local currentInfo = getBackpackPollen()
+        if currentInfo then
+            -- Полная разгрузка: пыльцы 0 (или менее 1% от объема)
+            if currentInfo.current <= 0 or currentInfo.ratio <= 0.01 then
+                log("Honey", string.format("Рюкзак ПОЛНОСТЬЮ разгружен (0 / %d)! Возвращаюсь к фарму.", currentInfo.max))
                 task.wait(0.5)
                 return true
             end
 
             -- Проверяем, идет ли процесс переработки пыльцы в мед
-            local isConverting = (info.current < lastPollen)
-            lastPollen = info.current
+            local isConverting = (currentInfo.current < lastPollen)
+            lastPollen = currentInfo.current
 
-            -- Если процесс НЕ идет и прошло > 4 сек с прошлой попытки, только тогда повторяем нажатие
-            if not isConverting and (os.clock() - lastActionAt > 4.0) then
-                if not prompt then
-                    local near = findPromptNearPosition(CONFIG.MY_HIVE_KEYWORD or "make honey", hivePos, 30)
-                    if near then prompt = near.prompt end
+            -- Если процесс НЕ идет и прошло > 3.5 сек с прошлой попытки, повторяем нажатие
+            if not isConverting and (os.clock() - lastActionAt > 3.5) then
+                if not activePrompt then
+                    local p2, _ = findMyHivePromptAndPos()
+                    if p2 then activePrompt = p2 end
                 end
-                -- Проверяем: если на промпте написано Stop Making Honey, значит процесс активен, нажимать НЕЛЬЗЯ!
-                local promptText = prompt and prompt.ActionText and string.lower(prompt.ActionText) or ""
+                local promptText = activePrompt and activePrompt.ActionText and string.lower(activePrompt.ActionText) or ""
                 if not string.find(promptText, "stop", 1, true) then
                     lastActionAt = os.clock()
-                    triggerMakeHoneyAction(prompt)
+                    triggerMakeHoneyAction(activePrompt)
                 end
             end
         else
-            -- Если индикатор стал недоступен через 15 сек после начала, считаем разгрузку успешной
             if os.clock() - t0 > 15 then
                 log("Honey", "Индикатор пыльцы пуст, разгрузка завершена")
                 return true
@@ -2097,12 +2568,12 @@ local function makeHoney()
         task.wait(0.4)
     end
 
-    log("Honey", "Разгрузка завершена по истечению времени")
+    log("Honey", "Разгрузка завершена")
     return true
 end
 
 local TOKEN_P1 = {
-    "glitter", "glue", "extract", "star jelly", "magic bean", "bean",
+    "ticket", "glitter", "glue", "extract", "star jelly", "magic bean", "bean",
     "royal jelly", "atomic treat", "star treat", "neonberry",
     "moon charm", "whirligig", "egg", "dice", "smoothie",
     "converter", "micro-converter", "oil", "enzymes", "tropical drink",
@@ -2111,16 +2582,51 @@ local TOKEN_P1 = {
 }
 local TOKEN_P2 = {
     "strawberry", "blueberry", "pineapple", "sunflower", "seed",
-    "coconut", "bitterberry", "treat", "ticket", "ant pass", "pollen"
+    "coconut", "bitterberry", "treat", "ant pass", "pollen"
 }
 
+-- Известные текстуры предметов BSS (ID -> имя предмета)
+local TOKEN_TEXTURE_MAP = {
+    ["1471850677"] = "diamond egg",
+    ["1471849394"] = "gold egg",
+    ["1471844391"] = "silver egg",
+    ["1472135114"] = "star jelly",
+    ["2028607990"] = "magic bean",
+    ["1674871631"] = "ticket",
+    ["2007780065"] = "ticket",
+    ["1629547638"] = "honey",
+}
+
+-- Динамическое авто-построение базы текстур токенов из ReplicatedStorage игры
+local function buildTokenTextureMap()
+    local rep = game:GetService("ReplicatedStorage")
+    local folders = { rep:FindFirstChild("Collectibles"), rep:FindFirstChild("Icons"), rep:FindFirstChild("ItemData") }
+    for _, folder in ipairs(folders) do
+        if folder then
+            for _, item in ipairs(folder:GetChildren()) do
+                local itemName = string.lower(item.Name)
+                for _, d in ipairs(item:GetDescendants()) do
+                    if d:IsA("Decal") or d:IsA("Texture") or d:IsA("ImageLabel") then
+                        local tex = tostring(d.Texture or d.Image or "")
+                        if tex ~= "" then
+                            TOKEN_TEXTURE_MAP[string.lower(tex)] = itemName
+                            local id = string.match(tex, "%d+")
+                            if id then TOKEN_TEXTURE_MAP[id] = itemName end
+                        end
+                    end
+                end
+            end
+        end
+    end
+end
+pcall(buildTokenTextureMap)
+
 local function isHoneyToken(low)
-    if string.find(low, "honey", 1, true) then return true end
-    -- Все известные ID текстур медовых монет BSS
-    if string.find(low, "1629547638", 1, true) or string.find(low, "2028607990", 1, true)
-       or string.find(low, "1471850677", 1, true) or string.find(low, "1471849394", 1, true)
-       or string.find(low, "1471844391", 1, true) or string.find(low, "1472135114", 1, true)
-       or string.find(low, "honeytoken", 1, true) or string.find(low, "honeydrop", 1, true) then
+    local n = string.lower(tostring(low or ""))
+    if string.find(n, "honey", 1, true) or string.find(n, "honeydrop", 1, true) or string.find(n, "honeytoken", 1, true) then
+        return true
+    end
+    if string.find(n, "1629547638", 1, true) then
         return true
     end
     return false
@@ -2133,11 +2639,11 @@ local function tokenPriority(name)
     local low = string.lower(tostring(name or ""))
     -- Медовые токены: приоритет 99 (игнорируются от целенаправленного бега, собираются только наступая)
     if isHoneyToken(low) then return 99 end
-    -- N1: Супер редкие предметы (Glue, Blue Extract, Glitter, Star Jelly, Magic Beans и т.д.)
+    -- N1: Супер редкие предметы (Tickets, Eggs, Glue, Extract, Glitter, Star Jelly, Magic Beans и т.д.)
     for _, w in ipairs(TOKEN_P1) do
         if string.find(low, w, 1, true) then return 1 end
     end
-    -- N2: Фрукты, семена, билеты (Blueberry, Strawberry, Seeds, Treats, Tickets)
+    -- N2: Фрукты, семена, сладости (Blueberry, Strawberry, Seeds, Treats, Bitterberries)
     for _, w in ipairs(TOKEN_P2) do
         if string.find(low, w, 1, true) then return 2 end
     end
@@ -2150,38 +2656,71 @@ local function resolveTokenName(obj)
     local cached = TOKEN_NAME_CACHE[obj]
     if cached then return cached end
 
-    local parts = {}
     local name = tostring(obj.Name or "")
-    table.insert(parts, name)
+    local detectedName = nil
+
+    -- 1. Проверяем декали внутри токена по базе текстур BSS
     local okC, children = pcall(function() return obj:GetChildren() end)
     if okC and children then
         for _, child in ipairs(children) do
             if child:IsA("Decal") or child:IsA("Texture") then
-                table.insert(parts, tostring(child.Name or ""))
                 local tex = tostring(child.Texture or "")
-                if tex ~= "" then table.insert(parts, tex) end
+                local lowTex = string.lower(tex)
+                local id = string.match(tex, "%d+")
+                if TOKEN_TEXTURE_MAP[lowTex] then
+                    detectedName = TOKEN_TEXTURE_MAP[lowTex]
+                    break
+                elseif id and TOKEN_TEXTURE_MAP[id] then
+                    detectedName = TOKEN_TEXTURE_MAP[id]
+                    break
+                end
+                local cName = string.lower(tostring(child.Name or ""))
+                if cName ~= "frontdecal" and cName ~= "backdecal" and cName ~= "decal" and cName ~= "" then
+                    for _, w in ipairs(TOKEN_P1) do
+                        if string.find(cName, w, 1, true) then detectedName = w; break end
+                    end
+                    if not detectedName then
+                        for _, w in ipairs(TOKEN_P2) do
+                            if string.find(cName, w, 1, true) then detectedName = w; break end
+                        end
+                    end
+                end
             end
         end
     end
-    local okAttr, attrs = pcall(function() return obj:GetAttributes() end)
-    if okAttr and attrs then
-        for k, v in pairs(attrs) do
-            table.insert(parts, tostring(k) .. " " .. tostring(v))
+
+    -- 2. Проверяем атрибуты объекта
+    if not detectedName then
+        local okAttr, attrs = pcall(function() return obj:GetAttributes() end)
+        if okAttr and attrs then
+            for k, v in pairs(attrs) do
+                local val = string.lower(tostring(v))
+                for _, w in ipairs(TOKEN_P1) do
+                    if string.find(val, w, 1, true) then detectedName = w; break end
+                end
+                if detectedName then break end
+                for _, w in ipairs(TOKEN_P2) do
+                    if string.find(val, w, 1, true) then detectedName = w; break end
+                end
+                if detectedName then break end
+            end
         end
     end
-    local combined = string.lower(table.concat(parts, " "))
 
-    local result = name ~= "" and name or "token"
-    for _, w in ipairs(TOKEN_P1) do
-        if string.find(combined, w, 1, true) then result = w; break end
-    end
-    if result == name or result == "token" then
-        for _, w in ipairs(TOKEN_P2) do
-            if string.find(combined, w, 1, true) then result = w; break end
+    -- 3. Проверяем имя объекта
+    if not detectedName and name ~= "CFrame" and name ~= "" and name ~= "Part" then
+        local lowName = string.lower(name)
+        for _, w in ipairs(TOKEN_P1) do
+            if string.find(lowName, w, 1, true) then detectedName = w; break end
+        end
+        if not detectedName then
+            for _, w in ipairs(TOKEN_P2) do
+                if string.find(lowName, w, 1, true) then detectedName = w; break end
+            end
         end
     end
-    if isHoneyToken(combined) then result = "honey" end
 
+    local result = detectedName or (name ~= "" and name or "token")
     TOKEN_NAME_CACHE[obj] = result
     return result
 end
@@ -2582,40 +3121,38 @@ useSprinklerBuilder = function(fieldAnchor)
     local anchorPos = fieldAnchor or root.Position
     local zone = getActiveFlowerZone(anchorPos)
     local center = zone and zone.Position or anchorPos
-    local halfX = zone and (zone.Size.X * 0.5) or 32
-    local halfZ = zone and (zone.Size.Z * 0.5) or 32
+    local halfX = zone and (zone.Size.X * 0.5) or 35
+    local halfZ = zone and (zone.Size.Z * 0.5) or 35
 
-    -- Формируем целевые точки размещения поливалок по правилам:
-    -- 1: по середине поля
-    -- 2: слева и справа с достаточным расстоянием друг от друга
-    -- 3: сверху 1, и 2 снизу слева и справа
-    -- 4: в 4 углах поля, но не под самый корень (с безопасным отступом)
+    -- Формируем целевые точки размещения поливалок с широкой расстановкой (не ближе 22-28 стадс)
     local targetOffsets = {}
     if count == 1 then
         table.insert(targetOffsets, Vector3.new(0, 0, 0))
     elseif count == 2 then
-        local maxX = math.max(17, halfX - 7)
-        local spanX = math.clamp(halfX * 0.65, 17, maxX)
+        local spanX = math.clamp(halfX * 0.65, 22, math.max(22, halfX - 6))
         table.insert(targetOffsets, Vector3.new(-spanX, 0, 0))
         table.insert(targetOffsets, Vector3.new(spanX, 0, 0))
     elseif count == 3 then
-        local maxX = math.max(18, halfX - 7)
-        local maxZ = math.max(16, halfZ - 7)
-        local spanX = math.clamp(halfX * 0.65, 18, maxX)
-        local spanZ = math.clamp(halfZ * 0.60, 16, maxZ)
+        local spanX = math.clamp(halfX * 0.65, 22, math.max(22, halfX - 6))
+        local spanZ = math.clamp(halfZ * 0.60, 20, math.max(20, halfZ - 6))
         table.insert(targetOffsets, Vector3.new(0, 0, spanZ))
-        table.insert(targetOffsets, Vector3.new(-spanX, 0, -spanZ * 0.65))
-        table.insert(targetOffsets, Vector3.new(spanX, 0, -spanZ * 0.65))
+        table.insert(targetOffsets, Vector3.new(-spanX, 0, -spanZ * 0.70))
+        table.insert(targetOffsets, Vector3.new(spanX, 0, -spanZ * 0.70))
     elseif count == 4 then
-        local maxX = math.max(17, halfX - 7)
-        local maxZ = math.max(17, halfZ - 7)
-        local spanX = math.clamp(halfX * 0.65, 17, maxX)
-        local spanZ = math.clamp(halfZ * 0.65, 17, maxZ)
+        local spanX = math.clamp(halfX * 0.65, 22, math.max(22, halfX - 6))
+        local spanZ = math.clamp(halfZ * 0.65, 22, math.max(22, halfZ - 6))
         table.insert(targetOffsets, Vector3.new(-spanX, 0, spanZ))
         table.insert(targetOffsets, Vector3.new(spanX, 0, spanZ))
         table.insert(targetOffsets, Vector3.new(-spanX, 0, -spanZ))
         table.insert(targetOffsets, Vector3.new(spanX, 0, -spanZ))
     end
+
+    -- 1. Экипируем Sprinkler Builder в руки ДО начала расстановки
+    if tool and tool.Parent ~= char then
+        equipTool(tool)
+    end
+    -- 2. Ждем 1.5 секунды, чтобы инструмент "анкдшенулся" (прошел cooldown взятия из рюкзака)
+    task.wait(1.5)
 
     local placed = 0
     for i, offset in ipairs(targetOffsets) do
@@ -2627,23 +3164,21 @@ useSprinklerBuilder = function(fieldAnchor)
         else
             worldTarget = center + offset
         end
-        local goal = Vector3.new(worldTarget.X, root.Position.Y, worldTarget.Z)
 
-        pcall(function() hum:MoveTo(goal) end)
-        local deadline = os.clock() + 0.55
-        while alive() and os.clock() < deadline and (root.Position - goal).Magnitude > 2.0 do
-            RunService.Heartbeat:Wait()
-        end
+        local safeGround = getGroundPos(worldTarget)
+        local goal = Vector3.new(safeGround.X, safeGround.Y, safeGround.Z)
 
-        -- Экипировка Sprinkler Builder
+        -- Летим прямо на нужную точку расстановки (гарантированное прибытие на точку, без таймаута бега)
+        moveRootToPosition(root, goal, 2.5)
+        task.wait(0.2)
+
+        -- Убеждаемся что инструмент все еще в руках
         if tool and tool.Parent ~= char then
             equipTool(tool)
+            task.wait(1.5)
         end
 
-        -- Для того чтобы поливалка анкдшенулась/прошел откат сервера ждем 1.5 секунды
-        task.wait(1.5)
-
-        -- 1. Вызов серверного RemoteEvent размещения поливалки из инвентаря
+        -- 1. Вызов серверного RemoteEvent размещения поливалки
         pcall(function()
             local rep = game:GetService("ReplicatedStorage")
             local ev = rep:FindFirstChild("Events")
@@ -2665,8 +3200,14 @@ useSprinklerBuilder = function(fieldAnchor)
             pcall(mouse1click)
         end
 
-        task.wait(0.2)
         placed += 1
+
+        -- Задержка 1.5 секунды между установками поливалок (откат сервера BSS на установку следующей поливалки)
+        if i < #targetOffsets then
+            task.wait(1.5)
+        else
+            task.wait(0.3)
+        end
     end
 
     log("Инструмент", string.format("Sprinkler Builder: размещено %d/%d (режим: %d поливалки)", placed, count, count))
@@ -2832,6 +3373,8 @@ function Searcher:Start()
     s.lastSprout, s.lastVicious = nil, nil
 
     self.thread = task.spawn(function()
+        s.currentStatus = "Ожидание загрузки игры..."
+        waitForGameReady(25)
         s.currentStatus = "Запуск сканирования..."
         task.wait(tonumber(CONFIG.INITIAL_CHECK) or 1)
         while alive() do
@@ -2890,6 +3433,8 @@ function Searcher:Start()
                     hopRandom()
                 else
                     s.currentStatus = "Сервер #" .. tostring(s.serversChecked) .. " — пусто"
+                    local hopWait = math.max(3.5, tonumber(CONFIG.HOP_DELAY) or 3.5)
+                    task.wait(hopWait)
                     hopRandom()
                 end
             end)
@@ -2951,65 +3496,72 @@ end
 function Looter:harvest()
     local s = self.stats
     local sprout = findLootableSprout()
-    if not sprout then return end
+    if not sprout then return false end
+
+    local sproutAnchor = worldPos(sprout)
+    if not moveToSprout(sprout) then
+        return false
+    end
+    sproutAnchor = worldPos(sprout) or sproutAnchor or (player.Character and player.Character:FindFirstChild("HumanoidRootPart") and player.Character.HumanoidRootPart.Position)
 
     local rar = detectRarity(sprout)
     s.lastSprout = { fieldName = RARITY_LABEL[rar] or "спрут" }
     s.sproutsHarvested += 1
     s.currentStatus = "Лечу к ростку: " .. (RARITY_LABEL[rar] or "спрут")
 
-    local sproutAnchor = worldPos(sprout)
-    if moveToSprout(sprout) then
-        sproutAnchor = worldPos(sprout) or sproutAnchor or (player.Character and player.Character:FindFirstChild("HumanoidRootPart") and player.Character.HumanoidRootPart.Position)
+    -- Занимаем улей ТОЛЬКО когда реально подлетели к подтвержденному ростку
+    if not hasOwnHive() then
+        s.currentStatus = "Росток подтвержден — занимаю улей"
+        local claimOk, claimed = pcall(ensureHiveClaimed)
+        if claimOk and claimed then s.hivesClaimed += 1 end
+        moveToSprout(sprout)
+    end
 
-        -- Занимаем улей ТОЛЬКО когда реально подлетели к подтвержденному ростку
-        if not hasOwnHive() then
-            s.currentStatus = "Росток подтвержден — занимаю улей"
-            local claimOk, claimed = pcall(ensureHiveClaimed)
-            if claimOk and claimed then s.hivesClaimed += 1 end
+    s.currentStatus = "Росток: ставлю поливалку"
+    task.wait(0.15)
+    if useSprinklerBuilder then pcall(useSprinklerBuilder, sproutAnchor) end
+    ensureHarvestToolEquipped()
+
+    -- Фаза 1: Росток жив. Бегаем постоянно, машем инструментом, собираем токены
+    while alive() and isSproutAlive(sprout, sproutAnchor) do
+        if isBackpackFull() then
+            while isBackpackFull() and alive() do
+                s.currentStatus = "Рюкзак полный — делаю Honey на улье..."
+                makeHoney()
+                task.wait(1)
+            end
+            if not alive() or not isSproutAlive(sprout, sproutAnchor) then break end
+            s.currentStatus = "Возвращаюсь к ростку"
             moveToSprout(sprout)
         end
+        s.currentStatus = CONFIG.ENABLE_AUTO_DIG and "Росток: копаю и бегаю по полю" or "Росток: собираю токены"
+        collectTokensFor(6, function()
+            return not alive() or not isSproutAlive(sprout, sproutAnchor) or isBackpackFull()
+        end, sproutAnchor)
+        task.wait(0.05)
+    end
 
-        s.currentStatus = "Росток: ставлю поливалку"
-        task.wait(0.15)
-        if useSprinklerBuilder then pcall(useSprinklerBuilder, sproutAnchor) end
-        ensureHarvestToolEquipped()
-
-        -- Фаза 1: Росток жив. Бегаем постоянно, машем инструментом, собираем токены
-        while alive() and isSproutAlive(sprout, sproutAnchor) do
-            if isBackpackFull() then
-                s.currentStatus = "Рюкзак полный — делаю Honey"
-                pcall(makeHoney)
-                if not alive() or not isSproutAlive(sprout, sproutAnchor) then break end
-                s.currentStatus = "Возвращаюсь к ростку"
-                moveToSprout(sprout)
-            end
-            s.currentStatus = CONFIG.ENABLE_AUTO_DIG and "Росток: копаю и бегаю по полю" or "Росток: собираю токены"
-            collectTokensFor(6, function()
-                return not alive() or not isSproutAlive(sprout, sproutAnchor) or isBackpackFull()
+    -- Фаза 2: Росток сломан! Лутаем оставшиеся ценные токены (игнорируя honey tokens)
+    if alive() and sproutAnchor then
+        while isBackpackFull() and alive() do
+            s.currentStatus = "Рюкзак полный — делаю Honey"
+            makeHoney()
+            task.wait(1)
+        end
+        if alive() and not isBackpackFull() then
+            s.currentStatus = "Росток сломан — собираю ценные токены..."
+            collectTokensFor(tonumber(CONFIG.BROKEN_WAIT) or 20, function()
+                return not alive() or isBackpackFull()
             end, sproutAnchor)
-            task.wait(0.05)
-        end
-
-        -- Фаза 2: Росток сломан! Лутаем оставшиеся ценные токены (игнорируя honey tokens)
-        if alive() and sproutAnchor then
-            if isBackpackFull() then
-                s.currentStatus = "Рюкзак полный — делаю Honey"
-                pcall(makeHoney)
-            end
-            if alive() and not isBackpackFull() then
-                s.currentStatus = "Росток сломан — собираю ценные токены..."
-                collectTokensFor(tonumber(CONFIG.BROKEN_WAIT) or 20, function()
-                    return not alive() or isBackpackFull()
-                end, sproutAnchor)
-            end
         end
     end
 
-    if isBackpackFull() then
+    while isBackpackFull() and alive() do
         s.currentStatus = "Рюкзак полный — делаю Honey"
-        pcall(makeHoney)
+        makeHoney()
+        task.wait(1)
     end
+    return true
 end
 
 function Looter:fetchNextVicious()
@@ -3068,26 +3620,30 @@ function Looter:Start()
 
     stopAutoDig()
     self.thread = task.spawn(function()
-        -- 1. Сначала при заходе на сервер ищем росток/вициус ровно 5 секунд
-        s.currentStatus = "Проверяю сервер на росток / вициус (5с)..."
+        s.currentStatus = "Ожидание загрузки игры..."
+        waitForGameReady(25)
 
+        -- 1. Сначала при заходе на сервер ищем росток/вициус ровно 5 секунд
         local initialTargetFound = false
         for checkSec = 1, 5 do
             if not alive() then return end
+            s.currentStatus = string.format("Проверяю сервер на росток / вициус (%dc)...", 6 - checkSec)
 
             if CONFIG.CHECK_SPROUTS then
-                local sprout = findLootableSprout()
-                if sprout then
+                local okSprout, sprout = pcall(findLootableSprout)
+                if okSprout and sprout then
                     s.currentStatus = "Росток найден — начинаю лутать!"
-                    pcall(function() self:harvest() end)
-                    initialTargetFound = true
-                    break
+                    local okHarvest, harvestRes = pcall(function() return self:harvest() end)
+                    if okHarvest and harvestRes == true then
+                        initialTargetFound = true
+                        break
+                    end
                 end
             end
 
             if CONFIG.CHECK_VICIOUS then
-                local v = findVicious()
-                if v then
+                local okV, v = pcall(findVicious)
+                if okV and v then
                     s.currentStatus = "Vicious найден — начинаю бой!"
                     pcall(function() fightVicious(v) end)
                     initialTargetFound = true
@@ -3095,10 +3651,14 @@ function Looter:Start()
                 end
             end
 
-            if CONFIG.CHECK_PUFFSHROOMS and #findEligiblePuffshrooms() > 0 then
-                pcall(function() self:harvestPuffshrooms() end)
-                initialTargetFound = true
-                break
+            if CONFIG.CHECK_PUFFSHROOMS then
+                local okPuff, puffList = pcall(findEligiblePuffshrooms)
+                if okPuff and puffList and #puffList > 0 then
+                    s.currentStatus = "Puffshroom найден — начинаю сбор!"
+                    pcall(function() self:harvestPuffshrooms() end)
+                    initialTargetFound = true
+                    break
+                end
             end
 
             task.wait(1)
@@ -3111,43 +3671,12 @@ function Looter:Start()
         end
 
         local taskAttempts = {}
-        local standbyFieldZone = nil
-        local standbyFieldAnchor = nil
-        local standbySprinklerPlaced = false
 
-        local function getStandbyField()
-            if standbyFieldZone and standbyFieldZone.Parent then
-                return standbyFieldZone, standbyFieldAnchor
-            end
-            local zones = Workspace:FindFirstChild("FlowerZones")
-            if zones then
-                -- Приоритетные поля для стендбай фарма
-                local candidates = { "Pineapple", "Clover", "Spider", "Bamboo", "Strawberry", "Sunflower", "Mushroom" }
-                for _, name in ipairs(candidates) do
-                    local z = zones:FindFirstChild(name)
-                    if z and z:IsA("BasePart") then
-                        standbyFieldZone = z
-                        standbyFieldAnchor = z.Position
-                        return standbyFieldZone, standbyFieldAnchor
-                    end
-                end
-                for _, z in ipairs(zones:GetChildren()) do
-                    if z:IsA("BasePart") then
-                        standbyFieldZone = z
-                        standbyFieldAnchor = z.Position
-                        return standbyFieldZone, standbyFieldAnchor
-                    end
-                end
-            end
-            return nil, nil
-        end
-
-        -- Если за 5 секунд целей не было, сообщаем о переходе в режим соло-ожидания
         if not initialTargetFound then
-            s.currentStatus = "Целей нет — включаю режим соло до находки ищущих..."
-            log("Лутающий", "Нет целей за 5с. Перехожу в режим соло-ожидания на текущем сервере.")
+            s.currentStatus = "Целей на сервере нет — опрашиваю ищущих..."
+            log("Лутающий", "Нет целей за 5с. Проверяю очередь задач от ищущих.")
         else
-            s.currentStatus = "Росток залутан — подключаюсь к боту..."
+            s.currentStatus = "Цель залутана — подключаюсь к боту..."
         end
 
         while true do
@@ -3162,7 +3691,6 @@ function Looter:Start()
                     s.currentStatus = "Новый росток на сервере — лутаю!"
                     pcall(function() self:harvest() end)
                     if isBackpackFull() then pcall(makeHoney) end
-                    standbySprinklerPlaced = false
                     return
                 end
 
@@ -3173,25 +3701,31 @@ function Looter:Start()
                         tokenCollectorBusy = false
                         s.currentStatus = "Vicious на сервере — лечу!"
                         pcall(function() fightVicious(v) end)
-                        standbySprinklerPlaced = false
                         return
                     end
                 end
 
                 -- Если рюкзак полон — разгружаем в мед на улье
-                if isBackpackFull() then
+                while isBackpackFull() and alive() do
                     stopAutoDig()
                     tokenCollectorBusy = false
-                    s.currentStatus = "Рюкзак полный — делаю Honey"
-                    pcall(makeHoney)
-                    standbySprinklerPlaced = false
-                    return
+                    s.currentStatus = "Рюкзак полный — делаю Honey на улье..."
+                    makeHoney()
+                    task.wait(1)
                 end
 
                 -- Опрашиваем бота о новых задачах от Ищущего
-                local taskData, skipReason = self:fetchNextVicious()
-                if not taskData and not skipReason and CONFIG.CHECK_SPROUTS then
-                    taskData, skipReason = self:fetchNext()
+                local taskData, skipReason = nil, nil
+                if CONFIG.CHECK_VICIOUS then
+                    taskData, skipReason = self:fetchNextVicious()
+                end
+                if not taskData and CONFIG.CHECK_SPROUTS then
+                    local sData, sReason = self:fetchNext()
+                    if sData then
+                        taskData = sData
+                    elseif not skipReason then
+                        skipReason = sReason
+                    end
                 end
 
                 if taskData and taskData.jobId then
@@ -3258,44 +3792,25 @@ function Looter:Start()
                     return
                 end
 
-                -- ЗАДАЧ НЕТ: режим соло на текущем сервере (фармим поле, копаем, собираем токены)
-                local fieldZone, fieldAnchor = getStandbyField()
-                local char = player.Character
-                local root = char and char:FindFirstChild("HumanoidRootPart")
+                -- ЗАДАЧ НЕТ И ЦЕЛЕЙ НА СЕРВЕРЕ НЕТ:
+                -- Лутающий работает автономно в соло-режиме: прыгает по серверам,
+                -- параллельно на каждом сервере проверяя задания от ищущих!
+                while isBackpackFull() and alive() do
+                    stopAutoDig()
+                    tokenCollectorBusy = false
+                    s.currentStatus = "Рюкзак полный — делаю Honey перед прыжком..."
+                    makeHoney()
+                    task.wait(1)
+                end
 
-                if root and fieldZone and fieldAnchor then
-                    -- Если еще далеко от поля — прилетаем
-                    local distToField = (root.Position - fieldAnchor).Magnitude
-                    if distToField > 80 then
-                        s.currentStatus = "Режим соло (ожидание): лечу на " .. tostring(fieldZone.Name)
-                        local safeGround = getGroundPos(fieldAnchor)
-                        moveRootToPosition(root, safeGround, 6)
-                        task.wait(0.2)
-                    end
-
-                    -- Ставим поливалку на поле один раз
-                    if not standbySprinklerPlaced then
-                        s.currentStatus = "Режим соло: ставлю поливалку на поле..."
-                        if useSprinklerBuilder then pcall(useSprinklerBuilder, fieldAnchor) end
-                        standbySprinklerPlaced = true
-                        ensureHarvestToolEquipped()
-                    end
-
-                    -- Включаем автокопание
-                    startAutoDig()
-
-                    -- Собираем токены и копаем в течение 2.5 секунд, затем сразу проверяем бота
-                    s.currentStatus = "Режим соло: фармлю " .. tostring(fieldZone.Name) .. " (жду задачу от ищущих)"
-                    collectTokensFor(2.5, function()
-                        return not alive()
-                            or isBackpackFull()
-                            or (CONFIG.CHECK_SPROUTS and findLootableSprout() ~= nil)
-                            or (CONFIG.CHECK_VICIOUS and findVicious() ~= nil)
-                    end, fieldAnchor)
-                else
-                    -- Если FlowerZones не найдены — просто ждем опрос
-                    s.currentStatus = "Режим соло: жду задачу от ищущих..."
-                    task.wait(2.5)
+                s.currentStatus = "Целей нет — прыгаю на случайный сервер (соло-поиск)..."
+                log("Лутающий", "Нет задач от ищущих и целей на сервере. Прыгаю на случайный сервер...")
+                local hopWait = math.max(3.5, tonumber(CONFIG.HOP_DELAY) or 3.5)
+                task.wait(hopWait)
+                if alive() then
+                    s.teleports += 1
+                    hopRandom()
+                    return
                 end
             end)
             if not ok then
@@ -3344,6 +3859,8 @@ function Solo:Start()
     stopAutoDig()
 
     self.thread = task.spawn(function()
+        s.currentStatus = "Ожидание загрузки игры..."
+        waitForGameReady(25)
         s.currentStatus = "Соло активно — проверяю сервер на ростки..."
         task.wait(tonumber(CONFIG.INITIAL_CHECK) or 1.5)
         watchFolders()
@@ -3371,9 +3888,10 @@ function Solo:Start()
                 end
 
                 -- Проверка рюкзака перед поиском целей
-                if isBackpackFull() then
-                    s.currentStatus = "Рюкзак полный — делаю Honey"
-                    pcall(makeHoney)
+                while isBackpackFull() and alive() do
+                    s.currentStatus = "Рюкзак полный — делаю Honey на улье..."
+                    makeHoney()
+                    task.wait(1)
                 end
 
                 local sprout = CONFIG.CHECK_SPROUTS and findSprout() or nil
@@ -3400,8 +3918,11 @@ function Solo:Start()
                         -- Фаза 1: Росток жив. Бегает всегда, машет палкой 100%, собирает токены
                         while alive() and isSproutAlive(sprout, sproutAnchor) do
                             if isBackpackFull() then
-                                s.currentStatus = "Рюкзак полный — делаю Honey"
-                                pcall(makeHoney)
+                                while isBackpackFull() and alive() do
+                                    s.currentStatus = "Рюкзак полный — делаю Honey на улье..."
+                                    makeHoney()
+                                    task.wait(1)
+                                end
                                 if not alive() or not isSproutAlive(sprout, sproutAnchor) then break end
                                 s.currentStatus = "Возвращаюсь к ростку"
                                 moveToSprout(sprout)
@@ -3418,9 +3939,10 @@ function Solo:Start()
 
                         -- Фаза 2: Росток сломан! Лутаем оставшиеся ценные токены (игнорируя honey tokens)
                         if alive() and sproutAnchor and not (CONFIG.CHECK_VICIOUS and findVicious()) then
-                            if isBackpackFull() then
+                            while isBackpackFull() and alive() do
                                 s.currentStatus = "Рюкзак полный — делаю Honey"
-                                pcall(makeHoney)
+                                makeHoney()
+                                task.wait(1)
                             end
                             if alive() and not isBackpackFull() then
                                 s.currentStatus = "Росток сломан — собираю ценные токены..."
@@ -3432,14 +3954,16 @@ function Solo:Start()
                     end
 
                     -- Разгрузка перед переходом на следующий сервер
-                    if isBackpackFull() then
+                    while isBackpackFull() and alive() do
                         s.currentStatus = "Рюкзак полный — делаю Honey перед переходом"
-                        pcall(makeHoney)
+                        makeHoney()
+                        task.wait(1)
                     end
 
                     -- Фаза 3: Росток залутан! Переход на следующий сервер
                     s.currentStatus = "Росток залутан — перехожу на другой сервер..."
-                    task.wait(1)
+                    local hopWait = math.max(3.5, tonumber(CONFIG.HOP_DELAY) or 3.5)
+                    task.wait(hopWait)
                     if alive() then
                         s.hops += 1
                         hopRandom()
@@ -3449,7 +3973,8 @@ function Solo:Start()
 
                 -- Если ростка нет на сервере — переходим на другой
                 s.currentStatus = "Целей нет — перехожу на другой сервер..."
-                task.wait(1)
+                local hopWait = math.max(3.5, tonumber(CONFIG.HOP_DELAY) or 3.5)
+                task.wait(hopWait)
                 if alive() then
                     s.hops += 1
                     hopRandom()
@@ -3663,7 +4188,7 @@ new("TextLabel", {
 })
 new("TextLabel", {
     Size = UDim2.new(0, 220, 0, 25), Position = UDim2.new(0, 58, 0, 10),
-    BackgroundTransparency = 1, Text = "🐍 BSS Hopper v1.3.49",
+    BackgroundTransparency = 1, Text = "BSS Hopper v1.3.50",
     TextColor3 = C.text, Font = Enum.Font.GothamBold, TextSize = 22,
     TextXAlignment = Enum.TextXAlignment.Left, Parent = head,
 })
@@ -3985,6 +4510,9 @@ local function makeField(parent, label, value, placeholder, order, secret)
         BorderSizePixel = 0, Parent = box,
     })
     round(tb, 6)
+    tb.FocusLost:Connect(function()
+        if applySettings then pcall(applySettings) end
+    end)
     return tb
 end
 
@@ -4173,10 +4701,10 @@ fKey.Parent = colA
 fViciousChannel.Parent = colB
 
 section("ТАЙМИНГИ", 20).Parent = pageSettings
-local fHop = makeField(pageSettings, "ЗАДЕРЖКА ХОПА (сек)", CONFIG.HOP_DELAY, "3", 21)
+local fHop = makeField(pageSettings, "ЗАДЕРЖКА ХОПА (сек)", CONFIG.HOP_DELAY, "1.5", 21)
 local fPoll = makeField(pageSettings, "ОПРОС БОТА (сек)", CONFIG.POLL_INTERVAL, "3", 22)
 local fWait = makeField(pageSettings, "ЖДАТЬ СЛОМАННОГО СПРУТА (сек)", CONFIG.BROKEN_WAIT, "20", 23)
-local fConn = makeField(pageSettings, "ТАЙМАУТ ПОДКЛЮЧЕНИЯ (сек)", CONFIG.CONNECT_TIMEOUT, "3", 24)
+local fConn = makeField(pageSettings, "ТАЙМАУТ ПОДКЛЮЧЕНИЯ (сек)", CONFIG.CONNECT_TIMEOUT, "20", 24)
 local fPlace = makeField(pageSettings, "PLACE ID", CONFIG.PLACE_ID, "1537690962", 25)
 
 section("СКОРОСТЬ", 30).Parent = pageSettings
@@ -4187,7 +4715,7 @@ section("ИНСТРУМЕНТЫ И УЛЕЙ", 40).Parent = pageSettings
 local fSprinkler = makeField(pageSettings, "SPRINKLER KEYWORD", CONFIG.SPRINKLER_KEYWORD, "sprinkler", 41)
 local fSprinklerCount = makeField(pageSettings, "КОЛИЧЕСТВО ПОЛИВАЛОК (1–4)", CONFIG.SPRINKLER_COUNT, "3", 42)
 local getSprinkler = makeToggle(pageSettings, "Автоматически ставить поливалки", CONFIG.ENABLE_AUTO_SPRINKLER, 43, function(v)
-    CONFIG.ENABLE_AUTO_SPRINKLER = v; saveNow()
+    CONFIG.ENABLE_AUTO_SPRINKLER = v; if saveNow then pcall(saveNow) end
 end)
 local fRegion = makeField(pageSettings, "ЗОНА ФАРМА (center / left / right)", CONFIG.FARM_REGION, "center", 44)
 local fDigTool = makeField(pageSettings, "DIG TOOL KEYWORD", CONFIG.DIG_TOOL_KEYWORD, "scooper", 45)
@@ -4196,42 +4724,47 @@ local fHoneyKeyword = makeField(pageSettings, "MY HIVE KEYWORD", CONFIG.MY_HIVE_
 
 section("ОПЦИИ", 50).Parent = pageSettings
 local getDebug = makeToggle(pageSettings, "Диагностика спрута в консоли",
-    CONFIG.DEBUG_SPROUT, 52, function(v) CONFIG.DEBUG_SPROUT = v; saveNow() end)
+    CONFIG.DEBUG_SPROUT, 52, function(v) CONFIG.DEBUG_SPROUT = v; if saveNow then pcall(saveNow) end end)
 local getAuto = makeToggle(pageSettings, "Автозапуск после перезахода",
-    CONFIG.AUTO_START, 53, function(v) CONFIG.AUTO_START = v; saveNow() end)
+    CONFIG.AUTO_START, 53, function(v) CONFIG.AUTO_START = v; if saveNow then pcall(saveNow) end end)
 local getAntiLag = makeToggle(pageSettings, "ANTI-LAG: снизить графику", CONFIG.ANTI_LAG, 54, function(v)
-    applyAntiLag(v); saveNow()
+    applyAntiLag(v); if saveNow then pcall(saveNow) end
 end)
 
-local function applySettings()
+applySettings = function()
     local function num(v, def)
-        local n = tonumber(v); return n and n > 0 and n or def
+        if v == nil then return def end
+        local str = string.gsub(tostring(v), ",", ".")
+        local n = tonumber(str)
+        return (n and n > 0) and n or def
     end
     CONFIG.SELF_TAG = (fTag.Text ~= "" and fTag.Text) or CONFIG.SELF_TAG
     CONFIG.API_URL = (fUrl.Text ~= "" and fUrl.Text) or CONFIG.API_URL
     if fKey.Text ~= "" then CONFIG.API_KEY = fKey.Text end
     CONFIG.VICIOUS_CHANNEL_ID = (fViciousChannel.Text ~= "" and fViciousChannel.Text) or CONFIG.VICIOUS_CHANNEL_ID
-    CONFIG.HOP_DELAY = num(fHop.Text, 3)
-    CONFIG.POLL_INTERVAL = num(fPoll.Text, 3)
-    CONFIG.BROKEN_WAIT = num(fWait.Text, 20)
-    CONFIG.CONNECT_TIMEOUT = num(fConn.Text, 3)
+    CONFIG.HOP_DELAY = num(fHop.Text, CONFIG.HOP_DELAY or 1.5)
+    CONFIG.POLL_INTERVAL = num(fPoll.Text, CONFIG.POLL_INTERVAL or 3)
+    CONFIG.BROKEN_WAIT = num(fWait.Text, CONFIG.BROKEN_WAIT or 20)
+    CONFIG.CONNECT_TIMEOUT = num(fConn.Text, CONFIG.CONNECT_TIMEOUT or 20)
     CONFIG.PLACE_ID = (fPlace.Text ~= "" and fPlace.Text) or CONFIG.PLACE_ID
-    CONFIG.WALK_SPEED_MULT = num(fWalk.Text, 2.4)
-    CONFIG.FLY_SPEED = math.clamp(num(fFly.Text, 100), 50, 150)
+    CONFIG.WALK_SPEED_MULT = num(fWalk.Text, CONFIG.WALK_SPEED_MULT or 2.4)
+    CONFIG.FLY_SPEED = math.clamp(num(fFly.Text, CONFIG.FLY_SPEED or 100), 50, 150)
     CONFIG.SPRINKLER_KEYWORD = (fSprinkler.Text ~= "" and fSprinkler.Text) or CONFIG.SPRINKLER_KEYWORD
-    CONFIG.SPRINKLER_COUNT = math.clamp(math.floor(num(fSprinklerCount.Text, 3)), 1, 4)
-    CONFIG.ENABLE_AUTO_SPRINKLER = getSprinkler()
+    CONFIG.SPRINKLER_COUNT = math.clamp(math.floor(num(fSprinklerCount.Text, CONFIG.SPRINKLER_COUNT or 3)), 1, 4)
+    if getSprinkler then CONFIG.ENABLE_AUTO_SPRINKLER = getSprinkler() end
     local region = string.lower((fRegion.Text ~= "" and fRegion.Text) or CONFIG.FARM_REGION or "center")
     CONFIG.FARM_REGION = (region == "left" or region == "right") and region or "center"
     CONFIG.DIG_TOOL_KEYWORD = (fDigTool.Text ~= "" and fDigTool.Text) or CONFIG.DIG_TOOL_KEYWORD
     CONFIG.EMPTY_SLOT_KEYWORD = (fSlotKeyword.Text ~= "" and fSlotKeyword.Text) or CONFIG.EMPTY_SLOT_KEYWORD
     CONFIG.MY_HIVE_KEYWORD = (fHoneyKeyword.Text ~= "" and fHoneyKeyword.Text) or CONFIG.MY_HIVE_KEYWORD
-    CONFIG.DEBUG_SPROUT = getDebug()
-    CONFIG.AUTO_START = getAuto()
-    CONFIG.ANTI_LAG = getAntiLag()
-    applyAntiLag(CONFIG.ANTI_LAG)
+    if getDebug then CONFIG.DEBUG_SPROUT = getDebug() end
+    if getAuto then CONFIG.AUTO_START = getAuto() end
+    if getAntiLag then
+        CONFIG.ANTI_LAG = getAntiLag()
+        applyAntiLag(CONFIG.ANTI_LAG)
+    end
     applyWalkSpeed()
-    saveNow()
+    if saveNow then pcall(saveNow) end
 end
 
 local btnRow = new("Frame", {
@@ -4722,7 +5255,7 @@ end
 trace("Запуск завершён")
 
 print("=====================================================")
-print("  BSS HOPPER v1.3.49 ЗАГРУЖЕН")
+print("  BSS HOPPER v1.1 ЗАГРУЖЕН")
 print("  Bypass  : " .. (_G.BSS_BYPASS_ACTIVE and "session_bypass.lua" or "встроенный"))
 print("  Тег     : " .. tostring(CONFIG.SELF_TAG))
 print("  Бот     : " .. tostring(CONFIG.API_URL))
