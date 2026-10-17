@@ -283,7 +283,7 @@ local CONFIG = {
     MIN_RARITY = "basic",
     PLACE_ID = 1537690962,
 
-    HOP_DELAY = 0.8, POLL_INTERVAL = 3, BROKEN_WAIT = 20,
+    HOP_DELAY = 0.05, POLL_INTERVAL = 3, BROKEN_WAIT = 20,
     INITIAL_CHECK = 1, REPORT_DELAY = 2.5,
     CONNECT_TIMEOUT = 12, MAX_ATTEMPTS = 3, FAILED_TTL = 600,
 
@@ -359,6 +359,33 @@ local CONFIG = {
     MAX_PLAYERS = 5,
     MIN_PLAYERS = 2,
     TOKEN_PRIORITIES = {},
+    FAST_TWEEN_RAREST_ENABLED = false,
+    FAST_TWEEN_SPEED = 250,
+    FAST_TWEEN_SELECTED_ITEMS = {
+        ["Mythic Egg"] = true,
+        ["Diamond Egg"] = true,
+        ["Star Egg"] = true,
+        ["Gold Egg"] = true,
+        ["Silver Egg"] = true,
+        ["Star Treat"] = true,
+        ["Star Jelly"] = true,
+        ["Red Extract"] = true,
+        ["Blue Extract"] = true,
+        ["Glitter"] = true,
+        ["Glue"] = true,
+        ["Oil"] = true,
+        ["Enzymes"] = true,
+        ["Tropical Drink"] = true,
+        ["Purple Potion"] = true,
+        ["Super Smoothie"] = true,
+        ["Tickets"] = true,
+        ["Night Bell"] = true,
+        ["Magic Bean"] = true,
+        ["Micro-Converter"] = true,
+        ["Stinger"] = true,
+        ["Moon Charm"] = true,
+        ["Cloud Vial"] = true,
+    },
 }
 
 local SAVE_FILE = "bss_hopper_config.json"
@@ -478,6 +505,7 @@ local SAVED_KEYS = {
     "CHECK_METEORS","CHECK_WINDY","AUTO_HARVEST_PLANTERS","SHOW_PLANTER_HUD","PLANTER_HUD_COLLAPSED",
     "PLANTERS_CONFIG","PUFF_AUTO_BOOST_EPIC","PUFF_SELECTED_BOOSTS","PUFF_MIN_LEVEL","PUFF_MAX_LEVEL",
     "DISCORD_WEBHOOK_URL","TELEGRAM_BOT_TOKEN","TELEGRAM_CHAT_ID",
+    "FAST_TWEEN_RAREST_ENABLED","FAST_TWEEN_SPEED","FAST_TWEEN_SELECTED_ITEMS",
 }
 
 function applySavedData(data, source)
@@ -971,8 +999,16 @@ function isSproutAlive(sprout, anchorPos)
 end
 
 function _rawWorldPos(obj)
+    if not obj then return nil end
     if obj:IsA("BasePart") then return obj.Position end
-    if obj:IsA("Model") then return obj:GetPivot().Position end
+    if obj:IsA("Model") then
+        local prim = obj.PrimaryPart
+        if prim then return prim.Position end
+        local ok, piv = pcall(function() return obj:GetPivot().Position end)
+        if ok and piv then return piv end
+    end
+    local bp = obj:FindFirstChildWhichIsA("BasePart", true)
+    if bp then return bp.Position end
     return nil
 end
 
@@ -1239,6 +1275,46 @@ function moveRootToPosition(root, destination, maxDuration)
         root.AssemblyAngularVelocity = Vector3.zero
     end)
     return not flightStopRequested and root.Parent ~= nil and (root.Position - destination).Magnitude < 18
+end
+
+function fastTweenToPosition(root, destination, customSpeed)
+    if not root or not root.Parent or typeof(destination) ~= "Vector3" then return false end
+    local speed = math.clamp(tonumber(customSpeed) or tonumber(CONFIG.FAST_TWEEN_SPEED) or 250, 50, 1000)
+    local startPos = root.Position
+    local offset = destination - startPos
+    local distance = offset.Magnitude
+    if distance < 3.0 then return true end
+
+    setFlightNoclip(true)
+    local duration = math.clamp(distance / speed, 0.05, 8)
+    local direction = offset.Unit
+    local targetCFrame = CFrame.new(destination, destination + direction)
+    local started = os.clock()
+
+    while alive() and root.Parent do
+        local elapsed = os.clock() - started
+        local alpha = math.clamp(elapsed / duration, 0, 1)
+        local pos = startPos:Lerp(destination, alpha)
+        local look = (destination - pos)
+        local cf = CFrame.new(pos, pos + (look.Magnitude > 0.05 and look.Unit or direction))
+        local ok = pcall(function()
+            root.CFrame = cf
+            root.AssemblyLinearVelocity = Vector3.zero
+            root.AssemblyAngularVelocity = Vector3.zero
+        end)
+        if not ok or alpha >= 1 then break end
+        RunService.Heartbeat:Wait()
+    end
+
+    if root.Parent then
+        pcall(function()
+            root.CFrame = targetCFrame
+            root.AssemblyLinearVelocity = Vector3.zero
+            root.AssemblyAngularVelocity = Vector3.zero
+        end)
+    end
+    setFlightNoclip(false)
+    return true
 end
 
 function waitForGameReady(timeout)
@@ -1784,17 +1860,10 @@ function fightWindyBee(windy)
             setFlightNoclip(false)
             task.wait(0.3)
 
-            -- На новом поле снова подбегаем 1 раз под облако и прыгаем
+            -- На новом поле просто подбегаем поближе к позиции боя
             local underBee = Vector3.new(beePos.X, rootPart.Position.Y, beePos.Z)
             humanoid:MoveTo(underBee)
-            local t0 = os.clock()
-            while alive() and (os.clock() - t0 < 3.0) and (rootPart.Position - underBee).Magnitude > 8 do
-                task.wait(0.08)
-            end
-            if humanoid.FloorMaterial ~= Enum.Material.Air then
-                humanoid.Jump = true
-                task.wait(0.4)
-            end
+            task.wait(0.2)
         end
 
         applyWalkSpeed()
@@ -1818,13 +1887,9 @@ function fightWindyBee(windy)
 
         if tornadoDodgeDir then
             local runTarget = rootPart.Position + tornadoDodgeDir * 28
-            log("Windy", "Уворот по земле от торнадо Windy Bee!")
-            if humanoid.FloorMaterial ~= Enum.Material.Air and (os.clock() - lastWindyJump > 1.8) then
-                humanoid.Jump = true
-                lastWindyJump = os.clock()
-            end
+            log("Windy", "Уворот по земле от торнадо Windy Bee (без прыжков)!")
             humanoid:MoveTo(runTarget)
-            task.wait(0.4)
+            task.wait(0.3)
         else
             -- Бегаем по полю точно так же, как будто лутаем ростки!
             collectTokensFor(3.0, function()
@@ -2078,55 +2143,175 @@ function getPlanterProgress(model)
     return percent, statusStr
 end
 
-function findMyActivePlanters()
-    local myPlanters = {}
-    local plantersFolder = Workspace:FindFirstChild("Planters") 
-        or (Workspace:FindFirstChild("Core") and Workspace.Core:FindFirstChild("Planters"))
-        or (Workspace:FindFirstChild("Happenings") and Workspace.Happenings:FindFirstChild("Planters"))
-    if not plantersFolder then return myPlanters end
+local cachedPlantersFolder = nil
 
+local function getAllPlanterCandidates()
+    local candidates = {}
+    local seen = {}
+
+    local function addCandidate(model)
+        if model and not seen[model] and (model:IsA("Model") or model:IsA("Folder") or model:IsA("BasePart")) then
+            seen[model] = true
+            table.insert(candidates, model)
+        end
+    end
+
+    -- 1. Сначала проверяем кэшированную папку
+    if cachedPlantersFolder and cachedPlantersFolder.Parent then
+        for _, ch in ipairs(cachedPlantersFolder:GetChildren()) do
+            addCandidate(ch)
+        end
+    end
+
+    -- 2. Известные контейнеры плантаторов в Workspace
+    local folders = {
+        Workspace:FindFirstChild("Planters"),
+        Workspace:FindFirstChild("ActivePlanters"),
+        Workspace:FindFirstChild("PlanterModels"),
+        Workspace:FindFirstChild("Core") and Workspace.Core:FindFirstChild("Planters"),
+        Workspace:FindFirstChild("Happenings") and Workspace.Happenings:FindFirstChild("Planters"),
+        Workspace:FindFirstChild("FlowerZones"),
+        Workspace:FindFirstChild("Fields"),
+        Workspace:FindFirstChild("Models"),
+        Workspace:FindFirstChild("Debris"),
+    }
+    for _, f in ipairs(folders) do
+        if f then
+            for _, ch in ipairs(f:GetChildren()) do
+                local nLow = string.lower(ch.Name)
+                if string.find(nLow, "planter", 1, true) or f.Name == "Planters" or f.Name == "ActivePlanters" or f.Name == "PlanterModels" then
+                    addCandidate(ch)
+                    cachedPlantersFolder = f
+                end
+            end
+        end
+    end
+
+    -- 3. Прямые потомки Workspace
+    for _, ch in ipairs(Workspace:GetChildren()) do
+        if string.find(string.lower(ch.Name), "planter", 1, true) then
+            addCandidate(ch)
+        end
+    end
+
+    -- 4. Поиск по всему Workspace по ProximityPrompt и BillboardGui плантаторов
+    for _, desc in ipairs(Workspace:GetDescendants()) do
+        if desc:IsA("ProximityPrompt") then
+            local act = string.lower(desc.ActionText or "")
+            local obj = string.lower(desc.ObjectText or "")
+            if string.find(act, "harvest", 1, true) or string.find(act, "planter", 1, true)
+               or string.find(obj, "planter", 1, true) then
+                local m = desc:FindFirstAncestorWhichIsA("Model") or desc.Parent
+                if m then
+                    addCandidate(m)
+                    if m.Parent then cachedPlantersFolder = m.Parent end
+                end
+            end
+        elseif desc:IsA("BillboardGui") then
+            local isPlanter = false
+            for _, lbl in ipairs(desc:GetChildren()) do
+                if lbl:IsA("TextLabel") and string.find(string.lower(lbl.Text or ""), "planter", 1, true) then
+                    isPlanter = true; break
+                end
+            end
+            if isPlanter then
+                local m = desc:FindFirstAncestorWhichIsA("Model") or desc.Parent
+                if m then
+                    addCandidate(m)
+                    if m.Parent then cachedPlantersFolder = m.Parent end
+                end
+            end
+        end
+    end
+
+    return candidates
+end
+
+function isPlanterMine(pModel)
+    if not pModel then return false end
     local myName = string.lower(player.Name)
     local myId = tostring(player.UserId)
 
-    for _, pModel in ipairs(plantersFolder:GetChildren()) do
-        if pModel:IsA("Model") or pModel:IsA("Folder") or pModel:IsA("BasePart") then
-            local isMine = false
-            local ownerAttr = pModel:GetAttribute("Owner") or pModel:GetAttribute("UserId") or pModel:GetAttribute("Player")
-            if ownerAttr and (string.lower(tostring(ownerAttr)) == myName or tostring(ownerAttr) == myId) then
-                isMine = true
+    -- 1. ProximityPrompt (В BSS у чужих плантаторов НЕТ промпта сбора для локального игрока!)
+    for _, prompt in ipairs(pModel:GetDescendants()) do
+        if prompt:IsA("ProximityPrompt") then
+            local act = string.lower(prompt.ActionText or "")
+            local obj = string.lower(prompt.ObjectText or "")
+            if string.find(act, "harvest", 1, true) or string.find(act, "planter", 1, true)
+               or string.find(obj, "planter", 1, true) or prompt.Enabled then
+                return true
             end
-            if not isMine then
-                local oVal = pModel:FindFirstChild("Owner") or pModel:FindFirstChild("Player") or pModel:FindFirstChild("PlayerRef")
-                if oVal and (oVal.Value == player or string.lower(tostring(oVal.Value)) == myName or tostring(oVal.Value) == myId) then
-                    isMine = true
-                end
-            end
-            if not isMine then
-                for _, desc in ipairs(pModel:GetDescendants()) do
-                    if desc:IsA("TextLabel") and string.find(string.lower(desc.Text or ""), myName, 1, true) then
-                        isMine = true
-                        break
-                    end
-                end
-            end
-            if not isMine and #Players:GetPlayers() <= 1 then
-                isMine = true
-            end
+        end
+    end
 
-            if isMine then
-                local pType = getPlanterType(pModel)
-                local percent, statusStr = getPlanterProgress(pModel)
-                local fieldName = detectField(pModel) or "Unknown Field"
-                local ready = (percent >= 100) or (statusStr == "Ready!")
-                table.insert(myPlanters, {
-                    type = pType,
-                    model = pModel,
-                    field = fieldName,
-                    percent = percent,
-                    statusStr = statusStr,
-                    ready = ready,
-                })
+    -- 2. Имя модели совпадает с именем или UserId
+    local mName = string.lower(pModel.Name)
+    if mName == myName or mName == myId or string.find(mName, myId, 1, true) or string.find(mName, myName, 1, true) then
+        return true
+    end
+
+    -- 3. Атрибуты (Owner, UserId, Player, OwnerId, Placer, Account)
+    for _, attrName in ipairs({ "Owner", "UserId", "Player", "OwnerId", "Placer", "Account", "Creator" }) do
+        local val = pModel:GetAttribute(attrName)
+        if val then
+            local s = string.lower(tostring(val))
+            if s == myName or s == myId or string.find(s, myId, 1, true) or string.find(s, myName, 1, true) then
+                return true
             end
+        end
+    end
+
+    -- 4. ValueObject объекты
+    for _, valName in ipairs({ "Owner", "Player", "UserId", "PlayerRef", "OwnerRef", "Placer" }) do
+        local obj = pModel:FindFirstChild(valName)
+        if obj then
+            if obj:IsA("ObjectValue") and obj.Value == player then
+                return true
+            elseif obj.Value then
+                local s = string.lower(tostring(obj.Value))
+                if s == myName or s == myId or string.find(s, myId, 1, true) or string.find(s, myName, 1, true) then
+                    return true
+                end
+            end
+        end
+    end
+
+    -- 5. Текстовые метки с UserId или ником (например: "4039616847(81%)")
+    for _, desc in ipairs(pModel:GetDescendants()) do
+        if desc:IsA("TextLabel") then
+            local txt = string.lower(desc.Text or "")
+            if string.find(txt, myId, 1, true) or string.find(txt, myName, 1, true) then
+                return true
+            end
+        end
+    end
+
+    -- 6. Если один на сервере - все плантаторы на сервере принадлежат нам
+    if #Players:GetPlayers() <= 1 then
+        return true
+    end
+
+    return false
+end
+
+function findMyActivePlanters()
+    local myPlanters = {}
+    local candidates = getAllPlanterCandidates()
+
+    for _, pModel in ipairs(candidates) do
+        if isPlanterMine(pModel) then
+            local pType = getPlanterType(pModel)
+            local percent, statusStr = getPlanterProgress(pModel)
+            local fieldName = detectField(pModel) or "Unknown Field"
+            local ready = (percent >= 100) or (statusStr == "Ready!")
+            table.insert(myPlanters, {
+                type = pType,
+                model = pModel,
+                field = fieldName,
+                percent = percent,
+                statusStr = statusStr,
+                ready = ready,
+            })
         end
     end
     return myPlanters
@@ -2139,40 +2324,44 @@ function confirmPlanterHarvestModal()
         if desc:IsA("TextLabel") then
             local t = string.lower(desc.Text or "")
             if string.find(t, "harvest the planter", 1, true)
-               or string.find(t, "done growing", 1, true) then
-                local dialog = desc.Parent
-                for _ = 1, 4 do
-                    if dialog and dialog:IsA("GuiObject") then
-                        for _, btn in ipairs(dialog:GetDescendants()) do
-                            if btn:IsA("TextButton") or btn:IsA("ImageButton") then
-                                local bText = string.lower(btn.Text or "")
-                                local bName = string.lower(btn.Name)
-                                local innerTxt = ""
-                                local innerLabel = btn:FindFirstChildWhichIsA("TextLabel")
-                                if innerLabel then innerTxt = string.lower(innerLabel.Text or "") end
+               or string.find(t, "done growing", 1, true)
+               or string.find(t, "before it's done", 1, true) then
+                local rootGui = desc:FindFirstAncestorWhichIsA("ScreenGui") or desc.Parent
+                if rootGui then
+                    for _, btn in ipairs(rootGui:GetDescendants()) do
+                        if btn:IsA("TextButton") or btn:IsA("ImageButton") then
+                            local bText = string.lower(btn.Text or "")
+                            local bName = string.lower(btn.Name)
+                            local innerTxt = ""
+                            local innerLabel = btn:FindFirstChildWhichIsA("TextLabel")
+                            if innerLabel then innerTxt = string.lower(innerLabel.Text or "") end
 
-                                if bText == "yes" or innerTxt == "yes" or bName == "yes" or string.find(bName, "yes", 1, true) then
-                                    pcall(function()
-                                        if type(firesignal) == "function" then
-                                            firesignal(btn.MouseButton1Click)
-                                            firesignal(btn.Activated)
-                                        end
-                                    end)
-                                    pcall(function()
-                                        local vim = game:GetService("VirtualInputManager")
-                                        if vim then
-                                            local pos = btn.AbsolutePosition + (btn.AbsoluteSize * 0.5)
-                                            vim:SendMouseButtonEvent(pos.X, pos.Y, 0, true, game, 1)
-                                            task.wait(0.04)
-                                            vim:SendMouseButtonEvent(pos.X, pos.Y, 0, false, game, 1)
-                                        end
-                                    end)
-                                    log("Плантатор", "✅ Нажата кнопка [ Yes ] в диалоге сбора плантатора!")
-                                    return true
-                                end
+                            if bText == "yes" or innerTxt == "yes" or bName == "yes" or string.find(bName, "yes", 1, true) then
+                                pcall(function()
+                                    if type(firesignal) == "function" then
+                                        firesignal(btn.MouseButton1Click)
+                                        firesignal(btn.Activated)
+                                    end
+                                end)
+                                pcall(function()
+                                    if type(getconnections) == "function" then
+                                        for _, conn in ipairs(getconnections(btn.MouseButton1Click)) do conn:Fire() end
+                                        for _, conn in ipairs(getconnections(btn.Activated)) do conn:Fire() end
+                                    end
+                                end)
+                                pcall(function()
+                                    local vim = game:GetService("VirtualInputManager")
+                                    if vim then
+                                        local pos = btn.AbsolutePosition + (btn.AbsoluteSize * 0.5)
+                                        vim:SendMouseButtonEvent(pos.X, pos.Y, 0, true, game, 1)
+                                        task.wait(0.04)
+                                        vim:SendMouseButtonEvent(pos.X, pos.Y, 0, false, game, 1)
+                                    end
+                                end)
+                                log("Плантатор", "✅ Нажата кнопка [ Yes ] в диалоге сбора плантатора!")
+                                return true
                             end
                         end
-                        dialog = dialog.Parent
                     end
                 end
             end
@@ -2807,14 +2996,13 @@ function getServerList(cursor)
     end
 
     local urls = {
-        "https://games.roblox.com/v1/games/" .. tostring(pid) .. "/servers/Public?sortOrder=Asc&limit=25",
-        "https://games.roblox.com/v1/games/" .. tostring(pid) .. "/servers/Public?limit=25",
-        "https://games.roblox.com/v1/games/" .. tostring(pid) .. "/servers/Public?sortOrder=Asc&limit=50",
+        "https://games.roblox.com/v1/games/" .. tostring(pid) .. "/servers/Public?sortOrder=Asc&limit=100",
+        "https://games.roblox.com/v1/games/" .. tostring(pid) .. "/servers/Public?limit=100",
     }
     if cursor and cursor ~= "" then
         urls = {
-            "https://games.roblox.com/v1/games/" .. tostring(pid) .. "/servers/Public?sortOrder=Asc&limit=25&cursor=" .. tostring(cursor),
-            "https://games.roblox.com/v1/games/" .. tostring(pid) .. "/servers/Public?limit=25&cursor=" .. tostring(cursor),
+            "https://games.roblox.com/v1/games/" .. tostring(pid) .. "/servers/Public?sortOrder=Asc&limit=100&cursor=" .. tostring(cursor),
+            "https://games.roblox.com/v1/games/" .. tostring(pid) .. "/servers/Public?limit=100&cursor=" .. tostring(cursor),
         }
     end
 
@@ -4955,6 +5143,180 @@ function getActiveFlowerZone(anchorPos)
     return bestZone
 end
 
+local function getObstacleAvoidanceTarget(rootPos, targetPos, character)
+    local dir = targetPos - rootPos
+    local dist = dir.Magnitude
+    if dist < 2.5 then return targetPos end
+
+    local forward = Vector3.new(dir.X, 0, dir.Z).Unit
+    local rayOrigin = rootPos + Vector3.new(0, 1.2, 0)
+    local feelerDist = math.min(dist, 12.0)
+
+    local rayParams = RaycastParams.new()
+    rayParams.FilterType = RaycastFilterType.Exclude
+    local filter = { character }
+    local zones = Workspace:FindFirstChild("FlowerZones")
+    if zones then table.insert(filter, zones) end
+    rayParams.FilterDescendantsInstances = filter
+
+    local hit = Workspace:Raycast(rayOrigin, forward * feelerDist, rayParams)
+    if hit and hit.Instance and hit.Instance.CanCollide and not hit.Instance:IsA("Terrain") then
+        local norm = hit.Normal
+        local flatNorm = Vector3.new(norm.X, 0, norm.Z)
+        if flatNorm.Magnitude > 0.05 then
+            flatNorm = flatNorm.Unit
+            local leftTangent = Vector3.new(-flatNorm.Z, 0, flatNorm.X)
+            local rightTangent = Vector3.new(flatNorm.Z, 0, -flatNorm.X)
+
+            local leftPoint = hit.Position + leftTangent * 8 + flatNorm * 3
+            local rightPoint = hit.Position + rightTangent * 8 + flatNorm * 3
+
+            local leftClear = not Workspace:Raycast(rayOrigin, (leftPoint - rayOrigin).Unit * math.min((leftPoint - rayOrigin).Magnitude, 10), rayParams)
+            local rightClear = not Workspace:Raycast(rayOrigin, (rightPoint - rayOrigin).Unit * math.min((rightPoint - rayOrigin).Magnitude, 10), rayParams)
+
+            if leftClear and not rightClear then
+                return Vector3.new(leftPoint.X, targetPos.Y, leftPoint.Z)
+            elseif rightClear and not leftClear then
+                return Vector3.new(rightPoint.X, targetPos.Y, rightPoint.Z)
+            else
+                if (leftPoint - targetPos).Magnitude < (rightPoint - targetPos).Magnitude then
+                    return Vector3.new(leftPoint.X, targetPos.Y, leftPoint.Z)
+                else
+                    return Vector3.new(rightPoint.X, targetPos.Y, rightPoint.Z)
+                end
+            end
+        end
+    end
+
+    return targetPos
+end
+
+local ONETT_EASTER_EGGS = {}
+pcall(function()
+    local coll = Workspace:FindFirstChild("Collectibles")
+    if coll then
+        for _, t in ipairs(coll:GetChildren()) do
+            ONETT_EASTER_EGGS[t] = true
+        end
+    end
+end)
+
+local function isOnettEasterEgg(token)
+    if not token or not token.Parent then return true end
+    if ONETT_EASTER_EGGS[token] then return true end
+    local p = worldPos(token)
+    if not p then return true end
+
+    -- Черный список статичных пасхалок Онетта:
+    -- 1. Под рампой/в тени 30 пчел (Diamond Egg)
+    if p.Y < 65 and p.Z < -350 then return true end
+    -- 2. Внутри пещер Паука и Оборотня
+    if p.Y < 45 and p.X < -220 and p.Z < -50 then return true end
+    -- 3. На верхушке блендера 15 пчел (Star Jelly)
+    if (p - Vector3.new(-425, 72, 0)).Magnitude < 20 then return true end
+    -- 4. В секретных комнатах/лабиринтах (компьютерная комната, gummy lair)
+    if p.Y < 6 or p.Y > 360 then return true end
+
+    return false
+end
+
+local function getRareItemMatch(token)
+    if not token or not token.Parent then return nil end
+    local name = resolveTokenName(token)
+    if not name or name == "" then return nil end
+    local low = string.lower(name)
+
+    local map = {
+        ["Mythic Egg"] = { "mythic egg" },
+        ["Diamond Egg"] = { "diamond egg" },
+        ["Star Egg"] = { "star egg" },
+        ["Gold Egg"] = { "gold egg" },
+        ["Silver Egg"] = { "silver egg" },
+        ["Star Treat"] = { "star treat" },
+        ["Star Jelly"] = { "star jelly" },
+        ["Red Extract"] = { "red extract" },
+        ["Blue Extract"] = { "blue extract" },
+        ["Glitter"] = { "glitter" },
+        ["Glue"] = { "glue" },
+        ["Oil"] = { "oil" },
+        ["Enzymes"] = { "enzyme", "enzymes" },
+        ["Tropical Drink"] = { "tropical drink", "tropical" },
+        ["Purple Potion"] = { "purple potion" },
+        ["Super Smoothie"] = { "super smoothie", "smoothie" },
+        ["Tickets"] = { "ticket" },
+        ["Night Bell"] = { "night bell" },
+        ["Magic Bean"] = { "magic bean" },
+        ["Micro-Converter"] = { "micro-converter", "converter" },
+        ["Stinger"] = { "stinger" },
+        ["Moon Charm"] = { "moon charm" },
+        ["Cloud Vial"] = { "cloud vial", "vial" },
+    }
+
+    local cfg = CONFIG.FAST_TWEEN_SELECTED_ITEMS or {}
+    for itemTitle, kws in pairs(map) do
+        if cfg[itemTitle] ~= false then
+            for _, kw in ipairs(kws) do
+                if string.find(low, kw, 1, true) then
+                    return itemTitle, name
+                end
+            end
+        end
+    end
+    return nil
+end
+
+local isFastTweenActive = false
+function checkAndExecuteFastTweenRarest()
+    if CONFIG.FAST_TWEEN_RAREST_ENABLED ~= true or isFastTweenActive then return false end
+    local coll = Workspace:FindFirstChild("Collectibles")
+    if not coll then return false end
+
+    local char = player.Character
+    local root = char and char:FindFirstChild("HumanoidRootPart")
+    if not root or not alive() then return false end
+
+    for _, token in ipairs(coll:GetChildren()) do
+        if token.Parent and not isOnettEasterEgg(token) then
+            local itemTitle, realName = getRareItemMatch(token)
+            if itemTitle then
+                local tokenPos = worldPos(token)
+                if tokenPos then
+                    isFastTweenActive = true
+                    local returnCF = root.CFrame
+                    local returnPos = root.Position
+                    local speed = tonumber(CONFIG.FAST_TWEEN_SPEED) or 250
+                    log("FastTween", string.format("⭐ FAST TWEEN: Найден %s (%s)! Лечу сломя голову на скорости %d studs/s...", itemTitle, realName, speed))
+                    notifyAllWebhooks("Fast Tween к редкой награде!", string.format("Обнаружен редкий токен %s! Лечу на скорости %d studs/s...", itemTitle, speed), "ffcc00")
+
+                    fastTweenToPosition(root, tokenPos + Vector3.new(0, 1.5, 0), speed)
+                    pcall(function() root.CFrame = CFrame.new(tokenPos) end)
+                    task.wait(0.06)
+                    pcall(swingDigTool)
+
+                    -- Возврат на исходную точку
+                    log("FastTween", "✅ Лут забран! Мгновенно возвращаюсь на исходную позицию...")
+                    fastTweenToPosition(root, returnPos, speed)
+                    pcall(function() root.CFrame = returnCF end)
+                    setFlightNoclip(false)
+                    isFastTweenActive = false
+                    return true
+                end
+            end
+        end
+    end
+    return false
+end
+
+task.spawn(function()
+    while true do
+        if not alive() then return end
+        if CONFIG.FAST_TWEEN_RAREST_ENABLED and not isFastTweenActive and not isConvertingHoney then
+            pcall(checkAndExecuteFastTweenRarest)
+        end
+        task.wait(0.25)
+    end
+end)
+
 collectTokensFor = function(maxSeconds, stopFn, fieldAnchor)
     collectorTokenGen = collectorTokenGen + 1
     local myGen = collectorTokenGen
@@ -4977,8 +5339,8 @@ collectTokensFor = function(maxSeconds, stopFn, fieldAnchor)
         local function refreshZoneLimits()
             if anchorZone then
                 local half = anchorZone.Size * 0.5
-                limitX = math.max(6, half.X - 5.0)
-                limitZ = math.max(6, half.Z - 5.0)
+                limitX = math.max(6, half.X * 0.99)
+                limitZ = math.max(6, half.Z * 0.99)
             end
         end
         refreshZoneLimits()
@@ -4992,10 +5354,16 @@ collectTokensFor = function(maxSeconds, stopFn, fieldAnchor)
                 break
             end
 
-            -- Защита от потери поля: если персонаж возродился на улье после смерти (> 70 studs от поля)
+            -- Проверка Fast Tween to Rarest со всего сервера
+            if CONFIG.FAST_TWEEN_RAREST_ENABLED then
+                checkAndExecuteFastTweenRarest()
+            end
+
+            -- Защита от реальной потери поля (только если возродился в улье или упал далеко за пределы)
             local targetFieldPos = fieldAnchor or (anchorZone and anchorZone.Position)
-            if targetFieldPos and (root.Position - targetFieldPos).Magnitude > 70 then
-                log("Возврат", string.format("Персонаж вдали от поля (%.0f studs). Немедленно лечу обратно на поле...", (root.Position - targetFieldPos).Magnitude))
+            local maxAllowedFieldDist = (anchorZone and (math.sqrt((anchorZone.Size.X * 0.5)^2 + (anchorZone.Size.Z * 0.5)^2) + 38)) or 120
+            if targetFieldPos and (root.Position - targetFieldPos).Magnitude > maxAllowedFieldDist then
+                log("Возврат", string.format("Персонаж реально улетел/возродился вдали от поля (%.0f studs). Возвращаюсь на поле...", (root.Position - targetFieldPos).Magnitude))
                 moveRootToPosition(root, getGroundPos(targetFieldPos), 10)
                 task.wait(0.3)
             end
@@ -5112,8 +5480,8 @@ collectTokensFor = function(maxSeconds, stopFn, fieldAnchor)
                     lastPatrolPickAt = os.clock()
                     if anchorZone then
                         local half = anchorZone.Size * 0.5
-                        local xSpan = (half.X - 8) * 0.60
-                        local zSpan = (half.Z - 8) * 0.60
+                        local xSpan = half.X * 0.99
+                        local zSpan = half.Z * 0.99
                         local localTarget = Vector3.new(
                             (math.random() * 2 - 1) * xSpan,
                             0,
@@ -5123,7 +5491,7 @@ collectTokensFor = function(maxSeconds, stopFn, fieldAnchor)
                         patrolTarget = Vector3.new(worldPoint.X, (anchorZone and (anchorZone.Position.Y + 3.2)) or root.Position.Y, worldPoint.Z)
                     elseif fieldAnchor then
                         local angle = math.random() * math.pi * 2
-                        local dist = math.random(5, 18)
+                        local dist = math.random(6, 25)
                         patrolTarget = Vector3.new(fieldAnchor.X + math.cos(angle) * dist, (anchorZone and (anchorZone.Position.Y + 3.2)) or root.Position.Y, fieldAnchor.Z + math.sin(angle) * dist)
                     else
                         patrolTarget = root.Position
@@ -5132,7 +5500,7 @@ collectTokensFor = function(maxSeconds, stopFn, fieldAnchor)
 
             end
 
-            -- Ограничение цели СТРОГО в границы поля (персонаж никогда не убегает с поля!)
+            -- Ограничение цели СТРОГО в границы поля (персонаж доходит до 99% поля!)
             if anchorZone and patrolTarget then
                 local lp = anchorZone.CFrame:PointToObjectSpace(patrolTarget)
                 local safeX = math.clamp(lp.X, -limitX, limitX)
@@ -5141,36 +5509,47 @@ collectTokensFor = function(maxSeconds, stopFn, fieldAnchor)
                 patrolTarget = Vector3.new(safeWorld.X, (anchorZone and (anchorZone.Position.Y + 3.2)) or root.Position.Y, safeWorld.Z)
             end
 
-            -- Плавное и безотказное перемещение через нативный MoveTo с защитой от тряски
+            -- Плавное и безотказное перемещение через нативный MoveTo с оббеганием преград
             if patrolTarget and humanoid and root then
                 local currentPos = root.Position
                 local flatTarget = Vector3.new(patrolTarget.X, currentPos.Y, patrolTarget.Z)
                 local offset = flatTarget - currentPos
                 local dist = offset.Magnitude
 
-                if dist > 3.0 then
+                if dist > 2.5 then
                     local now = os.clock()
-                    if not lastMoveToTarget or (lastMoveToTarget - flatTarget).Magnitude > 2.0 or (now - lastMoveToCall > 0.35) then
-                        lastMoveToTarget = flatTarget
+                    local steerTarget = getObstacleAvoidanceTarget(currentPos, flatTarget, char)
+                    if not lastMoveToTarget or (lastMoveToTarget - steerTarget).Magnitude > 1.8 or (now - lastMoveToCall > 0.3) then
+                        lastMoveToTarget = steerTarget
                         lastMoveToCall = now
-                        humanoid:MoveTo(flatTarget)
+                        humanoid:MoveTo(steerTarget)
                     end
                 else
                     lastMoveToTarget = nil
                 end
 
-                -- Защита от реального застревания в объектах (ростки, заборы):
-                -- Прыгаем ТОЛЬКО если персонаж физически не сдвинулся с места более 1.2 сек!
+                -- Защита от застревания в преградах (ножки грибов, деревья, кактусы, заборы):
                 local now = os.clock()
                 if not lastRecordedPos then lastRecordedPos = currentPos end
-                if (currentPos - lastRecordedPos).Magnitude < 0.6 then
+                if (currentPos - lastRecordedPos).Magnitude < 0.7 then
                     if not stuckStartTime then stuckStartTime = now end
-                    if (now - stuckStartTime > 1.2) and (now - lastJumpTime > 2.5) then
-                        if humanoid.FloorMaterial ~= Enum.Material.Air then
-                            humanoid.Jump = true
-                            lastJumpTime = now
+                    if (now - stuckStartTime > 0.4) then
+                        -- Персонаж уперся в объект: определяем нормаль и скользим вбок для обхода
+                        local rayP = RaycastParams.new()
+                        rayP.FilterType = RaycastFilterType.Exclude
+                        local fList = { char }
+                        if anchorZone then table.insert(fList, anchorZone) end
+                        rayP.FilterDescendantsInstances = fList
+
+                        local hitFront = Workspace:Raycast(currentPos + Vector3.new(0, 1.2, 0), root.CFrame.LookVector * 6, rayP)
+                        if hitFront and hitFront.Normal then
+                            local norm = Vector3.new(hitFront.Normal.X, 0, hitFront.Normal.Z)
+                            if norm.Magnitude > 0.05 then
+                                norm = norm.Unit
+                                local sideDir = Vector3.new(-norm.Z, 0, norm.X) * 12
+                                humanoid:MoveTo(currentPos + sideDir + norm * 4)
+                            end
                         end
-                        -- Сбрасываем цель, чтобы персонаж обошел росток или забор, а не прыгал по нему
                         patrolTarget = nil
                         stuckStartTime = nil
                     end
@@ -6100,20 +6479,25 @@ function Solo:Start()
                 local windy = CONFIG.CHECK_WINDY and findWindyBee() or nil
                 local meteors = CONFIG.CHECK_METEORS and findActiveMeteors() or nil
 
-                -- Если целей нет — улей не ставим, переходим на другой сервер!
+                -- Проверяем и собираем спелые плантаторы перед уходом
+                if CONFIG.AUTO_HARVEST_PLANTERS ~= false then
+                    pcall(managePlanters)
+                end
+
+                -- Если целей нет — улей не ставим, переходим на другой сервер мгновенно!
                 if not vicious and not sprout and not puffRoot and not windy and not meteors then
-                    s.currentStatus = "Целей нет — перехожу на другой сервер..."
-                    local hopWait = math.max(0.2, tonumber(CONFIG.HOP_DELAY) or 0.8)
-                    task.wait(hopWait)
+                    s.currentStatus = "Целей нет — быстрый телепорт..."
+                    local hopWait = math.clamp(tonumber(CONFIG.HOP_DELAY) or 0.05, 0.02, 3)
+                    if hopWait > 0.05 then task.wait(hopWait) end
                     if alive() then
                         s.hops += 1
                         s.currentStatus = "Телепортируюсь на новый сервер..."
                         local hopped = hopRandom()
                         if not hopped then
-                            s.currentStatus = "Ожидание свободного сервера..."
-                            task.wait(6)
+                            s.currentStatus = "Ищу свободный сервер..."
+                            task.wait(0.8)
                         else
-                            task.wait(8)
+                            task.wait(2.0)
                         end
                         return
                     end
@@ -6309,19 +6693,19 @@ function Solo:Start()
                     end
                 end
 
-                -- Если ростка нет на сервере — переходим на другой
-                s.currentStatus = "Целей нет — перехожу на другой сервер..."
-                local hopWait = math.max(0.2, tonumber(CONFIG.HOP_DELAY) or 0.8)
-                task.wait(hopWait)
+                -- Если ростка нет на сервере — быстрый переход
+                s.currentStatus = "Целей нет — быстрый телепорт..."
+                local hopWait = math.clamp(tonumber(CONFIG.HOP_DELAY) or 0.05, 0.02, 3)
+                if hopWait > 0.05 then task.wait(hopWait) end
                 if alive() then
                     s.hops += 1
                     s.currentStatus = "Телепортируюсь на новый сервер..."
                     local hopped = hopRandom()
                     if not hopped then
-                        s.currentStatus = "Ожидание свободного сервера..."
-                        task.wait(6)
+                        s.currentStatus = "Ищу свободный сервер..."
+                        task.wait(0.8)
                     else
-                        task.wait(8)
+                        task.wait(2.0)
                     end
                     return
                 end
@@ -6653,7 +7037,7 @@ new("TextLabel", {
 })
 new("TextLabel", {
     Size = UDim2.new(0, 220, 0, 25), Position = UDim2.new(0, 58, 0, 10),
-    BackgroundTransparency = 1, Text = "BSS Hopper v1.3.76",
+    BackgroundTransparency = 1, Text = "BSS Hopper v1.3.77",
     TextColor3 = C.text, Font = Enum.Font.GothamBold, TextSize = 22,
     TextXAlignment = Enum.TextXAlignment.Left, Parent = head,
 })
@@ -7310,6 +7694,362 @@ task.spawn(function()
     end
 end)
 
+-- ══════════════════════════════════════════════════════════════════════
+--  MODAL: FAST TWEEN TO RAREST SETTINGS (ПОЛЕТ ПО ВСЕМУ СЕРВЕРУ)
+-- ══════════════════════════════════════════════════════════════════════
+local fastTweenModal = new("Frame", {
+    Name = "FastTweenRarestModal",
+    Size = UDim2.new(0, 480, 0, 520),
+    Position = UDim2.new(0.5, -240, 0.5, -260),
+    BackgroundColor3 = Color3.fromRGB(13, 17, 25),
+    BorderSizePixel = 0,
+    Active = true,
+    Draggable = true,
+    Visible = false,
+    ZIndex = 100,
+    Parent = gui,
+})
+round(fastTweenModal, 14)
+stroke(fastTweenModal, Color3.fromRGB(54, 184, 105), 1.5)
+
+-- Header
+local ftHeader = new("Frame", {
+    Size = UDim2.new(1, 0, 0, 42),
+    BackgroundColor3 = Color3.fromRGB(18, 24, 36),
+    BorderSizePixel = 0,
+    ZIndex = 101,
+    Parent = fastTweenModal,
+})
+round(ftHeader, 14)
+
+new("Frame", {
+    Size = UDim2.new(1, 0, 0, 14),
+    Position = UDim2.new(0, 0, 1, -14),
+    BackgroundColor3 = Color3.fromRGB(18, 24, 36),
+    BorderSizePixel = 0,
+    ZIndex = 101,
+    Parent = ftHeader,
+})
+
+new("TextLabel", {
+    Size = UDim2.new(1, -50, 1, 0),
+    Position = UDim2.new(0, 14, 0, 0),
+    BackgroundTransparency = 1,
+    Text = "⚡ Fast Tween to Rarest — Настройки",
+    Font = Enum.Font.GothamBold,
+    TextSize = 13,
+    TextColor3 = Color3.fromRGB(240, 245, 255),
+    TextXAlignment = Enum.TextXAlignment.Left,
+    ZIndex = 102,
+    Parent = ftHeader,
+})
+
+local ftCloseBtn = new("TextButton", {
+    Size = UDim2.new(0, 28, 0, 28),
+    Position = UDim2.new(1, -34, 0.5, -14),
+    BackgroundTransparency = 1,
+    Text = "✕",
+    Font = Enum.Font.GothamBold,
+    TextSize = 14,
+    TextColor3 = Color3.fromRGB(180, 190, 205),
+    ZIndex = 102,
+    Parent = ftHeader,
+})
+ftCloseBtn.MouseButton1Click:Connect(function()
+    fastTweenModal.Visible = false
+end)
+
+-- Speed Config Section
+local ftSpeedCard = new("Frame", {
+    Size = UDim2.new(1, -24, 0, 60),
+    Position = UDim2.new(0, 12, 0, 50),
+    BackgroundColor3 = Color3.fromRGB(19, 27, 40),
+    BorderSizePixel = 0,
+    ZIndex = 101,
+    Parent = fastTweenModal,
+})
+round(ftSpeedCard, 10)
+stroke(ftSpeedCard, Color3.fromRGB(38, 52, 74), 1)
+
+new("TextLabel", {
+    Size = UDim2.new(1, -120, 0, 20),
+    Position = UDim2.new(0, 12, 0, 10),
+    BackgroundTransparency = 1,
+    Text = "🚀 Скорость полета (studs/s):",
+    Font = Enum.Font.GothamBold,
+    TextSize = 11,
+    TextColor3 = Color3.fromRGB(240, 240, 245),
+    TextXAlignment = Enum.TextXAlignment.Left,
+    ZIndex = 102,
+    Parent = ftSpeedCard,
+})
+
+new("TextLabel", {
+    Size = UDim2.new(1, -120, 0, 16),
+    Position = UDim2.new(0, 12, 0, 32),
+    BackgroundTransparency = 1,
+    Text = "Стандарт: 250 studs/s. Рекомендуется от 150 до 350.",
+    Font = Enum.Font.Gotham,
+    TextSize = 9,
+    TextColor3 = C.dim,
+    TextXAlignment = Enum.TextXAlignment.Left,
+    ZIndex = 102,
+    Parent = ftSpeedCard,
+})
+
+local ftSpeedBox = new("TextBox", {
+    Size = UDim2.new(0, 85, 0, 30),
+    Position = UDim2.new(1, -97, 0.5, -15),
+    BackgroundColor3 = Color3.fromRGB(11, 16, 25),
+    Text = tostring(CONFIG.FAST_TWEEN_SPEED or 250),
+    TextColor3 = C.accent,
+    Font = Enum.Font.GothamBold,
+    TextSize = 13,
+    ClearTextOnFocus = false,
+    BorderSizePixel = 0,
+    ZIndex = 102,
+    Parent = ftSpeedCard,
+})
+round(ftSpeedBox, 6)
+stroke(ftSpeedBox, Color3.fromRGB(54, 184, 105), 1)
+
+ftSpeedBox.FocusLost:Connect(function()
+    local val = tonumber(string.gsub(tostring(ftSpeedBox.Text), ",", "."))
+    if val and val >= 50 and val <= 1000 then
+        CONFIG.FAST_TWEEN_SPEED = math.floor(val)
+    else
+        CONFIG.FAST_TWEEN_SPEED = 250
+    end
+    ftSpeedBox.Text = tostring(CONFIG.FAST_TWEEN_SPEED)
+    saveNow()
+end)
+
+-- Items Header & Quick Buttons
+local ftItemsHeader = new("Frame", {
+    Size = UDim2.new(1, -24, 0, 28),
+    Position = UDim2.new(0, 12, 0, 118),
+    BackgroundTransparency = 1,
+    ZIndex = 101,
+    Parent = fastTweenModal,
+})
+
+new("TextLabel", {
+    Size = UDim2.new(1, -160, 1, 0),
+    Position = UDim2.new(0, 2, 0, 0),
+    BackgroundTransparency = 1,
+    Text = "💎 Целевые токены на всем сервере:",
+    Font = Enum.Font.GothamBold,
+    TextSize = 11,
+    TextColor3 = Color3.fromRGB(240, 240, 245),
+    TextXAlignment = Enum.TextXAlignment.Left,
+    ZIndex = 102,
+    Parent = ftItemsHeader,
+})
+
+local ftSelectAllBtn = new("TextButton", {
+    Size = UDim2.new(0, 72, 0, 24),
+    Position = UDim2.new(1, -150, 0.5, -12),
+    BackgroundColor3 = Color3.fromRGB(22, 60, 42),
+    Text = "✓ Все",
+    Font = Enum.Font.GothamBold,
+    TextSize = 10,
+    TextColor3 = Color3.fromRGB(120, 240, 160),
+    BorderSizePixel = 0,
+    ZIndex = 102,
+    Parent = ftItemsHeader,
+})
+round(ftSelectAllBtn, 6)
+stroke(ftSelectAllBtn, Color3.fromRGB(48, 140, 85), 1)
+
+local ftDeselectAllBtn = new("TextButton", {
+    Size = UDim2.new(0, 72, 0, 24),
+    Position = UDim2.new(1, -74, 0.5, -12),
+    BackgroundColor3 = Color3.fromRGB(50, 24, 28),
+    Text = "✗ Снять",
+    Font = Enum.Font.GothamBold,
+    TextSize = 10,
+    TextColor3 = Color3.fromRGB(255, 120, 130),
+    BorderSizePixel = 0,
+    ZIndex = 102,
+    Parent = ftItemsHeader,
+})
+round(ftDeselectAllBtn, 6)
+stroke(ftDeselectAllBtn, Color3.fromRGB(140, 48, 58), 1)
+
+-- Items Scrolling List
+local ftScroll = new("ScrollingFrame", {
+    Size = UDim2.new(1, -24, 0, 310),
+    Position = UDim2.new(0, 12, 0, 150),
+    BackgroundColor3 = Color3.fromRGB(10, 14, 21),
+    BorderSizePixel = 0,
+    ScrollBarThickness = 4,
+    ScrollBarImageColor3 = Color3.fromRGB(60, 75, 95),
+    CanvasSize = UDim2.new(0, 0, 0, 0),
+    AutomaticCanvasSize = Enum.AutomaticSize.Y,
+    ZIndex = 101,
+    Parent = fastTweenModal,
+})
+round(ftScroll, 8)
+stroke(ftScroll, Color3.fromRGB(30, 42, 58), 1)
+
+new("UIPadding", {
+    PaddingTop = UDim.new(0, 6),
+    PaddingBottom = UDim.new(0, 6),
+    PaddingLeft = UDim.new(0, 6),
+    PaddingRight = UDim.new(0, 6),
+    Parent = ftScroll,
+})
+
+new("UIListLayout", {
+    SortOrder = Enum.SortOrder.LayoutOrder,
+    Padding = UDim.new(0, 4),
+    Parent = ftScroll,
+})
+
+local ftItemList = {
+    { name = "Mythic Egg", label = "🥚 Mythic Egg (Мифическое яйцо)" },
+    { name = "Diamond Egg", label = "💎 Diamond Egg (Алмазное яйцо)" },
+    { name = "Star Egg", label = "⭐ Star Egg (Звездное яйцо)" },
+    { name = "Gold Egg", label = "🥇 Gold Egg (Золотое яйцо)" },
+    { name = "Silver Egg", label = "🥈 Silver Egg (Серебряное яйцо)" },
+    { name = "Star Treat", label = "🌟 Star Treat (Звездное угощение)" },
+    { name = "Star Jelly", label = "✨ Star Jelly (Звездное желе)" },
+    { name = "Super Smoothie", label = "🥤 Super Smoothie (Супер смузи)" },
+    { name = "Purple Potion", label = "🧪 Purple Potion (Пурпурное зелье)" },
+    { name = "Tropical Drink", label = "🍹 Tropical Drink (Тропический напиток)" },
+    { name = "Glitter", label = "✨ Glitter (Глиттер / Блестки)" },
+    { name = "Glue", label = "🧴 Glue (Клей)" },
+    { name = "Oil", label = "🛢️ Oil (Масло)" },
+    { name = "Enzymes", label = "🧬 Enzymes (Энзимы)" },
+    { name = "Red Extract", label = "🍓 Red Extract (Красный экстракт)" },
+    { name = "Blue Extract", label = "🫐 Blue Extract (Синий экстракт)" },
+    { name = "Night Bell", label = "🔔 Night Bell (Ночной колокол)" },
+    { name = "Magic Bean", label = "🌱 Magic Bean (Волшебный боб)" },
+    { name = "Micro-Converter", label = "⚡ Micro-Converter (Микро-конвертер)" },
+    { name = "Moon Charm", label = "🌙 Moon Charm (Лунный шарм)" },
+    { name = "Stinger", label = "🐝 Stinger (Жало)" },
+    { name = "Tickets", label = "🎟️ Tickets (Билеты)" },
+    { name = "Cloud Vial", label = "☁️ Cloud Vial (Флакон с облаком)" },
+}
+
+local ftItemUpdaters = {}
+
+for idx, it in ipairs(ftItemList) do
+    local row = new("TextButton", {
+        Size = UDim2.new(1, 0, 0, 30),
+        BackgroundColor3 = Color3.fromRGB(16, 23, 34),
+        BorderSizePixel = 0,
+        AutoButtonColor = false,
+        Text = "",
+        LayoutOrder = idx,
+        ZIndex = 102,
+        Parent = ftScroll,
+    })
+    round(row, 6)
+    stroke(row, Color3.fromRGB(32, 44, 62), 1)
+
+    new("TextLabel", {
+        Size = UDim2.new(1, -85, 1, 0),
+        Position = UDim2.new(0, 10, 0, 0),
+        BackgroundTransparency = 1,
+        Text = it.label,
+        TextColor3 = Color3.fromRGB(235, 240, 248),
+        Font = Enum.Font.GothamMedium,
+        TextSize = 11,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        ZIndex = 103,
+        Parent = row,
+    })
+
+    local badge = new("Frame", {
+        Size = UDim2.new(0, 64, 0, 20),
+        Position = UDim2.new(1, -74, 0.5, -10),
+        BackgroundColor3 = Color3.fromRGB(24, 70, 48),
+        BorderSizePixel = 0,
+        ZIndex = 103,
+        Parent = row,
+    })
+    round(badge, 5)
+    local badgeStroke = stroke(badge, Color3.fromRGB(54, 184, 105), 1)
+
+    local badgeText = new("TextLabel", {
+        Size = UDim2.new(1, 0, 1, 0),
+        BackgroundTransparency = 1,
+        Text = "ВКЛ ✓",
+        TextColor3 = Color3.fromRGB(120, 245, 160),
+        Font = Enum.Font.GothamBold,
+        TextSize = 10,
+        ZIndex = 104,
+        Parent = badge,
+    })
+
+    local function updateRowVisual()
+        local isSel = (CONFIG.FAST_TWEEN_SELECTED_ITEMS and CONFIG.FAST_TWEEN_SELECTED_ITEMS[it.name] ~= false)
+        badge.BackgroundColor3 = isSel and Color3.fromRGB(24, 70, 48) or Color3.fromRGB(42, 28, 32)
+        badgeText.Text = isSel and "ВКЛ ✓" or "ВЫКЛ ✕"
+        badgeText.TextColor3 = isSel and Color3.fromRGB(120, 245, 160) or Color3.fromRGB(255, 120, 130)
+        pcall(function()
+            badgeStroke.Color = isSel and Color3.fromRGB(54, 184, 105) or Color3.fromRGB(120, 50, 60)
+        end)
+    end
+    table.insert(ftItemUpdaters, updateRowVisual)
+    updateRowVisual()
+
+    row.MouseButton1Click:Connect(function()
+        if not CONFIG.FAST_TWEEN_SELECTED_ITEMS then CONFIG.FAST_TWEEN_SELECTED_ITEMS = {} end
+        local curr = (CONFIG.FAST_TWEEN_SELECTED_ITEMS[it.name] ~= false)
+        CONFIG.FAST_TWEEN_SELECTED_ITEMS[it.name] = not curr
+        updateRowVisual()
+        saveNow()
+    end)
+end
+
+ftSelectAllBtn.MouseButton1Click:Connect(function()
+    if not CONFIG.FAST_TWEEN_SELECTED_ITEMS then CONFIG.FAST_TWEEN_SELECTED_ITEMS = {} end
+    for _, it in ipairs(ftItemList) do
+        CONFIG.FAST_TWEEN_SELECTED_ITEMS[it.name] = true
+    end
+    for _, fn in ipairs(ftItemUpdaters) do pcall(fn) end
+    saveNow()
+end)
+
+ftDeselectAllBtn.MouseButton1Click:Connect(function()
+    if not CONFIG.FAST_TWEEN_SELECTED_ITEMS then CONFIG.FAST_TWEEN_SELECTED_ITEMS = {} end
+    for _, it in ipairs(ftItemList) do
+        CONFIG.FAST_TWEEN_SELECTED_ITEMS[it.name] = false
+    end
+    for _, fn in ipairs(ftItemUpdaters) do pcall(fn) end
+    saveNow()
+end)
+
+-- Bottom Save & Close Button
+local ftSaveCloseBtn = new("TextButton", {
+    Size = UDim2.new(1, -24, 0, 36),
+    Position = UDim2.new(0, 12, 1, -48),
+    BackgroundColor3 = C.accent2,
+    Text = "💾 Сохранить и закрыть",
+    Font = Enum.Font.GothamBold,
+    TextSize = 12,
+    TextColor3 = Color3.fromRGB(255, 255, 255),
+    BorderSizePixel = 0,
+    ZIndex = 102,
+    Parent = fastTweenModal,
+})
+round(ftSaveCloseBtn, 8)
+stroke(ftSaveCloseBtn, Color3.fromRGB(70, 220, 130), 1)
+
+ftSaveCloseBtn.MouseButton1Click:Connect(function()
+    fastTweenModal.Visible = false
+    saveNow()
+end)
+
+local function openFastTweenSettings()
+    if not fastTweenModal then return end
+    ftSpeedBox.Text = tostring(CONFIG.FAST_TWEEN_SPEED or 250)
+    for _, fn in ipairs(ftItemUpdaters) do pcall(fn) end
+    fastTweenModal.Visible = true
+end
+
 local PAGE_SPROUTS = new("Frame", {
     Size = UDim2.new(1, 0, 0, 0),
     AutomaticSize = Enum.AutomaticSize.Y,
@@ -7402,6 +8142,109 @@ do
         local n = tonumber(string.gsub(tostring(fBurstTime.Text), ",", "."))
         CONFIG.BURST_LOOT_TIME = (n and n > 0) and n or 7
         saveNow()
+    end)
+
+    section("🚀 FAST TWEEN TO RAREST (ПОЛЕТ ПО СЕРВЕРУ)", 14).Parent = PAGE_SPROUTS
+
+    local ftCard = new("Frame", {
+        Size = UDim2.new(1, 0, 0, 46),
+        BackgroundColor3 = C.card,
+        BorderSizePixel = 0,
+        LayoutOrder = 15,
+        Parent = PAGE_SPROUTS,
+    })
+    round(ftCard, 12)
+    stroke(ftCard, Color3.fromRGB(54, 184, 105), 1)
+
+    local ftTitleLbl = new("TextLabel", {
+        Size = UDim2.new(1, -115, 0, 20),
+        Position = UDim2.new(0, 12, 0, 4),
+        BackgroundTransparency = 1,
+        Text = "⚡ Fast Tween to Rarest (ПКМ — настройки)",
+        TextColor3 = C.text,
+        Font = Enum.Font.GothamBold,
+        TextSize = 11,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        Parent = ftCard,
+    })
+
+    local ftSubLbl = new("TextLabel", {
+        Size = UDim2.new(1, -115, 0, 16),
+        Position = UDim2.new(0, 12, 0, 24),
+        BackgroundTransparency = 1,
+        Text = "Полет по всему серверу за редким лутом (250 studs/s) и возврат",
+        TextColor3 = C.dim,
+        Font = Enum.Font.Gotham,
+        TextSize = 9,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        Parent = ftCard,
+    })
+
+    local ftGearBtn = new("TextButton", {
+        Size = UDim2.new(0, 26, 0, 26),
+        Position = UDim2.new(1, -90, 0.5, -13),
+        BackgroundColor3 = Color3.fromRGB(24, 34, 48),
+        Text = "⚙️",
+        Font = Enum.Font.GothamBold,
+        TextSize = 13,
+        TextColor3 = C.text,
+        BorderSizePixel = 0,
+        Parent = ftCard,
+    })
+    round(ftGearBtn, 6)
+    stroke(ftGearBtn, Color3.fromRGB(50, 65, 85), 1)
+
+    local ftToggleState = (CONFIG.FAST_TWEEN_RAREST_ENABLED == true)
+    local ftSwitchBtn = new("TextButton", {
+        Size = UDim2.new(0, 48, 0, 24),
+        Position = UDim2.new(1, -56, 0.5, -12),
+        BackgroundColor3 = ftToggleState and Color3.fromRGB(0, 230, 150) or Color3.fromRGB(32, 38, 52),
+        Text = "",
+        AutoButtonColor = false,
+        BorderSizePixel = 0,
+        Parent = ftCard,
+    })
+    round(ftSwitchBtn, 12)
+    stroke(ftSwitchBtn, ftToggleState and Color3.fromRGB(0, 255, 180) or Color3.fromRGB(48, 56, 76), 1)
+
+    local ftSwitchCircle = new("Frame", {
+        Size = UDim2.new(0, 18, 0, 18),
+        Position = ftToggleState and UDim2.new(1, -21, 0.5, -9) or UDim2.new(0, 3, 0.5, -9),
+        BackgroundColor3 = Color3.fromRGB(255, 255, 255),
+        BorderSizePixel = 0,
+        Parent = ftSwitchBtn,
+    })
+    round(ftSwitchCircle, 9)
+
+    local function updateFtSwitchVisual(st)
+        local targetColor = st and Color3.fromRGB(0, 230, 150) or Color3.fromRGB(32, 38, 52)
+        local targetPos = st and UDim2.new(1, -21, 0.5, -9) or UDim2.new(0, 3, 0.5, -9)
+        local twInfo = TweenInfo.new(0.2, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+        pcall(function()
+            TweenService:Create(ftSwitchBtn, twInfo, { BackgroundColor3 = targetColor }):Play()
+            TweenService:Create(ftSwitchCircle, twInfo, { Position = targetPos }):Play()
+        end)
+    end
+
+    ftSwitchBtn.MouseButton1Click:Connect(function()
+        ftToggleState = not ftToggleState
+        CONFIG.FAST_TWEEN_RAREST_ENABLED = ftToggleState
+        updateFtSwitchVisual(ftToggleState)
+        saveNow()
+    end)
+
+    ftGearBtn.MouseButton1Click:Connect(openFastTweenSettings)
+    ftGearBtn.MouseButton2Click:Connect(openFastTweenSettings)
+    ftSwitchBtn.MouseButton2Click:Connect(openFastTweenSettings)
+    ftCard.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton2 then
+            openFastTweenSettings()
+        end
+    end)
+    ftSwitchBtn.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton2 then
+            openFastTweenSettings()
+        end
     end)
 
     section("🌐 ФИЛЬТР СЕРВЕРОВ (LOW PLAYER COUNT & BLACKLIST)", 20).Parent = PAGE_SPROUTS
