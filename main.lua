@@ -328,7 +328,7 @@ local CONFIG = {
     },
     CHECK_METEORS = true,
     CHECK_WINDY = true,
-    WINDY_HOVER_HEIGHT = 16,
+    WINDY_HOVER_HEIGHT = 32,
     AUTO_HARVEST_PLANTERS = true,
     SHOW_PLANTER_HUD = true,
     PLANTER_HUD_COLLAPSED = false,
@@ -478,7 +478,7 @@ local SAVED_KEYS = {
     "ENABLE_AUTO_SPRINKLER","SPRINKLER_COUNT",
     "ENABLE_AUTO_DIG","EMPTY_SLOT_KEYWORD","MY_HIVE_KEYWORD","CLAIM_TIMEOUT",
     "BURST_LOOT_ENABLED","BURST_LOOT_TIME","PREFER_LOW_PLAYERS","MAX_PLAYERS","MIN_PLAYERS","TOKEN_PRIORITIES",
-    "CHECK_METEORS","CHECK_WINDY","AUTO_HARVEST_PLANTERS","SHOW_PLANTER_HUD","PLANTER_HUD_COLLAPSED",
+    "CHECK_METEORS","CHECK_WINDY","WINDY_HOVER_HEIGHT","AUTO_HARVEST_PLANTERS","SHOW_PLANTER_HUD","PLANTER_HUD_COLLAPSED",
     "PLANTERS_CONFIG","PUFF_AUTO_BOOST_EPIC","PUFF_SELECTED_BOOSTS","PUFF_MIN_LEVEL","PUFF_MAX_LEVEL",
     "DISCORD_WEBHOOK_URL","TELEGRAM_BOT_TOKEN","TELEGRAM_CHAT_ID",
     "PERIODIC_REPORT_ENABLED","PERIODIC_REPORT_INTERVAL",
@@ -1980,7 +1980,7 @@ function fightWindyBee(windy)
 
     -- ШАГ 3: Теперь взлетаем и парим прямо НАД Windy Bee на безопасной высоте (32 studs)!
     setFlightNoclip(true)
-    local hoverHeight = math.clamp(tonumber(CONFIG.WINDY_HOVER_HEIGHT) or 32, 20, 48) -- Повышенная безопасная высота парения над телом Windy Bee и торнадо
+    local hoverHeight = math.clamp(tonumber(CONFIG.WINDY_HOVER_HEIGHT) or 32, 15, 60) -- Повышенная безопасная высота парения над телом Windy Bee и торнадо
     local smoothedTarget = nil
     local lastFacingAt = 0
     local speed = 110
@@ -8152,6 +8152,17 @@ makeToggle(PAGE_WINDY, "Лутать метеоритный дождь (Meteors)
 end)
 makeToggle(PAGE_WINDY, "Автоматический сбор спелых плантаторов", CONFIG.AUTO_HARVEST_PLANTERS, 4, function(v)
     CONFIG.AUTO_HARVEST_PLANTERS = v; saveNow()
+end)
+local fWindyH = makeField(PAGE_WINDY, "ВЫСОТА ПАРЕНИЯ НАД WINDY BEE (studs, реком. 32)", tostring(CONFIG.WINDY_HOVER_HEIGHT or 32), "32", 5)
+fWindyH.FocusLost:Connect(function()
+    local n = tonumber(fWindyH.Text)
+    if n and n >= 15 and n <= 60 then
+        CONFIG.WINDY_HOVER_HEIGHT = n
+    else
+        CONFIG.WINDY_HOVER_HEIGHT = 32
+        fWindyH.Text = "32"
+    end
+    if saveNow then pcall(saveNow) end
 end)
 
 -- ══════════════════════════════════════════════════════════════════════
