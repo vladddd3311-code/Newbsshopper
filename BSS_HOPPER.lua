@@ -283,14 +283,14 @@ local CONFIG = {
     MIN_RARITY = "basic",
     PLACE_ID = 1537690962,
 
-    HOP_DELAY = 1.5, POLL_INTERVAL = 3, BROKEN_WAIT = 20,
+    HOP_DELAY = 0.8, POLL_INTERVAL = 3, BROKEN_WAIT = 20,
     INITIAL_CHECK = 1, REPORT_DELAY = 2.5,
     CONNECT_TIMEOUT = 12, MAX_ATTEMPTS = 3, FAILED_TTL = 600,
 
     DEBUG_SPROUT = true, CHECK_VICIOUS = true, CHECK_SPROUTS = true,
     AUTO_START = true,
 
-    WALK_SPEED_MULT = 5.625, FLY_SPEED = 100, JUMP_POWER = 60,
+    WALK_SPEED_MULT = 2.5, FLY_SPEED = 100, JUMP_POWER = 60,
 
     BACKPACK_FILL_THRESHOLD = 0.95, HONEY_MAX_WAIT = 45,
 
@@ -334,9 +334,9 @@ local CONFIG = {
     PLANTERS_CONFIG = {
         ["Paper Planter"] = { enabled = false, field = "Sunflower Field", percent = 100 },
         ["Plastic Planter"] = { enabled = false, field = "Dandelion Field", percent = 100 },
-        ["Candy Planter"] = { enabled = true, field = "Stump Field", percent = 100 },
-        ["Tacky Planter"] = { enabled = true, field = "Dandelion Field", percent = 100 },
-        ["Pesticide Planter"] = { enabled = true, field = "Spider Field", percent = 100 },
+        ["Candy Planter"] = { enabled = false, field = "Stump Field", percent = 100 },
+        ["Tacky Planter"] = { enabled = false, field = "Dandelion Field", percent = 100 },
+        ["Pesticide Planter"] = { enabled = false, field = "Spider Field", percent = 100 },
         ["Red Clay Planter"] = { enabled = false, field = "Strawberry Field", percent = 100 },
         ["Blue Clay Planter"] = { enabled = false, field = "Pine Tree Forest", percent = 100 },
         ["Petal Planter"] = { enabled = false, field = "Coconut Field", percent = 100 },
@@ -1290,14 +1290,27 @@ end
 -- ══════════════════════════════════════════════════════════════════════
 --  СКОРОСТЬ
 -- ══════════════════════════════════════════════════════════════════════
-local STATIC_SPEED = 90
 lastActiveTargetPos = nil
 
-function applyWalkSpeed()
+function getCalculatedWalkSpeed(boostPriority)
+    local mult = tonumber(CONFIG.WALK_SPEED_MULT) or 2.5
+    local base = 16 * mult
+    -- Ограничиваем безопасную скорость 24-48 studs/s во избежание тряски и проскакивания целей
+    base = math.clamp(base, 24, 48)
+    if boostPriority then
+        return math.min(base * 1.25, 54)
+    end
+    return base
+end
+
+function applyWalkSpeed(boostPriority)
     local char = player.Character
     local hum = char and char:FindFirstChildOfClass("Humanoid")
-    if hum then
-        hum.WalkSpeed = STATIC_SPEED
+    if hum and hum.Health > 0 then
+        local targetSpd = getCalculatedWalkSpeed(boostPriority)
+        if math.abs(hum.WalkSpeed - targetSpd) > 0.5 then
+            hum.WalkSpeed = targetSpd
+        end
         hum.JumpPower = tonumber(CONFIG.JUMP_POWER) or 60
         hum.UseJumpPower = true
     end
@@ -1321,20 +1334,12 @@ task.spawn(function()
                 end)
             end
         end
-        for _ = 1, 10 do
+        for _ = 1, 5 do
             if not alive() then return end
             applyWalkSpeed()
-            task.wait(0.4)
+            task.wait(0.5)
         end
     end))
-    -- Фиксируем скорость статично на 90 каждый кадр
-    while alive() do
-        RunService.Heartbeat:Wait()
-        local hum = player.Character and player.Character:FindFirstChildOfClass("Humanoid")
-        if hum and hum.Health > 0 then
-            if math.abs(hum.WalkSpeed - STATIC_SPEED) > 0.05 then hum.WalkSpeed = STATIC_SPEED end
-        end
-    end
 end)
 
 -- ══════════════════════════════════════════════════════════════════════
@@ -1666,6 +1671,7 @@ function fightWindyBee(windy)
     local lastBeePos = initialPos
     local lastMoveToCall = 0
     local lastMoveToTarget = nil
+    local lastWindyJump = 0
 
     -- ДАЛЬШЕ БЕГАЕМ ПО ПОЛЮ НА ЗЕМЛЕ: БЬЁМ ПЧЁЛУ И УВОРАЧИВАЕМСЯ ОТ ТОРНАДО!
     while alive() and windy.Parent and (os.clock() - started < 360) do
@@ -1710,7 +1716,10 @@ function fightWindyBee(windy)
         if tornadoDodgeDir then
             runTarget = curRoot.Position + tornadoDodgeDir * 28
             log("Windy", "Уворот по земле от торнадо Windy Bee!")
-            hum.Jump = true
+            if hum.FloorMaterial ~= Enum.Material.Air and (os.clock() - lastWindyJump > 1.8) then
+                hum.Jump = true
+                lastWindyJump = os.clock()
+            end
         else
             -- Бегаем вокруг проекции пчелы на землю (в радиусе 12 studs), чтобы пчёлы атаковали
             local angle = (os.clock() * 2) % (math.pi * 2)
@@ -1889,6 +1898,18 @@ function getPlanterType(model)
             return pType
         end
     end
+    for _, desc in ipairs(model:GetDescendants()) do
+        if desc:IsA("TextLabel") then
+            local tLow = string.lower(desc.Text or "")
+            for _, pType in ipairs(ALL_PLANTER_TYPES) do
+                local pLow = string.lower(pType)
+                local short = pLow:gsub("%s*planter%s*", ""):gsub("the%s*", ""):gsub("%s*of%s*", "")
+                if string.find(tLow, short, 1, true) then
+                    return pType
+                end
+            end
+        end
+    end
     return model.Name
 end
 
@@ -1896,6 +1917,7 @@ function getPlanterProgress(model)
     if not model then return 0, "0%" end
     local percent = nil
     local timeLeftStr = nil
+    local isFullyReady = false
 
     local attrPct = model:GetAttribute("Progress") or model:GetAttribute("Growth") or model:GetAttribute("Percent")
     if type(attrPct) == "number" then
@@ -1907,23 +1929,45 @@ function getPlanterProgress(model)
     for _, desc in ipairs(model:GetDescendants()) do
         if desc:IsA("TextLabel") then
             local txt = desc.Text or ""
+            local low = string.lower(txt)
+
+            -- Парсинг процентов "XX.X%"
             local pMatch = string.match(txt, "(%d+%.?%d*)%%")
-            if pMatch and not percent then
-                percent = tonumber(pMatch)
+            if pMatch then
+                local num = tonumber(pMatch)
+                if num then
+                    percent = num
+                    if num >= 100 then
+                        isFullyReady = true
+                    end
+                end
             end
-            if string.find(txt, "left", 1, true) or string.find(txt, ":", 1, true) then
+
+            -- Оставшееся время (например: "Ready in: 25:10", "15m left")
+            if string.find(low, "left", 1, true) or string.find(txt, ":", 1, true) or string.find(low, "ready in", 1, true) then
                 timeLeftStr = txt
             end
-            local low = string.lower(txt)
-            if string.find(low, "ready", 1, true) or string.find(low, "harvest", 1, true) or string.find(low, "100%%", 1, true) then
-                percent = 100
-                timeLeftStr = "0s left"
+
+            -- Явная готовность к сбору (НЕ должна срабатывать на "ready in" или "not ready"!)
+            if string.find(low, "ready to harvest", 1, true)
+               or string.find(low, "harvest!", 1, true)
+               or low == "harvest"
+               or (string.find(low, "ready", 1, true) and not string.find(low, "ready in", 1, true) and not string.find(low, "not ready", 1, true))
+               or string.find(low, "claim", 1, true)
+               or string.find(low, "0s left", 1, true) then
+                isFullyReady = true
             end
         elseif desc:IsA("Frame") and (desc.Name == "Bar" or desc.Name == "Progress" or desc.Name == "Fill") then
             if desc.Size.X.Scale > 0 and desc.Size.X.Scale <= 1 then
                 if not percent then percent = desc.Size.X.Scale * 100 end
+                if desc.Size.X.Scale >= 1 then isFullyReady = true end
             end
         end
+    end
+
+    if isFullyReady then
+        percent = math.max(percent or 100, 100)
+        timeLeftStr = "Ready!"
     end
 
     percent = percent or 0
@@ -1975,7 +2019,7 @@ function findMyActivePlanters()
                 local pType = getPlanterType(pModel)
                 local percent, statusStr = getPlanterProgress(pModel)
                 local fieldName = detectField(pModel) or "Unknown Field"
-                local ready = percent >= 100 or string.find(string.lower(statusStr), "0s", 1, true) or string.find(string.lower(statusStr), "ready", 1, true)
+                local ready = (percent >= 100) or (statusStr == "Ready!")
                 table.insert(myPlanters, {
                     type = pType,
                     model = pModel,
@@ -1998,12 +2042,15 @@ function managePlanters()
     local activePlanters = findMyActivePlanters()
     local activeTypes = {}
 
-    -- 1. Сбор созревших плантаторов (по проценту или готовности)
+    -- 1. Сбор созревших плантаторов (ТОЛЬКО если достигли порога % или готовы)
     for _, info in ipairs(activePlanters) do
         activeTypes[info.type] = true
         local pCfg = CONFIG.PLANTERS_CONFIG and CONFIG.PLANTERS_CONFIG[info.type]
+        local isEnabled = pCfg and (pCfg.enabled == true)
         local targetPct = (pCfg and tonumber(pCfg.percent)) or 100
-        local shouldHarvest = (info.percent >= targetPct) or info.ready
+
+        -- Собираем ТОЛЬКО если плантатор созрел (Ready/100%) ИЛИ включен пользователем и достиг targetPct
+        local shouldHarvest = (info.ready == true) or (isEnabled and info.percent >= targetPct and info.percent > 0)
 
         if shouldHarvest then
             log("Плантатор", string.format("🪴 Плантатор %s на поле %s достиг %.1f%% (порог %d%%)! Собираю урожай...", info.type, info.field, info.percent, targetPct))
@@ -2032,19 +2079,20 @@ function managePlanters()
 
             collectTokensFor(6, function() return not alive() end, pPos)
             activeTypes[info.type] = false
-            task.wait(1)
+            task.wait(0.5)
         end
     end
 
-    -- 2. Авто-посадка свободных настроенных плантаторов (Re-plant)
+    -- 2. Авто-посадка: ТОЛЬКО если плантатор включен пользователем (enabled == true),
+    -- и его НЕТ на полях (not activeTypes[pType])!
     if CONFIG.PLANTERS_CONFIG then
         for pType, pCfg in pairs(CONFIG.PLANTERS_CONFIG) do
-            if pCfg.enabled and not activeTypes[pType] and pCfg.field and pCfg.field ~= "" then
+            if pCfg and pCfg.enabled == true and not activeTypes[pType] and pCfg.field and pCfg.field ~= "" then
                 local fieldPart = getFieldPart(pCfg.field)
                 local root = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
                 if fieldPart and root and alive() then
                     local targetPos = getGroundPos(fieldPart.Position)
-                    log("Плантатор", string.format("🌱 Сажаю %s на поле %s...", pType, pCfg.field))
+                    log("Плантатор", string.format("🌱 Плантатора %s нет на полях! Сажаю на поле %s...", pType, pCfg.field))
                     moveRootToPosition(root, targetPos, 4)
                     task.wait(0.5)
 
@@ -2063,7 +2111,8 @@ function managePlanters()
                     if actCmd then
                         pcall(function() actCmd:FireServer({ Name = pType }) end)
                     end
-                    task.wait(1)
+                    task.wait(0.8)
+                    activeTypes[pType] = true
                 end
             end
         end
@@ -4756,6 +4805,9 @@ collectTokensFor = function(maxSeconds, stopFn, fieldAnchor)
         lastPatrolPickAt = 0
         local lastMoveToTarget = nil
         local lastMoveToCall = 0
+        local lastRecordedPos = nil
+        local stuckStartTime = nil
+        local lastJumpTime = 0
 
         -- Находим физическую зону текущего поля
         local anchorZone = getActiveFlowerZone(fieldAnchor)
@@ -4872,12 +4924,9 @@ collectTokensFor = function(maxSeconds, stopFn, fieldAnchor)
                 end
             end
 
-            -- При P1 или Burst-сборе скорость до 110, обычно 90
+            -- Приоритетная скорость бега (без резких скачков и перезаписи Heartbeat)
             local isP1 = best and best.priority == 1
-            local targetSpeed = (isP1 or isBurstLootActive) and 110 or 90
-            if math.abs(humanoid.WalkSpeed - targetSpeed) > 0.05 then
-                humanoid.WalkSpeed = targetSpeed
-            end
+            applyWalkSpeed(isP1 or isBurstLootActive)
 
             -- Не копаем во время охоты за P1 токеном, чтобы не сбивать спринт!
             if not isP1 and not isBurstLootActive then
@@ -4894,8 +4943,8 @@ collectTokensFor = function(maxSeconds, stopFn, fieldAnchor)
             else
                 activeTokenObj = nil
                 local needNewPatrol = not patrolTarget 
-                    or (root.Position - patrolTarget).Magnitude < 3
-                    or (os.clock() - lastPatrolPickAt > 0.8)
+                    or (root.Position - patrolTarget).Magnitude < 3.2
+                    or (os.clock() - lastPatrolPickAt > 2.8)
 
                 if needNewPatrol then
                     lastPatrolPickAt = os.clock()
@@ -4946,20 +4995,35 @@ collectTokensFor = function(maxSeconds, stopFn, fieldAnchor)
                 local offset = flatTarget - currentPos
                 local dist = offset.Magnitude
 
-                if dist > 1.2 then
+                if dist > 3.0 then
                     local now = os.clock()
-                    if not lastMoveToTarget or (lastMoveToTarget - patrolTarget).Magnitude > 1.2 or (now - lastMoveToCall > 0.28) then
+                    if not lastMoveToTarget or (lastMoveToTarget - patrolTarget).Magnitude > 2.0 or (now - lastMoveToCall > 0.35) then
                         lastMoveToTarget = patrolTarget
                         lastMoveToCall = now
-                        applyWalkSpeed()
                         humanoid:MoveTo(patrolTarget)
-                    end
-                    -- Автоматический прыжок при застревании в клумбе/заборе
-                    if humanoid.MoveDirection.Magnitude < 0.05 and dist > 3.5 then
-                        humanoid.Jump = true
                     end
                 else
                     lastMoveToTarget = nil
+                end
+
+                -- Защита от реального застревания в объектах (ростки, заборы):
+                -- Прыгаем ТОЛЬКО если персонаж физически не сдвинулся с места более 1.2 сек!
+                local now = os.clock()
+                if not lastRecordedPos then lastRecordedPos = currentPos end
+                if (currentPos - lastRecordedPos).Magnitude < 0.6 then
+                    if not stuckStartTime then stuckStartTime = now end
+                    if (now - stuckStartTime > 1.2) and (now - lastJumpTime > 2.5) then
+                        if humanoid.FloorMaterial ~= Enum.Material.Air then
+                            humanoid.Jump = true
+                            lastJumpTime = now
+                        end
+                        -- Сбрасываем цель, чтобы персонаж обошел росток или забор, а не прыгал по нему
+                        patrolTarget = nil
+                        stuckStartTime = nil
+                    end
+                else
+                    lastRecordedPos = currentPos
+                    stuckStartTime = nil
                 end
             end
 
@@ -5328,16 +5392,16 @@ function Searcher:Start()
                     hopRandom()
                 else
                     s.currentStatus = "Сервер #" .. tostring(s.serversChecked) .. " — пусто"
-                    local hopWait = math.max(3.5, tonumber(CONFIG.HOP_DELAY) or 3.5)
+                    local hopWait = math.max(0.2, tonumber(CONFIG.HOP_DELAY) or 0.8)
                     task.wait(hopWait)
                     hopRandom()
                 end
             end)
             if not ok then
                 log("Ищущий", "Ошибка: " .. tostring(err))
-                task.wait(3); hopRandom()
+                task.wait(2); hopRandom()
             end
-            task.wait(math.max(3, tonumber(CONFIG.HOP_DELAY) or 3))
+            task.wait(math.max(0.5, tonumber(CONFIG.HOP_DELAY) or 0.8))
         end
     end)
 end
@@ -5781,7 +5845,7 @@ function Looter:Start()
 
                 s.currentStatus = "Целей нет — прыгаю на случайный сервер (соло-поиск)..."
                 log("Лутающий", "Нет задач от ищущих и целей на сервере. Прыгаю на случайный сервер...")
-                local hopWait = math.max(3.5, tonumber(CONFIG.HOP_DELAY) or 3.5)
+                local hopWait = math.max(0.2, tonumber(CONFIG.HOP_DELAY) or 0.8)
                 task.wait(hopWait)
                 if alive() then
                     s.teleports += 1
@@ -5886,7 +5950,7 @@ function Solo:Start()
                 -- Если целей нет — улей не ставим, переходим на другой сервер!
                 if not vicious and not sprout and not puffRoot and not windy and not meteors then
                     s.currentStatus = "Целей нет — перехожу на другой сервер..."
-                    local hopWait = math.max(3.5, tonumber(CONFIG.HOP_DELAY) or 3.5)
+                    local hopWait = math.max(0.2, tonumber(CONFIG.HOP_DELAY) or 0.8)
                     task.wait(hopWait)
                     if alive() then
                         s.hops += 1
@@ -6081,7 +6145,7 @@ function Solo:Start()
 
                     -- Фаза 3: Росток залутан! Переход на следующий сервер
                     s.currentStatus = "Росток залутан — перехожу на другой сервер..."
-                    local hopWait = math.max(3.5, tonumber(CONFIG.HOP_DELAY) or 3.5)
+                    local hopWait = math.max(0.2, tonumber(CONFIG.HOP_DELAY) or 0.8)
                     task.wait(hopWait)
                     if alive() then
                         s.hops += 1
@@ -6094,7 +6158,7 @@ function Solo:Start()
 
                 -- Если ростка нет на сервере — переходим на другой
                 s.currentStatus = "Целей нет — перехожу на другой сервер..."
-                local hopWait = math.max(3.5, tonumber(CONFIG.HOP_DELAY) or 3.5)
+                local hopWait = math.max(0.2, tonumber(CONFIG.HOP_DELAY) or 0.8)
                 task.wait(hopWait)
                 if alive() then
                     s.hops += 1
@@ -6436,7 +6500,7 @@ new("TextLabel", {
 })
 new("TextLabel", {
     Size = UDim2.new(0, 220, 0, 25), Position = UDim2.new(0, 58, 0, 10),
-    BackgroundTransparency = 1, Text = "BSS Hopper v1.3.74",
+    BackgroundTransparency = 1, Text = "BSS Hopper v1.3.75",
     TextColor3 = C.text, Font = Enum.Font.GothamBold, TextSize = 22,
     TextXAlignment = Enum.TextXAlignment.Left, Parent = head,
 })
