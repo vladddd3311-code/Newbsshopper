@@ -1827,6 +1827,12 @@ local function isWindyAlreadyHatched(windy)
     if not windy or not windy.Parent then return true end
     if poppedWindyClouds[windy] then return true end
 
+    -- 0. Метод Atlas BSS: Если модель находится в Workspace.Monsters — это 100% активный боевой моб
+    local monstersFolder = Workspace:FindFirstChild("Monsters")
+    if monstersFolder and (windy.Parent == monstersFolder or windy:IsDescendantOf(monstersFolder)) then
+        return true
+    end
+
     -- 1. Если на сервере уже есть торнадо — значит пчела 100% вылупилась и атакует
     local tornadoes = Workspace:FindFirstChild("Tornadoes") or (Workspace:FindFirstChild("Happenings") and Workspace.Happenings:FindFirstChild("Tornadoes"))
     if tornadoes and #tornadoes:GetChildren() > 0 then
@@ -1855,14 +1861,39 @@ local function isWindyAlreadyHatched(windy)
 end
 
 function findWindyBee()
-    local npcFolder = Workspace:FindFirstChild("NPCBees")
-    if not npcFolder then return nil end
-    for _, bee in ipairs(npcFolder:GetChildren()) do
-        local n = string.lower(bee.Name)
-        if string.find(n, "windy", 1, true) then
-            return bee
+    -- 1. Метод Atlas BSS: Сначала проверяем Workspace.Monsters (боевая модель Windy Bee с уровнем и хитбоксом)
+    local monstersFolder = Workspace:FindFirstChild("Monsters")
+    if monstersFolder then
+        for _, mob in ipairs(monstersFolder:GetChildren()) do
+            local n = string.lower(mob.Name)
+            if string.find(n, "windy", 1, true) then
+                return mob
+            end
         end
     end
+
+    -- 2. Метод Atlas BSS: Проверяем Workspace.NPCBees (NPC модель дикой Windy Bee)
+    local npcFolder = Workspace:FindFirstChild("NPCBees")
+    if npcFolder then
+        for _, bee in ipairs(npcFolder:GetChildren()) do
+            local n = string.lower(bee.Name)
+            if string.find(n, "windy", 1, true) then
+                return bee
+            end
+        end
+    end
+
+    -- 3. Проверяем Happenings
+    local hap = Workspace:FindFirstChild("Happenings")
+    if hap then
+        for _, ch in ipairs(hap:GetChildren()) do
+            local n = string.lower(ch.Name)
+            if string.find(n, "windy", 1, true) then
+                return ch
+            end
+        end
+    end
+
     return nil
 end
 
@@ -2174,8 +2205,101 @@ local ALL_BSS_FIELDS = {
     "Pine Tree Forest", "Rose Field", "Mountain Top Field", "Coconut Field", "Pepper Patch"
 }
 
+-- Вспомогательные функции Atlas BSS для работы с плантаторами
+local function getLocalPlantersTable()
+    local ok, res = pcall(function()
+        local rep = game:GetService("ReplicatedStorage")
+        local lpMod = rep:FindFirstChild("LocalPlanters")
+        if not lpMod then return nil end
+        local required = require(lpMod)
+        if not required then return nil end
+        local checkFn = required.CheckForNearbyHarvestablePlanters
+        if not checkFn then return nil end
+
+        local getUpv = (debug and debug.getupvalue) or getupvalue
+        if type(getUpv) == "function" then
+            local upv = getUpv(checkFn, 1)
+            if type(upv) == "table" then return upv end
+            local getUpvs = (debug and debug.getupvalues) or getupvalues
+            if type(getUpvs) == "function" then
+                local allUpvs = getUpvs(checkFn)
+                if type(allUpvs) == "table" then
+                    for _, v in pairs(allUpvs) do
+                        if type(v) == "table" then
+                            for _, entry in pairs(v) do
+                                if type(entry) == "table" and (entry.IsMine ~= nil or entry.ActorID ~= nil) then
+                                    return v
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+        end
+        return nil
+    end)
+    if ok and res then return res end
+    return nil
+end
+
+local function getPlanterDisplayNames()
+    local ok, res = pcall(function()
+        local rep = game:GetService("ReplicatedStorage")
+        local ptMod = rep:FindFirstChild("PlanterTypes")
+        if ptMod then
+            local pt = require(ptMod)
+            if pt and type(pt.GetTypes) == "function" then
+                return pt.GetTypes()
+            end
+        end
+        return nil
+    end)
+    if ok and res then return res end
+    return nil
+end
+
 function getPlanterType(model)
     if not model then return "Unknown Planter" end
+
+    -- 0. Метод Atlas BSS: считывание названия из Gui Attach -> Planter Gui -> Bar -> TextLabel
+    -- Формат текста в игре: "Paper Planter (100%)" или "Red Clay Planter (55%)"
+    local guiAttach = model:FindFirstChild("Gui Attach")
+    if guiAttach then
+        local pGui = guiAttach:FindFirstChild("Planter Gui")
+        local bar = pGui and pGui:FindFirstChild("Bar")
+        local txtLbl = bar and bar:FindFirstChild("TextLabel")
+        if txtLbl and txtLbl.Text and txtLbl.Text ~= "" then
+            local matched = string.match(txtLbl.Text, "(.+)%s*%(")
+            if matched then
+                local clean = matched:gsub("^%s*(.-)%s*$", "%1")
+                for _, pType in ipairs(ALL_PLANTER_TYPES) do
+                    if string.lower(pType) == string.lower(clean)
+                       or string.find(string.lower(clean), string.lower(pType), 1, true)
+                       or string.find(string.lower(pType), string.lower(clean), 1, true) then
+                        return pType
+                    end
+                end
+                if clean ~= "" then return clean end
+            end
+        end
+    end
+
+    -- 1. Метод Atlas BSS: сопоставление через LocalPlanters upvalue
+    local lpTable = getLocalPlantersTable()
+    if lpTable then
+        local pTypes = getPlanterDisplayNames()
+        for _, lp in pairs(lpTable) do
+            if lp.Model == model or (lp.Position and model:IsA("BasePart") and (lp.Position - model.Position).Magnitude < 4) then
+                if pTypes and lp.Type and pTypes[lp.Type] and pTypes[lp.Type].DisplayName then
+                    return pTypes[lp.Type].DisplayName
+                end
+                if lp.DisplayName then return lp.DisplayName end
+                if lp.Type then return tostring(lp.Type) end
+            end
+        end
+    end
+
+    -- 2. Проверка атрибутов и имени модели
     local raw = model:GetAttribute("Type") or model:GetAttribute("PlanterType") or model.Name
     local low = string.lower(tostring(raw))
     for _, pType in ipairs(ALL_PLANTER_TYPES) do
@@ -2185,9 +2309,20 @@ function getPlanterType(model)
             return pType
         end
     end
+
+    -- 3. Резервный поиск по всем TextLabel внутри модели
     for _, desc in ipairs(model:GetDescendants()) do
         if desc:IsA("TextLabel") then
             local tLow = string.lower(desc.Text or "")
+            local matched = string.match(desc.Text or "", "(.+)%s*%(")
+            if matched then
+                local clean = matched:gsub("^%s*(.-)%s*$", "%1")
+                for _, pType in ipairs(ALL_PLANTER_TYPES) do
+                    if string.lower(pType) == string.lower(clean) then
+                        return pType
+                    end
+                end
+            end
             for _, pType in ipairs(ALL_PLANTER_TYPES) do
                 local pLow = string.lower(pType)
                 local short = pLow:gsub("%s*planter%s*", ""):gsub("the%s*", ""):gsub("%s*of%s*", "")
@@ -2206,48 +2341,98 @@ function getPlanterProgress(model)
     local timeLeftStr = nil
     local isFullyReady = false
 
-    local attrPct = model:GetAttribute("Progress") or model:GetAttribute("Growth") or model:GetAttribute("Percent")
-    if type(attrPct) == "number" then
-        percent = (attrPct <= 1.05 and attrPct > 0) and (attrPct * 100) or attrPct
+    -- 0. Метод Atlas BSS: NumberValue "GrowthPercent" (1.0 = 100%)
+    local growthVal = model:FindFirstChild("GrowthPercent")
+    if growthVal then
+        local rawVal = nil
+        if growthVal:IsA("ValueObject") or growthVal:IsA("NumberValue") or growthVal:IsA("IntValue") or growthVal:IsA("DoubleConstrainedValue") then
+            rawVal = growthVal.Value
+        elseif type(growthVal.Value) == "number" then
+            rawVal = growthVal.Value
+        end
+        if type(rawVal) == "number" then
+            percent = (rawVal <= 1.0001 and rawVal >= 0) and (rawVal * 100) or rawVal
+            if rawVal >= 1 or percent >= 100 then
+                isFullyReady = true
+                percent = 100
+                timeLeftStr = "Ready!"
+            end
+        end
     end
-    local attrTime = model:GetAttribute("TimeLeft") or model:GetAttribute("Remaining") or model:GetAttribute("Duration")
-    if attrTime then timeLeftStr = tostring(attrTime) end
 
-    for _, desc in ipairs(model:GetDescendants()) do
-        if desc:IsA("TextLabel") then
-            local txt = desc.Text or ""
+    -- 1. Метод Atlas BSS: Gui Attach -> Planter Gui -> Bar -> TextLabel
+    local guiAttach = model:FindFirstChild("Gui Attach")
+    if guiAttach then
+        local pGui = guiAttach:FindFirstChild("Planter Gui")
+        local bar = pGui and pGui:FindFirstChild("Bar")
+        local txtLbl = bar and bar:FindFirstChild("TextLabel")
+        if txtLbl and txtLbl.Text and txtLbl.Text ~= "" then
+            local txt = txtLbl.Text
             local low = string.lower(txt)
-
-            -- Парсинг процентов "XX.X%"
-            local pMatch = string.match(txt, "(%d+%.?%d*)%%")
+            local pMatch = string.match(txt, "%((%d+%.?%d*)%%%s*%)") or string.match(txt, "(%d+%.?%d*)%%")
             if pMatch then
                 local num = tonumber(pMatch)
                 if num then
-                    percent = num
+                    percent = percent or num
                     if num >= 100 then
                         isFullyReady = true
+                        percent = 100
                     end
                 end
             end
-
-            -- Оставшееся время (например: "Ready in: 25:10", "15m left")
-            if string.find(low, "left", 1, true) or string.find(txt, ":", 1, true) or string.find(low, "ready in", 1, true) then
-                timeLeftStr = txt
-            end
-
-            -- Явная готовность к сбору (НЕ должна срабатывать на "ready in" или "not ready"!)
-            if string.find(low, "ready to harvest", 1, true)
-               or string.find(low, "harvest!", 1, true)
-               or low == "harvest"
-               or (string.find(low, "ready", 1, true) and not string.find(low, "ready in", 1, true) and not string.find(low, "not ready", 1, true))
-               or string.find(low, "claim", 1, true)
-               or string.find(low, "0s left", 1, true) then
+            if string.find(low, "ready", 1, true) and not string.find(low, "ready in", 1, true) and not string.find(low, "not ready", 1, true) then
                 isFullyReady = true
+                percent = 100
+                timeLeftStr = "Ready!"
+            elseif string.find(low, "left", 1, true) or string.find(txt, ":", 1, true) or string.find(low, "ready in", 1, true) then
+                timeLeftStr = timeLeftStr or txt
             end
-        elseif desc:IsA("Frame") and (desc.Name == "Bar" or desc.Name == "Progress" or desc.Name == "Fill") then
-            if desc.Size.X.Scale > 0 and desc.Size.X.Scale <= 1 then
-                if not percent then percent = desc.Size.X.Scale * 100 end
-                if desc.Size.X.Scale >= 1 then isFullyReady = true end
+        end
+    end
+
+    -- 2. Проверка атрибутов модели
+    local attrPct = model:GetAttribute("Progress") or model:GetAttribute("Growth") or model:GetAttribute("Percent")
+    if type(attrPct) == "number" then
+        local p = (attrPct <= 1.05 and attrPct > 0) and (attrPct * 100) or attrPct
+        percent = percent or p
+        if p >= 100 then isFullyReady = true end
+    end
+    local attrTime = model:GetAttribute("TimeLeft") or model:GetAttribute("Remaining") or model:GetAttribute("Duration")
+    if attrTime and not timeLeftStr then timeLeftStr = tostring(attrTime) end
+
+    -- 3. Резервный поиск по потомкам
+    if not percent or not isFullyReady then
+        for _, desc in ipairs(model:GetDescendants()) do
+            if desc:IsA("TextLabel") then
+                local txt = desc.Text or ""
+                local low = string.lower(txt)
+
+                local pMatch = string.match(txt, "(%d+%.?%d*)%%")
+                if pMatch then
+                    local num = tonumber(pMatch)
+                    if num then
+                        percent = percent or num
+                        if num >= 100 then isFullyReady = true end
+                    end
+                end
+
+                if string.find(low, "left", 1, true) or string.find(txt, ":", 1, true) or string.find(low, "ready in", 1, true) then
+                    timeLeftStr = timeLeftStr or txt
+                end
+
+                if string.find(low, "ready to harvest", 1, true)
+                   or string.find(low, "harvest!", 1, true)
+                   or low == "harvest"
+                   or (string.find(low, "ready", 1, true) and not string.find(low, "ready in", 1, true) and not string.find(low, "not ready", 1, true))
+                   or string.find(low, "claim", 1, true)
+                   or string.find(low, "0s left", 1, true) then
+                    isFullyReady = true
+                end
+            elseif desc:IsA("Frame") and (desc.Name == "Bar" or desc.Name == "Progress" or desc.Name == "Fill") then
+                if desc.Size.X.Scale > 0 and desc.Size.X.Scale <= 1 then
+                    if not percent then percent = desc.Size.X.Scale * 100 end
+                    if desc.Size.X.Scale >= 1 then isFullyReady = true end
+                end
             end
         end
     end
@@ -2300,18 +2485,17 @@ local function getAllPlanterCandidates()
         end
     end
 
-    -- 2. Проверяем Workspace.Planters и LocalPlanters (основное хранилище плантаторов BSS)
+    -- 2. Проверяем Workspace.Planters и LocalPlanters (основное хранилище плантаторов BSS из Atlas)
     local plantersFolder = Workspace:FindFirstChild("Planters")
     if plantersFolder then
         cachedPlantersFolder = plantersFolder
-        local localPlanters = plantersFolder:FindFirstChild("LocalPlanters")
-        if localPlanters then
-            for _, ch in ipairs(localPlanters:GetChildren()) do
-                checkAndAdd(ch)
-            end
-        end
         for _, ch in ipairs(plantersFolder:GetChildren()) do
             checkAndAdd(ch)
+            if ch.Name == "LocalPlanters" then
+                for _, sub in ipairs(ch:GetChildren()) do
+                    checkAndAdd(sub)
+                end
+            end
         end
     end
 
@@ -2331,7 +2515,7 @@ local function getAllPlanterCandidates()
         if f then
             for _, ch in ipairs(f:GetChildren()) do
                 local nLow = string.lower(ch.Name)
-                if string.find(nLow, "planter", 1, true) or f.Name == "Planters" or f.Name == "LocalPlanters" or f.Name == "ActivePlanters" or f.Name == "PlanterModels" then
+                if string.find(nLow, "planter", 1, true) or ch.Name == "PlanterBulb" or f.Name == "Planters" or f.Name == "LocalPlanters" or f.Name == "ActivePlanters" or f.Name == "PlanterModels" then
                     checkAndAdd(ch)
                     cachedPlantersFolder = f
                 end
@@ -2341,7 +2525,8 @@ local function getAllPlanterCandidates()
 
     -- 4. Прямые потомки Workspace
     for _, ch in ipairs(Workspace:GetChildren()) do
-        if string.find(string.lower(ch.Name), "planter", 1, true) then
+        local nLow = string.lower(ch.Name)
+        if string.find(nLow, "planter", 1, true) or ch.Name == "PlanterBulb" then
             checkAndAdd(ch)
         end
     end
@@ -2386,7 +2571,23 @@ function isPlanterMine(pModel)
     local myName = string.lower(player.Name)
     local myId = tostring(player.UserId)
 
-    -- 0. Если модель находится внутри "LocalPlanters" - это гарантированно НАШ плантатор!
+    -- 0. Метод Atlas BSS: проверка через upvalue ReplicatedStorage.LocalPlanters (IsMine == true)
+    local lpTable = getLocalPlantersTable()
+    if lpTable then
+        for _, lp in pairs(lpTable) do
+            if lp.IsMine then
+                if lp.Model == pModel or (pModel:IsA("BasePart") and lp.Model and lp.Model:IsAncestorOf(pModel)) then
+                    return true
+                end
+                local pPos = worldPos(pModel)
+                if pPos and lp.Position and (lp.Position - pPos).Magnitude < 5 then
+                    return true
+                end
+            end
+        end
+    end
+
+    -- 0.1. Если модель находится внутри "LocalPlanters" - это гарантированно НАШ плантатор!
     if pModel:FindFirstAncestor("LocalPlanters") then
         return true
     end
@@ -2499,7 +2700,56 @@ function confirmPlanterHarvestModal()
     local pg = player:FindFirstChild("PlayerGui")
     if not pg then return false end
 
-    -- Ищем диалоговое окно подтверждения сбора плантатора
+    -- 0. Метод Atlas BSS: Канонический путь ScreenGui.QuestionBox.Box.YesButton
+    local screenGui = pg:FindFirstChild("ScreenGui")
+    if screenGui then
+        local qBox = screenGui:FindFirstChild("QuestionBox")
+        if qBox and qBox.Visible then
+            local box = qBox:FindFirstChild("Box")
+            local yesBtn = box and (box:FindFirstChild("YesButton") or box:FindFirstChild("Yes"))
+            if yesBtn then
+                log("Плантатор", "🟢 [Atlas] Нажата каноническая кнопка QuestionBox.Box.YesButton!")
+                pcall(function()
+                    if type(firesignal) == "function" then
+                        firesignal(yesBtn.MouseButton1Click)
+                        firesignal(yesBtn.Activated)
+                    end
+                end)
+                pcall(function()
+                    if type(getconnections) == "function" then
+                        for _, c in ipairs(getconnections(yesBtn.MouseButton1Click)) do c:Fire() end
+                        for _, c in ipairs(getconnections(yesBtn.Activated)) do c:Fire() end
+                    end
+                end)
+                pcall(function()
+                    local vim = game:GetService("VirtualInputManager")
+                    if vim then
+                        local center = yesBtn.AbsolutePosition + (yesBtn.AbsoluteSize * 0.5)
+                        local inset = game:GetService("GuiService"):GetGuiInset()
+                        vim:SendMouseMoveEvent(center.X, center.Y, game)
+                        vim:SendMouseButtonEvent(center.X, center.Y, 0, true, game, 1)
+                        task.wait(0.04)
+                        vim:SendMouseButtonEvent(center.X, center.Y, 0, false, game, 1)
+                        vim:SendMouseMoveEvent(center.X + inset.X, center.Y + inset.Y, game)
+                        vim:SendMouseButtonEvent(center.X + inset.X, center.Y + inset.Y, 0, true, game, 1)
+                        task.wait(0.04)
+                        vim:SendMouseButtonEvent(center.X + inset.X, center.Y + inset.Y, 0, false, game, 1)
+                    end
+                end)
+                pcall(function()
+                    local vu = game:GetService("VirtualUser")
+                    if vu then
+                        local center = yesBtn.AbsolutePosition + (yesBtn.AbsoluteSize * 0.5)
+                        vu:CaptureController()
+                        vu:ClickButton1(Vector2.new(center.X, center.Y))
+                    end
+                end)
+                return true
+            end
+        end
+    end
+
+    -- 1. Резервный поиск диалогового окна подтверждения сбора плантатора по всему PlayerGui
     for _, desc in ipairs(pg:GetDescendants()) do
         if desc:IsA("TextLabel") or desc:IsA("TextButton") then
             local t = string.lower(desc.Text or "")
@@ -2712,6 +2962,19 @@ function managePlanters()
                 end
             end
 
+            -- Метод Atlas BSS: нажатие наэкранной кнопки ActivateButton
+            local pg = player:FindFirstChild("PlayerGui")
+            local scrGui = pg and pg:FindFirstChild("ScreenGui")
+            local actBtn = scrGui and scrGui:FindFirstChild("ActivateButton")
+            if actBtn and actBtn.Visible and actBtn.Position.Y.Offset >= 0 then
+                pcall(function()
+                    if type(firesignal) == "function" then
+                        firesignal(actBtn.MouseButton1Click)
+                        firesignal(actBtn.Activated)
+                    end
+                end)
+            end
+
             -- VIM E key (имитация нажатия E рядом с плантатором)
             pcall(function()
                 local vim = game:GetService("VirtualInputManager")
@@ -2721,7 +2984,47 @@ function managePlanters()
                     vim:SendKeyEvent(false, Enum.KeyCode.E, false, game)
                 end
             end)
-            task.wait(0.2)
+            task.wait(0.1)
+
+            -- Метод Atlas BSS: прямой вызов RemoteEvent PlanterModelCollect с ActorID
+            local actorID = nil
+            local lpTable = getLocalPlantersTable()
+            if lpTable then
+                local pTypes = getPlanterDisplayNames()
+                for _, lp in pairs(lpTable) do
+                    if lp.IsMine then
+                        local dName = (pTypes and lp.Type and pTypes[lp.Type] and pTypes[lp.Type].DisplayName) or lp.DisplayName or lp.Type
+                        if (dName and string.lower(tostring(dName)) == string.lower(tostring(info.type)))
+                           or lp.Model == info.model
+                           or (lp.Position and pPos and (lp.Position - pPos).Magnitude < 6) then
+                            actorID = lp.ActorID
+                            break
+                        end
+                    end
+                end
+                if not actorID then
+                    for _, lp in pairs(lpTable) do
+                        if lp.IsMine and lp.ActorID then
+                            if lp.Model == info.model or (lp.Position and pPos and (lp.Position - pPos).Magnitude < 10) then
+                                actorID = lp.ActorID
+                                break
+                            end
+                        end
+                    end
+                end
+            end
+
+            local repEvents = rep:FindFirstChild("Events")
+            if repEvents then
+                local collectRemote = repEvents:FindFirstChild("PlanterModelCollect")
+                if collectRemote then
+                    if actorID then
+                        log("Плантатор", string.format("⚡ [Atlas] Вызов PlanterModelCollect с ActorID: %s", tostring(actorID)))
+                        pcall(function() collectRemote:FireServer(actorID) end)
+                    end
+                    pcall(function() collectRemote:FireServer(info.model) end)
+                end
+            end
 
             -- FireServer (на случай если промпт активировал серверное событие)
             if pCmd then
@@ -2745,8 +3048,15 @@ function managePlanters()
                     log("Плантатор", "✅ Нажали [Yes] в диалоге сбора плантатора!")
                     break
                 end
-                -- Повторно жмем E если диалог не появился
-                if attempt % 6 == 0 then
+                -- Повторно жмем E / ActivateButton / PlanterModelCollect если диалог не появился
+                if attempt % 5 == 0 then
+                    if actBtn and actBtn.Visible and actBtn.Position.Y.Offset >= 0 and type(firesignal) == "function" then
+                        pcall(firesignal, actBtn.MouseButton1Click)
+                        pcall(firesignal, actBtn.Activated)
+                    end
+                    if actorID and repEvents and repEvents:FindFirstChild("PlanterModelCollect") then
+                        pcall(function() repEvents.PlanterModelCollect:FireServer(actorID) end)
+                    end
                     pcall(function()
                         local vim = game:GetService("VirtualInputManager")
                         if vim then
@@ -7392,7 +7702,7 @@ new("TextLabel", {
 })
 new("TextLabel", {
     Size = UDim2.new(0, 220, 0, 25), Position = UDim2.new(0, 58, 0, 10),
-    BackgroundTransparency = 1, Text = "BSS Hopper v1.3.85",
+    BackgroundTransparency = 1, Text = "BSS Hopper v1.3.86",
     TextColor3 = C.text, Font = Enum.Font.GothamBold, TextSize = 22,
     TextXAlignment = Enum.TextXAlignment.Left, Parent = head,
 })
