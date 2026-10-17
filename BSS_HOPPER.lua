@@ -5580,6 +5580,49 @@ local TOKEN_P2 = {
     "coconut", "bitterberry", "treat", "ant pass", "pollen"
 }
 
+-- Реестр всех токенов со спрутов в Bee Swarm Simulator
+TOKEN_REGISTRY = {
+    { id = "token_link", name = "Token Link (🔗)", icon = "🔗", keywords = { "token link", "tokenlink", "link" }, defaultPrio = 0 },
+    { id = "star_treat", name = "Star Treat", icon = "⭐", keywords = { "star treat" }, defaultPrio = 1 },
+    { id = "eggs", name = "Mythic / Diamond Eggs", icon = "🥚", keywords = { "egg", "diamond egg", "gold egg", "silver egg", "mythic egg" }, defaultPrio = 1 },
+    { id = "star_jelly", name = "Star Jelly", icon = "🌟", keywords = { "star jelly" }, defaultPrio = 1 },
+    { id = "night_bell", name = "Night Bell", icon = "🔔", keywords = { "night bell" }, defaultPrio = 1 },
+    { id = "atomic_treat", name = "Atomic Treat", icon = "☢️", keywords = { "atomic treat" }, defaultPrio = 1 },
+    { id = "magic_bean", name = "Magic Bean", icon = "🌱", keywords = { "magic bean", "bean" }, defaultPrio = 1 },
+    { id = "glitter", name = "Glitter", icon = "✨", keywords = { "glitter" }, defaultPrio = 1 },
+    { id = "glue", name = "Glue", icon = "🧴", keywords = { "glue" }, defaultPrio = 1 },
+    { id = "enzymes", name = "Enzymes", icon = "🧪", keywords = { "enzymes", "enzyme" }, defaultPrio = 1 },
+    { id = "oil", name = "Oil", icon = "🛢️", keywords = { "oil" }, defaultPrio = 1 },
+    { id = "tropical_drink", name = "Tropical Drink", icon = "🍹", keywords = { "tropical drink", "tropical" }, defaultPrio = 1 },
+    { id = "micro_converter", name = "Micro-Converter", icon = "⚡", keywords = { "micro-converter", "converter" }, defaultPrio = 1 },
+    { id = "tickets", name = "Tickets", icon = "🎟️", keywords = { "ticket" }, defaultPrio = 1 },
+    { id = "stinger", name = "Stinger", icon = "🗡️", keywords = { "stinger" }, defaultPrio = 1 },
+    { id = "gumdrops", name = "Gumdrops", icon = "🍬", keywords = { "gumdrop", "gumdrops" }, defaultPrio = 2 },
+    { id = "moon_charm", name = "Moon Charm", icon = "🌙", keywords = { "moon charm" }, defaultPrio = 2 },
+    { id = "royal_jelly", name = "Royal Jelly", icon = "👑", keywords = { "royal jelly" }, defaultPrio = 2 },
+    { id = "dice_smoothie", name = "Field Dice / Smoothie", icon = "🎲", keywords = { "dice", "smoothie", "whirligig" }, defaultPrio = 2 },
+    { id = "berries", name = "Berries (Blue/Straw/Pine/Seed)", icon = "🍓", keywords = { "strawberry", "blueberry", "pineapple", "sunflower", "seed" }, defaultPrio = 2 },
+    { id = "bitter_neon", name = "Bitterberry & Neonberry", icon = "🫐", keywords = { "bitterberry", "neonberry" }, defaultPrio = 2 },
+    { id = "coconut", name = "Coconut", icon = "🥥", keywords = { "coconut" }, defaultPrio = 2 },
+    { id = "treats", name = "Treats (Печенья)", icon = "🍪", keywords = { "treat" }, defaultPrio = 3 },
+    { id = "festive", name = "Gingerbread / Snowflake", icon = "❄️", keywords = { "gingerbread", "snowflake", "festive" }, defaultPrio = 2 },
+    { id = "honey_tokens", name = "Honey Tokens (Жетоны мёда)", icon = "🍯", keywords = { "honey", "honeydrop", "honeytoken" }, defaultPrio = 0 },
+}
+
+local ATLAS_PRIORITY_SPROUT_IDS = {
+    ["1471848094"] = true, ["1471849394"] = true, ["1471850677"] = true, ["4520739302"] = true,
+    ["1987253833"] = true, ["1987257040"] = true, ["1987255318"] = true, ["6134473023"] = true,
+    ["8277780065"] = true, ["8277781666"] = true, ["8277783113"] = true, ["8310376128"] = true,
+    ["2319943273"] = true, ["2495935291"] = true, ["2495936060"] = true, ["4483267595"] = true,
+    ["4483236276"] = true, ["3030569073"] = true, ["2028603146"] = true, ["2545746569"] = true,
+    ["2529092020"] = true, ["2504978518"] = true, ["2584584968"] = true, ["2542899798"] = true,
+    ["8054996680"] = true, ["3027672238"] = true, ["6299503651"] = true, ["2306224708"] = true,
+    ["1674871631"] = true, ["2319083910"] = true, ["5877939956"] = true, ["2000457501"] = true,
+    ["1104415222"] = true, ["1472425802"] = true, ["1472580249"] = true, ["1472532912"] = true,
+    ["2032949183"] = true, ["1472491940"] = true, ["1489734171"] = true, ["1837410537"] = true,
+    ["2652364563"] = true, ["2652424740"] = true, ["6077288982"] = true,
+}
+
 -- Известные текстуры предметов BSS (ID -> имя предмета)
 local TOKEN_TEXTURE_MAP = {
     ["1471850677"] = "diamond egg",
@@ -5601,6 +5644,11 @@ local TOKEN_TEXTURE_MAP = {
     ["2007780411"] = "micro-converter",
     ["1471850800"] = "mythic egg",
 }
+for spId, _ in pairs(ATLAS_PRIORITY_SPROUT_IDS) do
+    if not TOKEN_TEXTURE_MAP[spId] then
+        TOKEN_TEXTURE_MAP[spId] = "sprout_item"
+    end
+end
 
 -- Динамическое сканирование UI инвентаря и ReplicatedStorage для сопоставления текстур предметов
 function buildTokenTextureMap()
@@ -5668,34 +5716,38 @@ end
 local TOKEN_NAME_CACHE = setmetatable({}, { __mode = "k" })
 local TOKEN_PRIO_CACHE = setmetatable({}, { __mode = "k" })
 
--- Реестр всех токенов со спрутов в Bee Swarm Simulator
-TOKEN_REGISTRY = {
-    { id = "token_link", name = "Token Link (🔗)", icon = "🔗", keywords = { "token link", "tokenlink", "link" }, defaultPrio = 0 },
-    { id = "star_treat", name = "Star Treat", icon = "⭐", keywords = { "star treat" }, defaultPrio = 1 },
-    { id = "eggs", name = "Mythic / Diamond Eggs", icon = "🥚", keywords = { "egg", "diamond egg", "gold egg", "silver egg", "mythic egg" }, defaultPrio = 1 },
-    { id = "star_jelly", name = "Star Jelly", icon = "🌟", keywords = { "star jelly" }, defaultPrio = 1 },
-    { id = "night_bell", name = "Night Bell", icon = "🔔", keywords = { "night bell" }, defaultPrio = 1 },
-    { id = "atomic_treat", name = "Atomic Treat", icon = "☢️", keywords = { "atomic treat" }, defaultPrio = 1 },
-    { id = "magic_bean", name = "Magic Bean", icon = "🌱", keywords = { "magic bean", "bean" }, defaultPrio = 1 },
-    { id = "glitter", name = "Glitter", icon = "✨", keywords = { "glitter" }, defaultPrio = 1 },
-    { id = "glue", name = "Glue", icon = "🧴", keywords = { "glue" }, defaultPrio = 1 },
-    { id = "enzymes", name = "Enzymes", icon = "🧪", keywords = { "enzymes", "enzyme" }, defaultPrio = 1 },
-    { id = "oil", name = "Oil", icon = "🛢️", keywords = { "oil" }, defaultPrio = 1 },
-    { id = "tropical_drink", name = "Tropical Drink", icon = "🍹", keywords = { "tropical drink", "tropical" }, defaultPrio = 1 },
-    { id = "micro_converter", name = "Micro-Converter", icon = "⚡", keywords = { "micro-converter", "converter" }, defaultPrio = 1 },
-    { id = "tickets", name = "Tickets", icon = "🎟️", keywords = { "ticket" }, defaultPrio = 1 },
-    { id = "stinger", name = "Stinger", icon = "🗡️", keywords = { "stinger" }, defaultPrio = 1 },
-    { id = "gumdrops", name = "Gumdrops", icon = "🍬", keywords = { "gumdrop", "gumdrops" }, defaultPrio = 2 },
-    { id = "moon_charm", name = "Moon Charm", icon = "🌙", keywords = { "moon charm" }, defaultPrio = 2 },
-    { id = "royal_jelly", name = "Royal Jelly", icon = "👑", keywords = { "royal jelly" }, defaultPrio = 2 },
-    { id = "dice_smoothie", name = "Field Dice / Smoothie", icon = "🎲", keywords = { "dice", "smoothie", "whirligig" }, defaultPrio = 2 },
-    { id = "berries", name = "Berries (Blue/Straw/Pine/Seed)", icon = "🍓", keywords = { "strawberry", "blueberry", "pineapple", "sunflower", "seed" }, defaultPrio = 2 },
-    { id = "bitter_neon", name = "Bitterberry & Neonberry", icon = "🫐", keywords = { "bitterberry", "neonberry" }, defaultPrio = 2 },
-    { id = "coconut", name = "Coconut", icon = "🥥", keywords = { "coconut" }, defaultPrio = 2 },
-    { id = "treats", name = "Treats (Печенья)", icon = "🍪", keywords = { "treat" }, defaultPrio = 3 },
-    { id = "festive", name = "Gingerbread / Snowflake", icon = "❄️", keywords = { "gingerbread", "snowflake", "festive" }, defaultPrio = 2 },
-    { id = "honey_tokens", name = "Honey Tokens (Жетоны мёда)", icon = "🍯", keywords = { "honey", "honeydrop", "honeytoken" }, defaultPrio = 0 },
-}
+-- Быстрое получение декалей без тяжёлого обхода дерева (O(1) для обычных токенов)
+local function getObjDecals(obj)
+    local decals = {}
+    if not obj then return decals end
+    local ok, children = pcall(function() return obj:GetChildren() end)
+    if not ok or not children then return decals end
+    for _, c in ipairs(children) do
+        if c:IsA("Decal") or c:IsA("Texture") then
+            decals[#decals + 1] = c
+        elseif c:IsA("BasePart") or c:IsA("Model") then
+            local okSub, subChildren = pcall(function() return c:GetChildren() end)
+            if okSub and subChildren then
+                for _, gc in ipairs(subChildren) do
+                    if gc:IsA("Decal") or gc:IsA("Texture") then
+                        decals[#decals + 1] = gc
+                    end
+                end
+            end
+        end
+    end
+    if #decals == 0 then
+        local okDesc, descs = pcall(function() return obj:GetDescendants() end)
+        if okDesc and descs then
+            for _, d in ipairs(descs) do
+                if d:IsA("Decal") or d:IsA("Texture") then
+                    decals[#decals + 1] = d
+                end
+            end
+        end
+    end
+    return decals
+end
 
 isBurstLootActive = false
 
@@ -5736,32 +5788,28 @@ function isTokenLink(obj)
     end
 
     local linkId = findTokenLinkTextureId()
-    local ok, descendants = pcall(function() return obj:GetDescendants() end)
-    if ok and descendants then
-        for _, d in ipairs(descendants) do
-            local dn = string.lower(tostring(d.Name or ""))
-            if string.find(dn, "token link", 1, true) or string.find(dn, "tokenlink", 1, true) or (string.find(dn, "link", 1, true) and not string.find(dn, "blink", 1, true)) then
+    local decals = getObjDecals(obj)
+    for _, d in ipairs(decals) do
+        local dn = string.lower(tostring(d.Name or ""))
+        if string.find(dn, "token link", 1, true) or string.find(dn, "tokenlink", 1, true) or (string.find(dn, "link", 1, true) and not string.find(dn, "blink", 1, true)) then
+            TOKEN_LINK_CACHE[obj] = true
+            return true
+        end
+        local tex = tostring(d.Texture or "")
+        local lowTex = string.lower(tex)
+        if string.find(lowTex, "link", 1, true) and not string.find(lowTex, "blink", 1, true) then
+            TOKEN_LINK_CACHE[obj] = true
+            return true
+        end
+        local id = string.match(tex, "%d+")
+        if id then
+            if linkId and id == linkId then
                 TOKEN_LINK_CACHE[obj] = true
                 return true
             end
-            if d:IsA("Decal") or d:IsA("Texture") then
-                local tex = tostring(d.Texture or "")
-                local lowTex = string.lower(tex)
-                if string.find(lowTex, "link", 1, true) and not string.find(lowTex, "blink", 1, true) then
-                    TOKEN_LINK_CACHE[obj] = true
-                    return true
-                end
-                local id = string.match(tex, "%d+")
-                if id then
-                    if linkId and id == linkId then
-                        TOKEN_LINK_CACHE[obj] = true
-                        return true
-                    end
-                    if TOKEN_TEXTURE_MAP[id] == "token_link" or TOKEN_TEXTURE_MAP[id] == "token link" then
-                        TOKEN_LINK_CACHE[obj] = true
-                        return true
-                    end
-                end
+            if TOKEN_TEXTURE_MAP[id] == "token_link" or TOKEN_TEXTURE_MAP[id] == "token link" then
+                TOKEN_LINK_CACHE[obj] = true
+                return true
             end
         end
     end
@@ -5838,49 +5886,46 @@ end
 
 function resolveTokenName(obj)
     if not obj then return "token" end
-    if isTokenLink(obj) then return "token_link" end
     local cached = TOKEN_NAME_CACHE[obj]
-    if cached and cached ~= "token" and cached ~= "cframe" and cached ~= "part" then
+    if cached ~= nil then
         return cached
+    end
+
+    if isTokenLink(obj) then
+        TOKEN_NAME_CACHE[obj] = "token_link"
+        return "token_link"
     end
 
     local name = tostring(obj.Name or "")
     local detectedName = nil
 
-    -- 1. Проверяем декали внутри токена по базе текстур BSS (через GetDescendants)
-    local okC, descendants = pcall(function() return obj:GetDescendants() end)
-    if okC and descendants then
-        for _, child in ipairs(descendants) do
-            if child:IsA("Decal") or child:IsA("Texture") then
-                local tex = tostring(child.Texture or "")
-                local lowTex = string.lower(tex)
-                local id = string.match(tex, "%d+")
-                if TOKEN_TEXTURE_MAP[lowTex] then
-                    detectedName = TOKEN_TEXTURE_MAP[lowTex]
-                    break
-                elseif id and TOKEN_TEXTURE_MAP[id] then
-                    detectedName = TOKEN_TEXTURE_MAP[id]
-                    break
-                elseif id and #id >= 6 then
-                    -- Мгновенно обновляем базу если попался неизвестный ID
-                    pcall(buildTokenTextureMap)
-                    if TOKEN_TEXTURE_MAP[id] then
-                        detectedName = TOKEN_TEXTURE_MAP[id]
-                        break
-                    end
-                end
-                local cName = string.lower(tostring(child.Name or ""))
-                if cName ~= "frontdecal" and cName ~= "backdecal" and cName ~= "decal" and cName ~= "" then
-                    for _, w in ipairs(TOKEN_P1) do
-                        if string.find(cName, w, 1, true) then detectedName = w; break end
-                    end
-                    if not detectedName then
-                        for _, w in ipairs(TOKEN_P2) do
-                            if string.find(cName, w, 1, true) then detectedName = w; break end
-                        end
-                    end
+    -- 1. Проверяем декали внутри токена по базе текстур BSS (через быстрый getObjDecals)
+    local decals = getObjDecals(obj)
+    for _, child in ipairs(decals) do
+        local tex = tostring(child.Texture or "")
+        local lowTex = string.lower(tex)
+        local id = string.match(tex, "%d+")
+        if TOKEN_TEXTURE_MAP[lowTex] then
+            detectedName = TOKEN_TEXTURE_MAP[lowTex]
+            break
+        elseif id and TOKEN_TEXTURE_MAP[id] then
+            detectedName = TOKEN_TEXTURE_MAP[id]
+            break
+        elseif id and ATLAS_PRIORITY_SPROUT_IDS[id] then
+            detectedName = "sprout_item"
+            break
+        end
+        local cName = string.lower(tostring(child.Name or ""))
+        if cName ~= "frontdecal" and cName ~= "backdecal" and cName ~= "decal" and cName ~= "" then
+            for _, w in ipairs(TOKEN_P1) do
+                if string.find(cName, w, 1, true) then detectedName = w; break end
+            end
+            if not detectedName then
+                for _, w in ipairs(TOKEN_P2) do
+                    if string.find(cName, w, 1, true) then detectedName = w; break end
                 end
             end
+            if detectedName then break end
         end
     end
 
@@ -5916,44 +5961,30 @@ function resolveTokenName(obj)
     end
 
     -- 4. Если токен имеет декаль, которая не мед и не абилка — это предмет!
-    if not detectedName and okC and descendants then
-        for _, child in ipairs(descendants) do
-            if child:IsA("Decal") or child:IsA("Texture") then
-                local tex = tostring(child.Texture or "")
-                if tex ~= "" and not isHoneyToken(tex) and not isAbilityToken(tex) then
-                    detectedName = "sprout_item"
-                    break
-                end
+    if not detectedName and #decals > 0 then
+        for _, child in ipairs(decals) do
+            local tex = tostring(child.Texture or "")
+            if tex ~= "" and not isHoneyToken(tex) and not isAbilityToken(tex) then
+                detectedName = "sprout_item"
+                break
             end
         end
     end
 
     local result = detectedName or (name ~= "" and name or "token")
-    if result ~= "token" and result ~= "cframe" and result ~= "part" then
-        TOKEN_NAME_CACHE[obj] = result
-    end
+    TOKEN_NAME_CACHE[obj] = result
     return result
 end
 
-local ATLAS_PRIORITY_SPROUT_IDS = {
-    ["1471848094"] = true, ["1471849394"] = true, ["1471850677"] = true, ["4520739302"] = true,
-    ["1987253833"] = true, ["1987257040"] = true, ["1987255318"] = true, ["6134473023"] = true,
-    ["8277780065"] = true, ["8277781666"] = true, ["8277783113"] = true, ["8310376128"] = true,
-    ["2319943273"] = true, ["2495935291"] = true, ["2495936060"] = true, ["4483267595"] = true,
-    ["4483236276"] = true, ["3030569073"] = true, ["2028603146"] = true, ["2545746569"] = true,
-    ["2529092020"] = true, ["2504978518"] = true, ["2584584968"] = true, ["2542899798"] = true,
-    ["8054996680"] = true, ["3027672238"] = true, ["6299503651"] = true, ["2306224708"] = true,
-    ["1674871631"] = true, ["2319083910"] = true, ["5877939956"] = true, ["2000457501"] = true,
-    ["1104415222"] = true, ["1472425802"] = true, ["1472580249"] = true, ["1472532912"] = true,
-    ["2032949183"] = true, ["1472491940"] = true, ["1489734171"] = true, ["1837410537"] = true,
-    ["2652364563"] = true, ["2652424740"] = true, ["6077288982"] = true,
-}
-
 function getTokenPriorityForObj(obj)
     if not obj then return 3 end
-    if isTokenLink(obj) then return 0 end
     local cached = TOKEN_PRIO_CACHE[obj]
-    if cached and cached ~= 3 then return cached end
+    if cached ~= nil then return cached end
+
+    if isTokenLink(obj) then
+        TOKEN_PRIO_CACHE[obj] = 0
+        return 0
+    end
 
     -- 1. Метод Atlas BSS: проверка спец-эффектов редкости (Spots, Rainbow, Sparkles)
     if obj:FindFirstChild("Spots") or obj:FindFirstChild("Rainbow") or obj:FindFirstChild("Sparkles") then
@@ -5962,25 +5993,19 @@ function getTokenPriorityForObj(obj)
     end
 
     -- 2. Метод Atlas BSS: проверка декалей токена по ID базы редких предметов
-    local okDesc, descs = pcall(function() return obj:GetDescendants() end)
-    if okDesc and descs then
-        for _, d in ipairs(descs) do
-            if d:IsA("Decal") or d:IsA("Texture") then
-                local tex = tostring(d.Texture or "")
-                local id = string.match(tex, "%d+")
-                if id and ATLAS_PRIORITY_SPROUT_IDS[id] then
-                    TOKEN_PRIO_CACHE[obj] = 1
-                    return 1
-                end
-            end
+    local decals = getObjDecals(obj)
+    for _, d in ipairs(decals) do
+        local tex = tostring(d.Texture or "")
+        local id = string.match(tex, "%d+")
+        if id and ATLAS_PRIORITY_SPROUT_IDS[id] then
+            TOKEN_PRIO_CACHE[obj] = 1
+            return 1
         end
     end
 
     local name = resolveTokenName(obj)
     local prio = tokenPriority(name)
-    if prio ~= 3 or name ~= "token" then
-        TOKEN_PRIO_CACHE[obj] = prio
-    end
+    TOKEN_PRIO_CACHE[obj] = prio
     return prio
 end
 
