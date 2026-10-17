@@ -288,6 +288,7 @@ local CONFIG = {
         gummy = true,
         epic = true,
         legendary = true,
+        supreme = true,
     },
     PLACE_ID = 1537690962,
 
@@ -4312,10 +4313,31 @@ end, "game.Close")
 -- ══════════════════════════════════════════════════════════════════════
 --  РАЗНОВИДНОСТИ СПРУТОВ
 -- ══════════════════════════════════════════════════════════════════════
-local RARITY_PRIORITY = { mythic=7, legendary=6, epic=5, gummy=4, rare=3, moon=2, basic=1, common=1, normal=1, unknown=1 }
+local RARITY_PRIORITY = {
+    supreme   = 8,
+    mythic    = 7,
+    festive   = 7,
+    legendary = 6,
+    epic      = 5,
+    gummy     = 4,
+    rare      = 3,
+    moon      = 2,
+    basic     = 1,
+    common    = 1,
+    normal    = 1,
+    unknown   = 1,
+}
 local RARITY_LABEL = {
-    gummy="🍬 Gummy", legendary="💠 Legendary", epic="🥇 Epic",
-    rare="🥈 Rare", basic="🌱 Basic", moon="🌙 Moon", common="⚪ Common",
+    supreme   = "👑 Supreme",
+    mythic    = "🌟 Mythic",
+    festive   = "🎄 Festive",
+    legendary = "💠 Legendary",
+    epic      = "🥇 Epic",
+    gummy     = "🍬 Gummy",
+    rare      = "🥈 Rare",
+    moon      = "🌙 Moon",
+    basic     = "🌱 Basic",
+    common    = "⚪ Common",
 }
 
 function hueOf(color)
@@ -4323,7 +4345,9 @@ function hueOf(color)
 end
 
 local RARITY_WORDS = {
+    { level="supreme",   words={"supreme"} },
     { level="mythic",    words={"mythic"} },
+    { level="festive",   words={"festive"} },
     { level="gummy",     words={"gummy"} },
     { level="legendary", words={"legendary"} },
     { level="epic",      words={"epic"} },
@@ -4345,7 +4369,9 @@ end
 function normalizeRarity(str)
     if not str then return "basic" end
     local s = string.lower(tostring(str))
+    if string.find(s, "supreme", 1, true) then return "supreme" end
     if string.find(s, "mythic", 1, true) then return "mythic" end
+    if string.find(s, "festive", 1, true) then return "festive" end
     if string.find(s, "legend", 1, true) then return "legendary" end
     if string.find(s, "epic", 1, true) then return "epic" end
     if string.find(s, "gummy", 1, true) then return "gummy" end
@@ -4386,75 +4412,137 @@ end
 
 function detectRarity(sprout)
     if not sprout then return nil, "no-object" end
+
+    -- 1. Проверка по имени самого объекта
     local ownName = string.lower(tostring(sprout.Name or ""))
     local own = matchWords(ownName)
     if own then return own, "own-name" end
 
+    -- 2. Проверка по тексту внутри TextLabel / GUI
     local okGui, descendants = pcall(function() return sprout:GetDescendants() end)
-    if okGui then
+    local maxPollenNum = 0
+    if okGui and descendants then
         for _, d in ipairs(descendants) do
             if d:IsA("TextLabel") or d:IsA("TextButton") then
                 local txt = string.lower(tostring(d.Text or ""))
                 local found = matchWords(txt)
-                if found and (string.find(txt,"sprout",1,true) or string.find(txt,"legendary",1,true)
-                    or string.find(txt,"common",1,true) or string.find(txt,"rare",1,true)
-                    or string.find(txt,"epic",1,true) or string.find(txt,"gummy",1,true)
-                    or string.find(txt,"moon",1,true)) then return found, "gui-explicit" end
+                if found and (string.find(txt, "sprout", 1, true) or string.find(txt, "supreme", 1, true)
+                    or string.find(txt, "legendary", 1, true) or string.find(txt, "common", 1, true)
+                    or string.find(txt, "rare", 1, true) or string.find(txt, "epic", 1, true)
+                    or string.find(txt, "gummy", 1, true) or string.find(txt, "moon", 1, true)) then
+                    return found, "gui-explicit"
+                end
+                local cleanDigits = string.gsub(txt, "[^%d]", "")
+                local pVal = tonumber(cleanDigits)
+                if pVal and pVal > maxPollenNum and pVal >= 50000 then
+                    maxPollenNum = pVal
+                end
             end
         end
     end
 
+    -- 3. Проверка по атрибутам модели
     local okAttr, attrs = pcall(function() return sprout:GetAttributes() end)
-    if okAttr then
+    if okAttr and attrs then
         for k, v in pairs(attrs) do
             local key = string.lower(tostring(k))
-            if key=="rarity" or key=="sprouttype" or key=="sproutrarity" then
+            if key == "rarity" or key == "sprouttype" or key == "sproutrarity" or key == "type" then
                 local found = matchWords(tostring(v))
-                if found then return found, "attribute:"..key end
+                if found then return found, "attribute:" .. key end
             end
         end
     end
 
+    -- Собираем все BasePart детали ростка
     local parts = {}
     if sprout:IsA("BasePart") then table.insert(parts, sprout) end
-    if okGui then
+    if okGui and descendants then
         for _, d in ipairs(descendants) do
             if d:IsA("BasePart") then table.insert(parts, d) end
         end
     end
 
-    local rate = sproutSparklesRate(sprout)
     local hasGlow = sproutHasGlow(sprout)
 
+    -- 4. ВЫСШИЙ ПРИОРИТЕТ: СВЕТЯЩИЕСЯ NEON РОСТКИ (В BSS СВЕТЯТСЯ ТОЛЬКО ДВА: SUPREME И MOON!)
+    -- Supreme = Люминесцентный зеленый Neon.
+    -- Moon = Люминесцентный синий/голубой Neon.
     for _, part in ipairs(parts) do
-        local h = hueOf(part.Color); local deg = h * 360
-        if part.Material == Enum.Material.Neon and deg >= 190 and deg <= 230 and rate then
-            if rate <= 20 then return "moon", "sig:moon" end
-            if rate >= 80 then return "legendary", "sig:legendary" end
+        local isNeon = (part.Material == Enum.Material.Neon)
+        if isNeon or hasGlow then
+            local h, sat, val = hueOf(part.Color)
+            local deg = h * 360
+
+            -- 👑 Supreme Sprout: яркий неоновый зеленый (80° - 155°)
+            if deg >= 80 and deg <= 155 and sat >= 0.28 and val >= 0.40 then
+                return "supreme", "sig:supreme-neon"
+            end
+
+            -- 🌙 Moon Sprout: яркий неоновый синий/голубой (180° - 245°)
+            if isNeon and deg >= 180 and deg <= 245 and sat >= 0.28 and val >= 0.40 then
+                return "moon", "sig:moon-neon"
+            end
         end
     end
 
+    -- 5. ЦВЕТНЫЕ РОСТКИ БЕЗ НЕОНА (GUMMY, LEGENDARY, EPIC, RARE)
     for _, part in ipairs(parts) do
-        local h, sat, val = hueOf(part.Color); local deg = h * 360
+        local h, sat, val = hueOf(part.Color)
+        local deg = h * 360
         local r, g, b = part.Color.R, part.Color.G, part.Color.B
-        local isGrey = math.abs(r-g)<0.06 and math.abs(g-b)<0.06
-        if part.Material == Enum.Material.Glass and deg >= 285 and deg <= 350
-            and sat >= 0.48 and val >= 0.35 then return "gummy", "sig:gummy" end
-        if part.Material == Enum.Material.Glass and deg >= 28 and deg <= 62
-            and sat > 0.40 and val >= 0.25 then return "epic", "sig:epic" end
-        if isGrey and sat < 0.18 and val >= 0.55 and val <= 0.92
-            and part.Material == Enum.Material.Glass then return "rare", "sig:rare" end
+        local isGrey = math.abs(r - g) < 0.08 and math.abs(g - b) < 0.08
+
+        -- 🍬 Gummy Sprout: прозрачный/полупрозрачный розовый/маджента (280° - 350°)
+        if (part.Material == Enum.Material.Glass or part.Transparency > 0)
+            and deg >= 280 and deg <= 350 and sat >= 0.42 and val >= 0.35 then
+            return "gummy", "sig:gummy"
+        end
+
+        -- 💠 Legendary Sprout: бирюзовый/циан (160° - 198°), SmoothPlastic / Glass, СТРОГО НЕ NEON!
+        if part.Material ~= Enum.Material.Neon and deg >= 160 and deg <= 198 and sat >= 0.25 and val >= 0.25 then
+            return "legendary", "sig:legendary-teal"
+        end
+
+        -- 🥇 Epic Sprout: золотой/желтый (25° - 68°)
+        if deg >= 25 and deg <= 68 and sat >= 0.35 and val >= 0.25 and not isGrey then
+            return "epic", "sig:epic"
+        end
+
+        -- 🥈 Rare Sprout: серебристый/серый (низкая насыщенность)
+        if isGrey and sat < 0.20 and val >= 0.48 and val <= 0.95 then
+            return "rare", "sig:rare"
+        end
     end
 
+    -- 6. ПРОВЕРКА ПО ПЫЛЬЦЕ (ЕСЛИ ЦВЕТ ЕЩЁ НЕ ПОДГРУЗИЛСЯ)
+    if maxPollenNum >= 14000000 then
+        -- 14M+ бывает ТОЛЬКО у Supreme (15M-750M) и Legendary (10M-500M)
+        for _, part in ipairs(parts) do
+            local h = hueOf(part.Color)
+            local deg = h * 360
+            if deg >= 75 and deg <= 155 then
+                return "supreme", "sig:supreme-pollen"
+            end
+            if deg >= 160 and deg <= 200 then
+                return "legendary", "sig:legendary-pollen"
+            end
+        end
+    end
+
+    -- 7. ОБЫЧНЫЙ РОСТОК (Common / Basic)
+    -- Зеленый пластик, без неона, без свечения
     for _, part in ipairs(parts) do
-        local _, _, val = hueOf(part.Color)
+        local h, sat, val = hueOf(part.Color)
+        local deg = h * 360
         local r, g, b = part.Color.R, part.Color.G, part.Color.B
-        local knownCommon = math.abs(r-0.706)<=0.055 and math.abs(g-0.745)<=0.055 and math.abs(b-0.729)<=0.055
-        local paleGreen = part.Material == Enum.Material.Plastic
-            and g >= r and g >= b and (g-r) >= 0.015
-            and (g-b) >= 0.005 and val >= 0.55 and val <= 0.90
-        if part.Material == Enum.Material.Plastic and knownCommon and not hasGlow then return "basic", "sig:common-rgb" end
-        if paleGreen and not hasGlow then return "basic", "sig:common-pale" end
+        local knownCommon = math.abs(r - 0.706) <= 0.065 and math.abs(g - 0.745) <= 0.065 and math.abs(b - 0.729) <= 0.065
+        local paleGreen = (part.Material == Enum.Material.Plastic or part.Material == Enum.Material.SmoothPlastic)
+            and g >= r and g >= b and (g - r) >= 0.012 and val >= 0.45 and val <= 0.95
+        if not hasGlow and part.Material ~= Enum.Material.Neon then
+            if knownCommon or paleGreen or (deg >= 75 and deg <= 150 and sat < 0.55) then
+                return "basic", "sig:common"
+            end
+        end
     end
 
     return nil, "unconfirmed"
@@ -6858,15 +6946,15 @@ function Searcher:Start()
 
                 if sprout then
                     local rarity = detectRarity(sprout)
+                    if not rarity then
+                        task.wait(0.15)
+                        rarity = detectRarity(sprout)
+                    end
                     local fieldName = detectField(sprout)
-                    if rarity then
-                        s.currentStatus = "Репортую " .. (RARITY_LABEL[rarity] or rarity)
-                        if self:report(game.JobId, rarity, fieldName) then
-                            s.lastSprout = { fieldName = (RARITY_LABEL[rarity] or rarity).." @ "..tostring(fieldName or "?") }
-                        end
-                    else
-                        s.currentStatus = "Репортую Common"
-                        self:report(game.JobId, "common", fieldName)
+                    local repRarity = rarity or "basic"
+                    s.currentStatus = "Репортую " .. (RARITY_LABEL[repRarity] or repRarity)
+                    if self:report(game.JobId, repRarity, fieldName) then
+                        s.lastSprout = { fieldName = (RARITY_LABEL[repRarity] or repRarity).." @ "..tostring(fieldName or "?") }
                     end
                     task.wait(0.2)
                     hopRandom()
@@ -8833,24 +8921,28 @@ new("UIListLayout", {
 
 section("ВЫБОР РЕДКОСТЕЙ РОСТКОВ ДЛЯ ФАРМА (ВКЛ / ВЫКЛ)", 1).Parent = PAGE_SPROUTS
 
-local sproutRarityOrder = { "basic", "moon", "rare", "gummy", "epic", "legendary" }
+local sproutRarityOrder = { "basic", "moon", "rare", "gummy", "epic", "legendary", "supreme" }
 local sproutRarityLabels = {
     moon="Moon", basic="Common", rare="Rare", epic="Epic",
-    legendary="Legendary", gummy="Gummy",
+    legendary="Legendary", gummy="Gummy", supreme="Supreme",
 }
 local sproutRarityColors = {
     moon=Color3.fromRGB(105,190,255), basic=Color3.fromRGB(130,220,135),
     rare=Color3.fromRGB(190,200,210), epic=Color3.fromRGB(255,195,70),
     legendary=Color3.fromRGB(75,220,205), gummy=Color3.fromRGB(255,115,220),
+    supreme=Color3.fromRGB(60,255,140),
 }
 if not CONFIG.ALLOWED_SPROUT_RARITIES or type(CONFIG.ALLOWED_SPROUT_RARITIES) ~= "table" then
     CONFIG.ALLOWED_SPROUT_RARITIES = {
-        basic = true, moon = true, rare = true, gummy = true, epic = true, legendary = true,
+        basic = true, moon = true, rare = true, gummy = true, epic = true, legendary = true, supreme = true,
     }
+end
+if CONFIG.ALLOWED_SPROUT_RARITIES.supreme == nil then
+    CONFIG.ALLOWED_SPROUT_RARITIES.supreme = true
 end
 
 local sproutRarityRow = new("Frame", {
-    Size = UDim2.new(1, 0, 0, 70), BackgroundTransparency = 1,
+    Size = UDim2.new(1, 0, 0, 76), BackgroundTransparency = 1,
     LayoutOrder = 2, Parent = PAGE_SPROUTS,
 })
 new("UIGridLayout", {
