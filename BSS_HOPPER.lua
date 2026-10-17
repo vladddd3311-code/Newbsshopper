@@ -2395,7 +2395,7 @@ function getPlanterProgress(model)
     local timeLeftStr = nil
     local isFullyReady = false
 
-    -- 0. Метод Atlas BSS: NumberValue "GrowthPercent" (1.0 = 100%)
+    -- 0. Метод Atlas BSS: ValueObject "GrowthPercent" (1.0 = 100%)
     local growthVal = model:FindFirstChild("GrowthPercent")
     if growthVal then
         local rawVal = nil
@@ -2405,8 +2405,9 @@ function getPlanterProgress(model)
             rawVal = growthVal.Value
         end
         if type(rawVal) == "number" then
-            percent = (rawVal <= 1.0001 and rawVal >= 0) and (rawVal * 100) or rawVal
-            if rawVal >= 1 or percent >= 100 then
+            local p = (rawVal <= 1.0001 and rawVal >= 0) and (rawVal * 100) or rawVal
+            percent = p
+            if p >= 99.9 or rawVal >= 1 then
                 isFullyReady = true
                 percent = 100
                 timeLeftStr = "Ready!"
@@ -2416,94 +2417,93 @@ function getPlanterProgress(model)
 
     -- 1. Метод Atlas BSS: Gui Attach -> Planter Gui -> Bar -> TextLabel
     local guiAttach = model:FindFirstChild("Gui Attach")
-    if guiAttach then
-        local pGui = guiAttach:FindFirstChild("Planter Gui")
-        local bar = pGui and pGui:FindFirstChild("Bar")
-        local txtLbl = bar and bar:FindFirstChild("TextLabel")
-        if txtLbl and txtLbl.Text and txtLbl.Text ~= "" then
-            local txt = txtLbl.Text
-            local low = string.lower(txt)
-            local pMatch = string.match(txt, "%((%d+%.?%d*)%%%s*%)") or string.match(txt, "(%d+%.?%d*)%%")
-            if pMatch then
-                local num = tonumber(pMatch)
-                if num then
-                    percent = percent or num
-                    if num >= 100 then
-                        isFullyReady = true
-                        percent = 100
-                    end
+    local pGui = guiAttach and guiAttach:FindFirstChild("Planter Gui")
+    local bar = pGui and pGui:FindFirstChild("Bar")
+    local txtLbl = bar and bar:FindFirstChild("TextLabel")
+    if txtLbl and txtLbl.Text and txtLbl.Text ~= "" then
+        local txt = txtLbl.Text
+        local low = string.lower(txt)
+        local pMatch = string.match(txt, "%((%d+%.?%d*)%%%s*%)") or string.match(txt, "(%d+%.?%d*)%%")
+        if pMatch then
+            local num = tonumber(pMatch)
+            if num then
+                percent = num
+                if num >= 100 then
+                    isFullyReady = true
+                    percent = 100
+                    timeLeftStr = "Ready!"
+                else
+                    isFullyReady = false
                 end
             end
-            if string.find(low, "ready", 1, true) and not string.find(low, "ready in", 1, true) and not string.find(low, "not ready", 1, true) then
-                isFullyReady = true
-                percent = 100
-                timeLeftStr = "Ready!"
-            elseif string.find(low, "left", 1, true) or string.find(txt, ":", 1, true) or string.find(low, "ready in", 1, true) then
-                timeLeftStr = timeLeftStr or txt
-            end
+        end
+
+        if string.find(low, "ready to harvest", 1, true) or string.find(low, "harvest!", 1, true)
+           or (string.find(low, "ready", 1, true) and not string.find(low, "ready in", 1, true) and not string.find(low, "not ready", 1, true) and not string.find(low, "grow", 1, true)) then
+            isFullyReady = true
+            percent = 100
+            timeLeftStr = "Ready!"
+        elseif string.find(low, "left", 1, true) or string.find(txt, ":", 1, true) or string.find(low, "ready in", 1, true) then
+            timeLeftStr = timeLeftStr or txt
         end
     end
 
     -- 2. Проверка атрибутов модели
-    local attrPct = model:GetAttribute("Progress") or model:GetAttribute("Growth") or model:GetAttribute("Percent")
-    if type(attrPct) == "number" then
-        local p = (attrPct <= 1.05 and attrPct > 0) and (attrPct * 100) or attrPct
-        percent = percent or p
-        if p >= 100 then isFullyReady = true end
+    if percent == nil then
+        local attrPct = model:GetAttribute("Progress") or model:GetAttribute("Growth") or model:GetAttribute("Percent")
+        if type(attrPct) == "number" then
+            local p = (attrPct <= 1.05 and attrPct > 0) and (attrPct * 100) or attrPct
+            percent = p
+            if p >= 99.9 then
+                isFullyReady = true
+                percent = 100
+                timeLeftStr = "Ready!"
+            end
+        end
     end
     local attrTime = model:GetAttribute("TimeLeft") or model:GetAttribute("Remaining") or model:GetAttribute("Duration")
     if attrTime and not timeLeftStr then timeLeftStr = tostring(attrTime) end
 
-    -- 3. Резервный поиск по потомкам
-    if not percent or not isFullyReady then
+    -- 3. Резервный поиск по потомкам (ТОЛЬКО парсинг явных процентов и надписей, БЕЗ ошибочного детекта по размеру контейнера Bar)
+    if percent == nil then
         for _, desc in ipairs(model:GetDescendants()) do
             if desc:IsA("TextLabel") then
                 local txt = desc.Text or ""
                 local low = string.lower(txt)
-
                 local pMatch = string.match(txt, "(%d+%.?%d*)%%")
                 if pMatch then
                     local num = tonumber(pMatch)
                     if num then
-                        percent = percent or num
-                        if num >= 100 then isFullyReady = true end
+                        percent = num
+                        if num >= 100 then
+                            isFullyReady = true
+                            percent = 100
+                            timeLeftStr = "Ready!"
+                        end
+                        break
                     end
                 end
-
-                if string.find(low, "left", 1, true) or string.find(txt, ":", 1, true) or string.find(low, "ready in", 1, true) then
-                    timeLeftStr = timeLeftStr or txt
-                end
-
-                if string.find(low, "ready to harvest", 1, true)
-                   or string.find(low, "harvest!", 1, true)
-                   or string.find(low, "0s left", 1, true)
-                   or (string.find(low, "ready", 1, true) and not string.find(low, "ready in", 1, true) and not string.find(low, "not ready", 1, true) and not string.find(low, "grow", 1, true)) then
-                    if not percent or percent >= 95 then
-                        isFullyReady = true
-                    end
-                end
-            elseif desc:IsA("Frame") and (desc.Name == "Bar" or desc.Name == "Progress" or desc.Name == "Fill") then
-                if desc.Size.X.Scale > 0 and desc.Size.X.Scale <= 1 then
-                    if not percent then percent = desc.Size.X.Scale * 100 end
-                    if desc.Size.X.Scale >= 1 then isFullyReady = true end
+                if string.find(low, "ready to harvest", 1, true) or string.find(low, "harvest!", 1, true) then
+                    isFullyReady = true
+                    percent = 100
+                    timeLeftStr = "Ready!"
+                    break
                 end
             end
         end
     end
 
-    if isFullyReady then
-        if not percent or percent >= 95 or percent == 100 then
-            percent = 100
-            timeLeftStr = "Ready!"
-        else
-            isFullyReady = false
-        end
+    -- Если процент так и не определен или меньше 100 — плантатор НЕ готов!
+    percent = percent or 0
+    if percent < 100 then
+        isFullyReady = false
     end
 
-    percent = percent or 0
     local statusStr
-    if timeLeftStr and timeLeftStr ~= "" then
-        statusStr = timeLeftStr
+    if isFullyReady then
+        statusStr = "Ready!"
+    elseif timeLeftStr and timeLeftStr ~= "" then
+        statusStr = string.format("%.1f%% (%s)", percent, timeLeftStr)
     else
         statusStr = string.format("%.1f%%", percent)
     end
@@ -2776,6 +2776,22 @@ function confirmPlanterHarvestModal()
         local qBox = screenGui:FindFirstChild("QuestionBox")
         if qBox and qBox.Visible then
             local box = qBox:FindFirstChild("Box")
+            local descLbl = box and (box:FindFirstChildWhichIsA("TextLabel") or qBox:FindFirstChildWhichIsA("TextLabel"))
+            local dText = string.lower(descLbl and descLbl.Text or "")
+            local isEarlyWarning = string.find(dText, "still growing", 1, true)
+                or string.find(dText, "before it", 1, true)
+                or string.find(dText, "not ready", 1, true)
+            if isEarlyWarning then
+                log("Плантатор", "⚠️ Плантатор ещё не созрел! Закрываю диалог (нажимаю No)...")
+                local noBtn = box and (box:FindFirstChild("NoButton") or box:FindFirstChild("No") or box:FindFirstChild("Cancel"))
+                if noBtn then
+                    pcall(function()
+                        if type(firesignal) == "function" then firesignal(noBtn.MouseButton1Click); firesignal(noBtn.Activated) end
+                    end)
+                end
+                return false
+            end
+
             local yesBtn = box and (box:FindFirstChild("YesButton") or box:FindFirstChild("Yes"))
             if yesBtn then
                 log("Плантатор", "🟢 [Atlas] Нажата каноническая кнопка QuestionBox.Box.YesButton!")
@@ -2823,10 +2839,30 @@ function confirmPlanterHarvestModal()
     for _, desc in ipairs(pg:GetDescendants()) do
         if desc:IsA("TextLabel") or desc:IsA("TextButton") then
             local t = string.lower(desc.Text or "")
-            local isPlanterModal = (
-                (string.find(t, "harvest", 1, true) and (string.find(t, "planter", 1, true) or string.find(t, "growing", 1, true) or string.find(t, "before", 1, true) or string.find(t, "it's", 1, true)))
-                or string.find(t, "done growing", 1, true)
+            local isEarlyWarning = string.find(t, "still growing", 1, true)
                 or string.find(t, "before it", 1, true)
+                or string.find(t, "not ready", 1, true)
+            if isEarlyWarning then
+                log("Плантатор", "⚠️ Плантатор ещё растёт! Закрываю диалог сбора...")
+                local dialogContainer = desc.Parent
+                if dialogContainer then
+                    for _, elem in ipairs(dialogContainer:GetDescendants()) do
+                        if elem:IsA("TextButton") or elem:IsA("ImageButton") then
+                            local eTxt = string.lower(elem.Text or "")
+                            local eName = string.lower(elem.Name or "")
+                            if eTxt == "no" or eName == "no" or string.find(eTxt, "no", 1, true) or string.find(eTxt, "cancel", 1, true) then
+                                pcall(function() if type(firesignal) == "function" then firesignal(elem.MouseButton1Click); firesignal(elem.Activated) end end)
+                                break
+                            end
+                        end
+                    end
+                end
+                return false
+            end
+
+            local isPlanterModal = (
+                (string.find(t, "harvest", 1, true) and (string.find(t, "planter", 1, true) or string.find(t, "done", 1, true)))
+                or string.find(t, "done growing", 1, true)
                 or (string.find(t, "harvest the", 1, true) and string.find(t, "planter", 1, true))
                 or (string.find(t, "claim", 1, true) and string.find(t, "planter", 1, true))
             )
@@ -3161,16 +3197,16 @@ function managePlanters()
         end
     end
 
-    -- 2. Авто-посадка: ТОЛЬКО если плантатор включен пользователем (enabled == true),
-    -- и его НЕТ на полях (not activeTypes[pType])!
-    if CONFIG.PLANTERS_CONFIG then
+    -- 2. Авто-посадка: ТОЛЬКО если был произведен сбор плантатора (harvestedAny == true)!
+    -- НЕ летаем по полям сажать плантаторы при обычной проверке!
+    if harvestedAny and CONFIG.PLANTERS_CONFIG then
         for pType, pCfg in pairs(CONFIG.PLANTERS_CONFIG) do
             if pCfg and pCfg.enabled == true and not activeTypes[pType] and pCfg.field and pCfg.field ~= "" then
                 local fieldPart = getFieldPart(pCfg.field)
                 local root = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
                 if fieldPart and root and alive() then
                     local targetPos = getGroundPos(fieldPart.Position)
-                    log("Плантатор", string.format("🌱 Плантатора %s нет на полях! Сажаю на поле %s...", pType, pCfg.field))
+                    log("Плантатор", string.format("🌱 Плантатор %s только что собран! Сажаю заново на поле %s...", pType, pCfg.field))
                     moveRootToPosition(root, targetPos, 4)
                     task.wait(0.5)
 
@@ -3680,7 +3716,7 @@ end
 
 local function robustHttpGet(url)
     local req = (syn and syn.request) or (http and http.request) or http_request or request
-    if req then
+    if type(req) == "function" then
         local ok, res = pcall(function()
             return req({
                 Url = url,
@@ -3691,15 +3727,21 @@ local function robustHttpGet(url)
                 },
             })
         end)
-        if ok and res and (res.StatusCode == 200 or res.Status == 200) and res.Body and res.Body ~= "" then
-            return res.Body
+        if ok and res then
+            local status = tonumber(res.StatusCode or res.Status or res.status_code) or 0
+            local body = tostring(res.Body or res.body or res.data or "")
+            if status >= 200 and status < 300 and body ~= "" then
+                return body, status
+            elseif body ~= "" then
+                return body, status
+            end
         end
     end
     local ok, res = pcall(function() return game:HttpGet(url) end)
     if ok and res and res ~= "" then
-        return res
+        return tostring(res), 200
     end
-    return nil
+    return nil, 0
 end
 
 function getServerList(cursor)
@@ -6816,9 +6858,9 @@ local localVisitedTasks = {}
 local function isTaskVisited(jobId)
     if not jobId or jobId == "" then return true end
     if jobId == game.JobId then return true end
-    if isFailed(jobId) then return true end
+    if failedServers[jobId] and (os.clock() - failedServers[jobId] < 30) then return true end
     local t = localVisitedTasks[jobId]
-    if t and (os.clock() - t < 180) then return true end
+    if t and (os.clock() - t < 45) then return true end
     return false
 end
 
@@ -6962,31 +7004,38 @@ function Looter:harvest()
     return true
 end
 
-function Looter:fetchNextVicious()
-    -- 1. Сначала опрашиваем /vicious-next (забирает задачу из очереди)
-    local ok, res = pcall(function()
-        return game:HttpGet(CONFIG.API_URL .. "/vicious-next?apiKey=" .. CONFIG.API_KEY)
-    end)
-    if ok and res then
-        local ok2, data = pcall(function() return HttpService:JSONDecode(res) end)
-        if ok2 and data and not data.empty and data.jobId then
-            local jid = tostring(data.jobId)
-            local age = tonumber(data.age) or 0
-            if age <= 120 and not isTaskVisited(jid) then
-                data.isVicious = true
-                return data, nil
-            end
-        end
-    end
+local function makeApiUrl(path)
+    local base = string.gsub(CONFIG.API_URL or "https://hopper-bss-production.up.railway.app", "/+$", "")
+    local key = CONFIG.API_KEY or ""
+    local sep = string.find(path, "?", 1, true) and "&" or "?"
+    return string.format("%s%s%sapiKey=%s", base, path, sep, key)
+end
 
-    -- 2. Сканируем всю очередь /vicious-queue за последние 2 минуты (120 секунд)
-    local okQ, resQ = pcall(function()
-        return game:HttpGet(CONFIG.API_URL .. "/vicious-queue?apiKey=" .. CONFIG.API_KEY)
-    end)
-    if okQ and resQ then
-        local okDec, qData = pcall(function() return HttpService:JSONDecode(resQ) end)
-        if okDec and qData and qData.queue and #qData.queue > 0 then
-            for _, t in ipairs(qData.queue) do
+local function apiGet(path)
+    local url = makeApiUrl(path)
+    local raw, status = robustHttpGet(url)
+    if not raw or raw == "" then
+        return nil, "нет связи с сервером"
+    end
+    local okDec, data = pcall(function() return HttpService:JSONDecode(raw) end)
+    if not okDec or type(data) ~= "table" then
+        return nil, "некорректный ответ"
+    end
+    if data.status == "error" or data.error then
+        return nil, tostring(data.message or data.error or "ошибка API")
+    end
+    return data, nil
+end
+
+function Looter:fetchNextVicious()
+    local lastErr = nil
+
+    -- 1. Сканируем всю очередь /vicious-queue за последние 2 минуты (120 секунд)
+    local qData, qErr = apiGet("/vicious-queue")
+    if qData then
+        local qList = (type(qData) == "table" and (qData.queue or (qData[1] and qData))) or nil
+        if qList and type(qList) == "table" and #qList > 0 then
+            for _, t in ipairs(qList) do
                 local jid = tostring(t.jobId or "")
                 local age = tonumber(t.age) or 0
                 if jid ~= "" and age <= 120 and not isTaskVisited(jid) then
@@ -7002,38 +7051,35 @@ function Looter:fetchNextVicious()
                 end
             end
         end
+    else
+        lastErr = qErr
     end
 
-    return nil, nil
+    -- 2. Опрашиваем /vicious-next
+    local nData, nErr = apiGet("/vicious-next")
+    if nData and not nData.empty and nData.jobId then
+        local jid = tostring(nData.jobId)
+        local age = tonumber(nData.age) or 0
+        if age <= 120 and not isTaskVisited(jid) then
+            nData.isVicious = true
+            return nData, nil
+        end
+    elseif not lastErr then
+        lastErr = nErr
+    end
+
+    return nil, lastErr
 end
 
 function Looter:fetchNext()
-    -- 1. Сначала опрашиваем /next (забирает задачу из очереди)
-    local ok, res = pcall(function()
-        return game:HttpGet(CONFIG.API_URL .. "/next?apiKey=" .. CONFIG.API_KEY)
-    end)
-    if ok and res then
-        local ok2, data = pcall(function() return HttpService:JSONDecode(res) end)
-        if ok2 and data and not data.empty and data.jobId then
-            local jid = tostring(data.jobId)
-            local age = tonumber(data.age) or 0
-            local taskRarity = string.lower(tostring(data.level or "basic"))
-            if taskRarity == "common" or taskRarity == "normal" then taskRarity = "basic" end
-            local isRarityAllowed = not CONFIG.ALLOWED_SPROUT_RARITIES or (CONFIG.ALLOWED_SPROUT_RARITIES[taskRarity] ~= false)
-            if age <= 240 and not isTaskVisited(jid) and isRarityAllowed then
-                return data, nil
-            end
-        end
-    end
+    local lastErr = nil
 
-    -- 2. Сканируем всю очередь /queue за последние 4 минуты (240 секунд)
-    local okQ, resQ = pcall(function()
-        return game:HttpGet(CONFIG.API_URL .. "/queue?apiKey=" .. CONFIG.API_KEY)
-    end)
-    if okQ and resQ then
-        local okDec, qData = pcall(function() return HttpService:JSONDecode(resQ) end)
-        if okDec and qData and qData.queue and #qData.queue > 0 then
-            for _, t in ipairs(qData.queue) do
+    -- 1. Сначала сканируем всю очередь /queue за последние 4 минуты (240 секунд)
+    local qData, qErr = apiGet("/queue")
+    if qData then
+        local qList = (type(qData) == "table" and (qData.queue or (qData[1] and qData))) or nil
+        if qList and type(qList) == "table" and #qList > 0 then
+            for _, t in ipairs(qList) do
                 local jid = tostring(t.jobId or "")
                 local age = tonumber(t.age) or 0
                 if jid ~= "" and age <= 240 and not isTaskVisited(jid) then
@@ -7052,9 +7098,26 @@ function Looter:fetchNext()
                 end
             end
         end
+    else
+        lastErr = qErr
     end
 
-    return nil, nil
+    -- 2. Если в /queue ничего не подошло — опрашиваем /next
+    local nData, nErr = apiGet("/next")
+    if nData and not nData.empty and nData.jobId then
+        local jid = tostring(nData.jobId)
+        local age = tonumber(nData.age) or 0
+        local taskRarity = string.lower(tostring(nData.level or "basic"))
+        if taskRarity == "common" or taskRarity == "normal" then taskRarity = "basic" end
+        local isRarityAllowed = not CONFIG.ALLOWED_SPROUT_RARITIES or (CONFIG.ALLOWED_SPROUT_RARITIES[taskRarity] ~= false)
+        if age <= 240 and not isTaskVisited(jid) and isRarityAllowed then
+            return nData, nil
+        end
+    elseif not lastErr then
+        lastErr = nErr
+    end
+
+    return nil, lastErr
 end
 
 function Looter:returnTask(taskData, reason)
@@ -7078,7 +7141,7 @@ function Looter:returnTask(taskData, reason)
             searcherTag=CONFIG.SELF_TAG,
         })
     end
-    pcall(function() return game:HttpPost(CONFIG.API_URL .. endpoint, body, "application/json") end)
+    pcall(function() return postJson(endpoint, body) end)
     return true
 end
 
@@ -7329,7 +7392,11 @@ function Looter:Start()
                 end
 
                 -- Лутающий ждёт задач от ищущих! НЕ прыгает на случайные серверы сам!
-                s.currentStatus = "Ожидание задач от ищущих (опрос очереди)..."
+                if skipReason and skipReason ~= "" then
+                    s.currentStatus = "Ожидание задач (" .. tostring(skipReason) .. ")..."
+                else
+                    s.currentStatus = "Ожидание задач от ищущих (опрос очереди)..."
+                end
                 task.wait(1)
             end)
             if not ok then
@@ -7424,11 +7491,6 @@ function Solo:Start()
                 end
                 local windy = CONFIG.CHECK_WINDY and findWindyBee() or nil
                 local meteors = CONFIG.CHECK_METEORS and findActiveMeteors() or nil
-
-                -- Проверяем и собираем спелые плантаторы перед уходом
-                if CONFIG.AUTO_HARVEST_PLANTERS ~= false then
-                    pcall(managePlanters)
-                end
 
                 -- Если целей нет — улей не ставим, переходим на другой сервер мгновенно!
                 if not vicious and not sprout and not puffRoot and not windy and not meteors then
