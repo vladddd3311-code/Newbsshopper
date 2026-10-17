@@ -1909,8 +1909,10 @@ function fightWindyBee(windy)
             for _, part in ipairs(char:GetDescendants()) do
                 if part:IsA("BasePart") then
                     local n = part.Name
-                    if n == "HumanoidRootPart" or n == "Head" or n == "Torso" or n == "UpperTorso" or n == "LowerTorso" then
+                    if n == "Head" or n == "Torso" or n == "UpperTorso" or n == "LowerTorso" then
                         part.CanCollide = true
+                    else
+                        part.CanCollide = false
                     end
                 end
             end
@@ -1929,9 +1931,12 @@ function fightWindyBee(windy)
         if curPos then
             local flatDelta = Vector3.new(curPos.X - r.Position.X, 0, curPos.Z - r.Position.Z)
             if flatDelta.Magnitude <= 8 then
+                pcall(function() h:Move(Vector3.zero, false) end)
                 log("Windy", string.format("✅ Добежали под Windy Bee (расстояние %.1f studs)! Взлетаю над ней...", flatDelta.Magnitude))
                 break
             end
+            h.AutoRotate = true
+            h:Move(flatDelta.Unit, false)
             h:MoveTo(Vector3.new(curPos.X, r.Position.Y, curPos.Z))
         end
         pcall(swingDigTool)
@@ -5436,7 +5441,8 @@ function getActiveFlowerZone(anchorPos)
         if zone:IsA("BasePart") then
             local lp = zone.CFrame:PointToObjectSpace(pos)
             local half = zone.Size * 0.5
-            if math.abs(lp.X) <= half.X + 25 and math.abs(lp.Z) <= half.Z + 25 then
+            local yDiff = math.abs(zone.Position.Y - pos.Y)
+            if yDiff <= 45 and math.abs(lp.X) <= half.X + 25 and math.abs(lp.Z) <= half.Z + 25 then
                 return zone
             end
             local d = (zone.Position - pos).Magnitude
@@ -5587,14 +5593,16 @@ collectTokensFor = function(maxSeconds, stopFn, fieldAnchor)
         end
         -- Принудительно выставляем скорость бега, чтобы персонаж БЕЖАЛ а не стоял
         pcall(applyWalkSpeed)
-        -- Восстанавливаем коллизии на основных частях тела (после полета они могут быть выключены)
+        -- Восстанавливаем коллизии на основных частях тела (HumanoidRootPart ОБЯЗАН быть CanCollide = false)
         if initialChar then
             pcall(function()
                 for _, part in ipairs(initialChar:GetDescendants()) do
                     if part:IsA("BasePart") then
                         local n = part.Name
-                        if n == "HumanoidRootPart" or n == "Head" or n == "Torso" or n == "UpperTorso" or n == "LowerTorso" then
+                        if n == "Head" or n == "Torso" or n == "UpperTorso" or n == "LowerTorso" then
                             part.CanCollide = true
+                        else
+                            part.CanCollide = false
                         end
                     end
                 end
@@ -5791,32 +5799,32 @@ collectTokensFor = function(maxSeconds, stopFn, fieldAnchor)
                 patrolTarget = Vector3.new(safeWorld.X, (anchorZone and (anchorZone.Position.Y + 3.2)) or root.Position.Y, safeWorld.Z)
             end
 
-            -- Плавное и безотказное перемещение через нативный MoveTo с оббеганием преград
+            -- Плавное и безотказное перемещение: активный бег через humanoid:Move() + MoveTo()
             if patrolTarget and humanoid and root then
                 local currentPos = root.Position
                 local flatTarget = Vector3.new(patrolTarget.X, currentPos.Y, patrolTarget.Z)
-                local offset = flatTarget - currentPos
-                local dist = offset.Magnitude
+                local steerTarget = getObstacleAvoidanceTarget(currentPos, flatTarget, char)
+                local flatDelta = Vector3.new(steerTarget.X - currentPos.X, 0, steerTarget.Z - currentPos.Z)
+                local dist = flatDelta.Magnitude
 
-                if dist > 2.5 then
-                    local now = os.clock()
-                    local steerTarget = getObstacleAvoidanceTarget(currentPos, flatTarget, char)
-                    if not lastMoveToTarget or (lastMoveToTarget - steerTarget).Magnitude > 1.8 or (now - lastMoveToCall > 0.3) then
-                        lastMoveToTarget = steerTarget
-                        lastMoveToCall = now
-                        humanoid:MoveTo(steerTarget)
-                    end
+                if dist > 1.2 then
+                    local moveDir = flatDelta.Unit
+                    humanoid.AutoRotate = true
+                    humanoid:Move(moveDir, false)
+                    humanoid:MoveTo(steerTarget)
                 else
-                    lastMoveToTarget = nil
+                    humanoid:Move(Vector3.zero, false)
+                    if not activeTokenObj then
+                        patrolTarget = nil
+                    end
                 end
 
                 -- Защита от застревания в преградах (ножки грибов, деревья, кактусы, заборы):
                 local now = os.clock()
                 if not lastRecordedPos then lastRecordedPos = currentPos end
-                if (currentPos - lastRecordedPos).Magnitude < 0.8 then
+                if (currentPos - lastRecordedPos).Magnitude < 0.6 then
                     if not stuckStartTime then stuckStartTime = now end
-                    if (now - stuckStartTime > 1.4) then
-                        -- Персонаж действительно уперся в объект более 1.4с: прыжок и обход
+                    if (now - stuckStartTime > 0.9) then
                         pcall(function() humanoid.Jump = true end)
                         local rayP = RaycastParams.new()
                         rayP.FilterType = RaycastFilterType.Exclude
@@ -5830,6 +5838,7 @@ collectTokensFor = function(maxSeconds, stopFn, fieldAnchor)
                             if norm.Magnitude > 0.05 then
                                 norm = norm.Unit
                                 local sideDir = Vector3.new(-norm.Z, 0, norm.X) * 12
+                                humanoid:Move(sideDir.Unit, false)
                                 humanoid:MoveTo(currentPos + sideDir + norm * 4)
                             end
                         end
@@ -5845,6 +5854,12 @@ collectTokensFor = function(maxSeconds, stopFn, fieldAnchor)
 
             RunService.Heartbeat:Wait()
         end
+
+        pcall(function()
+            local c = player.Character
+            local h = c and c:FindFirstChildOfClass("Humanoid")
+            if h then h:Move(Vector3.zero, false) end
+        end)
     end
 
     pcall(runLoop)
@@ -7267,7 +7282,7 @@ new("TextLabel", {
 })
 new("TextLabel", {
     Size = UDim2.new(0, 220, 0, 25), Position = UDim2.new(0, 58, 0, 10),
-    BackgroundTransparency = 1, Text = "BSS Hopper v1.3.82",
+    BackgroundTransparency = 1, Text = "BSS Hopper v1.3.83",
     TextColor3 = C.text, Font = Enum.Font.GothamBold, TextSize = 22,
     TextXAlignment = Enum.TextXAlignment.Left, Parent = head,
 })
