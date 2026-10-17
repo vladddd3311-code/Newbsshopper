@@ -7020,13 +7020,13 @@ function Looter:fetchNext()
             local taskRarity = string.lower(tostring(data.level or "basic"))
             if taskRarity == "common" or taskRarity == "normal" then taskRarity = "basic" end
             local isRarityAllowed = not CONFIG.ALLOWED_SPROUT_RARITIES or (CONFIG.ALLOWED_SPROUT_RARITIES[taskRarity] ~= false)
-            if age <= 120 and not isTaskVisited(jid) and isRarityAllowed then
+            if age <= 240 and not isTaskVisited(jid) and isRarityAllowed then
                 return data, nil
             end
         end
     end
 
-    -- 2. Сканируем всю очередь /queue за последние 2 минуты (120 секунд)
+    -- 2. Сканируем всю очередь /queue за последние 4 минуты (240 секунд)
     local okQ, resQ = pcall(function()
         return game:HttpGet(CONFIG.API_URL .. "/queue?apiKey=" .. CONFIG.API_KEY)
     end)
@@ -7036,7 +7036,7 @@ function Looter:fetchNext()
             for _, t in ipairs(qData.queue) do
                 local jid = tostring(t.jobId or "")
                 local age = tonumber(t.age) or 0
-                if jid ~= "" and age <= 120 and not isTaskVisited(jid) then
+                if jid ~= "" and age <= 240 and not isTaskVisited(jid) then
                     local taskRarity = string.lower(tostring(t.level or "basic"))
                     if taskRarity == "common" or taskRarity == "normal" then taskRarity = "basic" end
                     if not CONFIG.ALLOWED_SPROUT_RARITIES or CONFIG.ALLOWED_SPROUT_RARITIES[taskRarity] ~= false then
@@ -7104,56 +7104,48 @@ function Looter:Start()
             pcall(managePlanters)
         end
 
-        -- 1. Сначала при заходе на сервер ищем росток/вициус ровно 5 секунд
+        -- 1. Быстрая проверка сервера на росток / вициус (ровно 1 секунда)
         local initialTargetFound = false
-        for checkSec = 1, 5 do
-            if not alive() then return end
-            s.currentStatus = string.format("Проверяю сервер на росток / вициус (%dc)...", 6 - checkSec)
-
-            local sprout = CONFIG.CHECK_SPROUTS and findLootableSprout() or nil
-            local vicious = CONFIG.CHECK_VICIOUS and findVicious() or nil
-
-            if sprout or vicious then
-                initialTargetFound = true
-
-                -- ШАГ 1: Поставил улей если есть росток/вициус!
-                if not hasOwnHive() then
-                    s.currentStatus = "Цель есть! Занимаю свой улей..."
-                    local claimOk, claimed = pcall(ensureHiveClaimed)
-                    if claimOk and claimed then s.hivesClaimed += 1 end
-                end
-
-                -- ШАГ 2: Если рюкзак полон — конвертирует в своем улье!
-                if isBackpackFull() then
-                    s.currentStatus = "Рюкзак полон — конвертирую в своем улье..."
-                    pcall(makeHoney)
-                end
-
-                -- ШАГ 3: Летит лутать!
-                if sprout then
-                    s.currentStatus = "Лечу лутать росток!"
-                    local okHarvest, harvestRes = pcall(function() return self:harvest() end)
-                    if okHarvest and harvestRes == true then
-                        break
-                    end
-                elseif vicious then
-                    s.currentStatus = "Лечу бить Вициуса!"
-                    pcall(function() fightVicious(vicious) end)
-                    break
-                end
-            end
-
-            if CONFIG.CHECK_PUFFSHROOMS then
-                local okPuff, puffList = pcall(findEligiblePuffshrooms)
-                if okPuff and puffList and #puffList > 0 then
-                    s.currentStatus = "Puffshroom найден — начинаю сбор!"
-                    pcall(function() self:harvestPuffshrooms() end)
-                    initialTargetFound = true
-                    break
-                end
-            end
-
+        s.currentStatus = "Проверяю сервер на росток / вициус (1с)..."
+        local sprout = CONFIG.CHECK_SPROUTS and findLootableSprout() or nil
+        local vicious = CONFIG.CHECK_VICIOUS and findVicious() or nil
+        if not (sprout or vicious) then
             task.wait(1)
+            sprout = CONFIG.CHECK_SPROUTS and findLootableSprout() or nil
+            vicious = CONFIG.CHECK_VICIOUS and findVicious() or nil
+        end
+
+        if sprout or vicious then
+            initialTargetFound = true
+
+            -- ШАГ 1: Поставил улей если есть росток/вициус!
+            if not hasOwnHive() then
+                s.currentStatus = "Цель есть! Занимаю свой улей..."
+                local claimOk, claimed = pcall(ensureHiveClaimed)
+                if claimOk and claimed then s.hivesClaimed += 1 end
+            end
+
+            -- ШАГ 2: Если рюкзак полон — конвертирует в своем улье!
+            if isBackpackFull() then
+                s.currentStatus = "Рюкзак полон — конвертирую в своем улье..."
+                pcall(makeHoney)
+            end
+
+            -- ШАГ 3: Летит лутать!
+            if sprout then
+                s.currentStatus = "Лечу лутать росток!"
+                pcall(function() return self:harvest() end)
+            elseif vicious then
+                s.currentStatus = "Лечу бить Вициуса!"
+                pcall(function() fightVicious(vicious) end)
+            end
+        elseif CONFIG.CHECK_PUFFSHROOMS then
+            local okPuff, puffList = pcall(findEligiblePuffshrooms)
+            if okPuff and puffList and #puffList > 0 then
+                s.currentStatus = "Puffshroom найден — начинаю сбор!"
+                pcall(function() self:harvestPuffshrooms() end)
+                initialTargetFound = true
+            end
         end
 
         -- Если рюкзак заполнился во время сбора начального ростка — разгружаем на улье
@@ -7336,28 +7328,9 @@ function Looter:Start()
                     return
                 end
 
-                -- Лутающий работает автономно в соло-режиме: прыгает по серверам,
-                -- параллельно на каждом сервере проверяя задания от ищущих!
-                while isBackpackFull() and alive() do
-                    stopAutoDig()
-                    tokenCollectorBusy = false
-                    s.currentStatus = "Рюкзак полный — делаю Honey перед прыжком..."
-                    makeHoney()
-                    task.wait(1)
-                end
-
-                s.currentStatus = "Целей нет — прыгаю на случайный сервер (соло-поиск)..."
-                log("Лутающий", "Нет задач от ищущих и целей на сервере. Прыгаю на случайный сервер...")
-                local hopWait = math.max(0.2, tonumber(CONFIG.HOP_DELAY) or 0.8)
-                task.wait(hopWait)
-                if alive() then
-                    s.teleports += 1
-                    s.currentStatus = "Телепортируюсь на новый сервер..."
-                    task.wait(0.02)
-                    hopRandom()
-                    task.wait(6)
-                    return
-                end
+                -- Лутающий ждёт задач от ищущих! НЕ прыгает на случайные серверы сам!
+                s.currentStatus = "Ожидание задач от ищущих (опрос очереди)..."
+                task.wait(1)
             end)
             if not ok then
                 log("Лутающий", "Ошибка: " .. tostring(err))
