@@ -1,6 +1,6 @@
 --[[
 ═══════════════════════════════════════════════════════════════════════
-  🐍 BSS HOPPER v1.1 Standby Solo Farm for Looter
+  🐍 BSS HOPPER v1.3.89 Standby Solo Farm for Looter
 ═══════════════════════════════════════════════════════════════════════
   ЛКМ по змейке  → вкл / выкл
   ПКМ по змейке  → меню    |    F — меню    |    P — вкл/выкл
@@ -306,6 +306,7 @@ local CONFIG = {
     FARM_REGION = "center", -- center / left / right
     ANTI_LAG = true,
     SUPER_OPTIMIZE = false,
+    DISABLE_3D_RENDERING = false,
     AVOID_FRIENDS = true,
     ENABLE_AUTO_SPRINKLER = true, SPRINKLER_COUNT = 3,
 
@@ -482,7 +483,7 @@ local SAVED_KEYS = {
     "PUFFSHROOM_CHANNEL_ID","PUFF_MIN_RARITY","PUFF_MIN_LEVEL_COMMON","PUFF_MIN_LEVEL_RARE",
     "PUFF_MIN_LEVEL_EPIC","PUFF_MIN_LEVEL_LEGENDARY","PUFF_MIN_LEVEL_MYTHIC",
     "WALK_SPEED_MULT","FLY_SPEED","JUMP_POWER","BACKPACK_FILL_THRESHOLD","HONEY_MAX_WAIT",
-    "TOKEN_SCAN_INTERVAL","TOKEN_PATROL_TIME","FARM_REGION","ANTI_LAG","SUPER_OPTIMIZE","AVOID_FRIENDS","SPRINKLER_KEYWORD","DIG_TOOL_KEYWORD",
+    "TOKEN_SCAN_INTERVAL","TOKEN_PATROL_TIME","FARM_REGION","ANTI_LAG","SUPER_OPTIMIZE","DISABLE_3D_RENDERING","AVOID_FRIENDS","SPRINKLER_KEYWORD","DIG_TOOL_KEYWORD",
     "ENABLE_AUTO_SPRINKLER","SPRINKLER_COUNT",
     "ENABLE_AUTO_DIG","EMPTY_SLOT_KEYWORD","MY_HIVE_KEYWORD","CLAIM_TIMEOUT",
     "BURST_LOOT_ENABLED","BURST_LOOT_TIME","PREFER_LOW_PLAYERS","MAX_PLAYERS","MIN_PLAYERS","TOKEN_PRIORITIES",
@@ -825,6 +826,15 @@ function applyAntiLag(enabled)
 end
 if CONFIG.ANTI_LAG then applyAntiLag(true) end
 if CONFIG.SUPER_OPTIMIZE then applySuperOptimization(true) end
+
+function apply3dRendering(disabled)
+    CONFIG.DISABLE_3D_RENDERING = (disabled == true)
+    pcall(function()
+        local rs = game:GetService("RunService")
+        rs:Set3dRenderingEnabled(not disabled)
+    end)
+end
+if CONFIG.DISABLE_3D_RENDERING then apply3dRendering(true) end
 
 saveNow = function()
     local data = {}
@@ -2178,8 +2188,37 @@ function lootMeteorShower(meteors)
             local root = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
             if zPart and root and alive() then
                 local safeGround = getGroundPos(zPart.Position)
-                log("Meteor", string.format("Перелет на метеоритное поле [%d/3]: %s...", idx, fName))
-                moveRootToPosition(root, safeGround, 3.5)
+                log("Meteor", string.format("⚡ [Fast to Shower Tween 400] Перелет на поле [%d/3]: %s...", idx, fName))
+
+                -- Атлас БСС метод: сверхбыстрый линейный твин со скоростью 400 прямо к полю
+                local dist = (safeGround - root.Position).Magnitude
+                local twTime = math.max(0.025, dist / 400)
+                local tw = TweenService:Create(root, TweenInfo.new(twTime, Enum.EasingStyle.Linear, Enum.EasingDirection.Out), {
+                    CFrame = CFrame.new(safeGround) * root.CFrame.Rotation
+                })
+                tw:Play()
+                tw.Completed:Wait()
+
+                -- Поиск точек падения метеоров (WarningDisk в Particles)
+                local fieldTarget = zPart.Position
+                local pFolder = Workspace:FindFirstChild("Particles")
+                if pFolder then
+                    for _, disk in ipairs(pFolder:GetChildren()) do
+                        if disk.Name == "WarningDisk" and disk:IsA("BasePart") then
+                            local dPos = disk.Position
+                            if (dPos - fieldTarget).Magnitude < 45 then
+                                local targetG = Vector3.new(dPos.X, safeGround.Y, dPos.Z)
+                                local dDist = (targetG - root.Position).Magnitude
+                                local dTw = TweenService:Create(root, TweenInfo.new(math.max(0.025, dDist / 400), Enum.EasingStyle.Linear, Enum.EasingDirection.Out), {
+                                    CFrame = CFrame.new(targetG) * root.CFrame.Rotation
+                                })
+                                dTw:Play()
+                                dTw.Completed:Wait()
+                            end
+                        end
+                    end
+                end
+
                 collectTokensFor(7, function() return not alive() end, safeGround)
             end
         end
@@ -2437,11 +2476,11 @@ function getPlanterProgress(model)
 
                 if string.find(low, "ready to harvest", 1, true)
                    or string.find(low, "harvest!", 1, true)
-                   or low == "harvest"
-                   or (string.find(low, "ready", 1, true) and not string.find(low, "ready in", 1, true) and not string.find(low, "not ready", 1, true))
-                   or string.find(low, "claim", 1, true)
-                   or string.find(low, "0s left", 1, true) then
-                    isFullyReady = true
+                   or string.find(low, "0s left", 1, true)
+                   or (string.find(low, "ready", 1, true) and not string.find(low, "ready in", 1, true) and not string.find(low, "not ready", 1, true) and not string.find(low, "grow", 1, true)) then
+                    if not percent or percent >= 95 then
+                        isFullyReady = true
+                    end
                 end
             elseif desc:IsA("Frame") and (desc.Name == "Bar" or desc.Name == "Progress" or desc.Name == "Fill") then
                 if desc.Size.X.Scale > 0 and desc.Size.X.Scale <= 1 then
@@ -2453,8 +2492,12 @@ function getPlanterProgress(model)
     end
 
     if isFullyReady then
-        percent = math.max(percent or 100, 100)
-        timeLeftStr = "Ready!"
+        if not percent or percent >= 95 or percent == 100 then
+            percent = 100
+            timeLeftStr = "Ready!"
+        else
+            isFullyReady = false
+        end
     end
 
     percent = percent or 0
@@ -2674,7 +2717,7 @@ function isPlanterMine(pModel)
 end
 
 function findMyActivePlanters()
-    local myPlanters = {}
+    local rawPlanters = {}
     local candidates = getAllPlanterCandidates()
 
     for _, pModel in ipairs(candidates) do
@@ -2684,21 +2727,7 @@ function findMyActivePlanters()
             local fieldName = detectField(pModel) or "Unknown Field"
             local ready = (percent >= 100) or (statusStr == "Ready!")
 
-            -- Определение готовности через ProximityPrompt (в BSS у созревших плантаторов в тексте нет слова growing)
-            for _, prompt in ipairs(pModel:GetDescendants()) do
-                if prompt:IsA("ProximityPrompt") then
-                    local act = string.lower(prompt.ActionText or "")
-                    local obj = string.lower(prompt.ObjectText or "")
-                    if (string.find(act, "harvest", 1, true) or string.find(obj, "harvest", 1, true)) then
-                        if not string.find(act, "grow", 1, true) and not string.find(obj, "grow", 1, true) then
-                            ready = true
-                            if percent == 0 then percent = 100; statusStr = "Ready!" end
-                        end
-                    end
-                end
-            end
-
-            table.insert(myPlanters, {
+            table.insert(rawPlanters, {
                 type = pType,
                 model = pModel,
                 field = fieldName,
@@ -2708,6 +2737,32 @@ function findMyActivePlanters()
             })
         end
     end
+
+    -- Дедупликация: ровно 1 строка на каждый тип плантатора в HUD и в задачах
+    local myPlanters = {}
+    local byType = {}
+    for _, info in ipairs(rawPlanters) do
+        local key = info.type
+        if not byType[key] then
+            byType[key] = info
+            table.insert(myPlanters, info)
+        else
+            local existing = byType[key]
+            -- Предпочитаем запись с большим прогрессом и известным полем
+            if info.percent and info.percent > (existing.percent or 0) then
+                existing.percent = info.percent
+                existing.statusStr = info.statusStr
+                existing.ready = info.ready
+            end
+            if (existing.field == "Unknown Field" or not existing.field) and info.field and info.field ~= "Unknown Field" then
+                existing.field = info.field
+            end
+            if info.model and info.model:FindFirstChild("Gui Attach") then
+                existing.model = info.model
+            end
+        end
+    end
+
     return myPlanters
 end
 
@@ -2917,7 +2972,7 @@ function managePlanters()
         local isEnabled = pCfg and (pCfg.enabled == true)
         local targetPct = (pCfg and tonumber(pCfg.percent)) or 100
 
-        local shouldHarvest = (info.ready == true) or (info.percent > 0 and info.percent >= targetPct)
+        local shouldHarvest = isEnabled and (info.percent >= targetPct and info.percent > 0)
 
         if shouldHarvest then
             harvestedAny = true
@@ -5681,11 +5736,47 @@ function resolveTokenName(obj)
     return result
 end
 
+local ATLAS_PRIORITY_SPROUT_IDS = {
+    ["1471848094"] = true, ["1471849394"] = true, ["1471850677"] = true, ["4520739302"] = true,
+    ["1987253833"] = true, ["1987257040"] = true, ["1987255318"] = true, ["6134473023"] = true,
+    ["8277780065"] = true, ["8277781666"] = true, ["8277783113"] = true, ["8310376128"] = true,
+    ["2319943273"] = true, ["2495935291"] = true, ["2495936060"] = true, ["4483267595"] = true,
+    ["4483236276"] = true, ["3030569073"] = true, ["2028603146"] = true, ["2545746569"] = true,
+    ["2529092020"] = true, ["2504978518"] = true, ["2584584968"] = true, ["2542899798"] = true,
+    ["8054996680"] = true, ["3027672238"] = true, ["6299503651"] = true, ["2306224708"] = true,
+    ["1674871631"] = true, ["2319083910"] = true, ["5877939956"] = true, ["2000457501"] = true,
+    ["1104415222"] = true, ["1472425802"] = true, ["1472580249"] = true, ["1472532912"] = true,
+    ["2032949183"] = true, ["1472491940"] = true, ["1489734171"] = true, ["1837410537"] = true,
+    ["2652364563"] = true, ["2652424740"] = true, ["6077288982"] = true,
+}
+
 function getTokenPriorityForObj(obj)
     if not obj then return 3 end
     if isTokenLink(obj) then return 0 end
     local cached = TOKEN_PRIO_CACHE[obj]
     if cached and cached ~= 3 then return cached end
+
+    -- 1. Метод Atlas BSS: проверка спец-эффектов редкости (Spots, Rainbow, Sparkles)
+    if obj:FindFirstChild("Spots") or obj:FindFirstChild("Rainbow") or obj:FindFirstChild("Sparkles") then
+        TOKEN_PRIO_CACHE[obj] = 1
+        return 1
+    end
+
+    -- 2. Метод Atlas BSS: проверка декалей токена по ID базы редких предметов
+    local okDesc, descs = pcall(function() return obj:GetDescendants() end)
+    if okDesc and descs then
+        for _, d in ipairs(descs) do
+            if d:IsA("Decal") or d:IsA("Texture") then
+                local tex = tostring(d.Texture or "")
+                local id = string.match(tex, "%d+")
+                if id and ATLAS_PRIORITY_SPROUT_IDS[id] then
+                    TOKEN_PRIO_CACHE[obj] = 1
+                    return 1
+                end
+            end
+        end
+    end
+
     local name = resolveTokenName(obj)
     local prio = tokenPriority(name)
     if prio ~= 3 or name ~= "token" then
@@ -6005,8 +6096,8 @@ collectTokensFor = function(maxSeconds, stopFn, fieldAnchor)
         local stuckStartTime = nil
         local lastJumpTime = 0
 
-        -- Принудительный сброс физики, полетных флагов и переход в бег по земле
-        setFlightNoclip(false)
+        -- Включаем полный Noclip персонажа как в полете (пробегать насквозь сквозь заборы, поливалки, плантаторы, ростки)
+        setFlightNoclip(true)
         pcall(disableSprinklerCollision)
         local initialChar = player.Character
         local initialRoot = initialChar and initialChar:FindFirstChild("HumanoidRootPart")
@@ -6027,21 +6118,6 @@ collectTokensFor = function(maxSeconds, stopFn, fieldAnchor)
         end
         -- Принудительно выставляем скорость бега, чтобы персонаж БЕЖАЛ а не стоял
         pcall(applyWalkSpeed)
-        -- Восстанавливаем коллизии на основных частях тела (HumanoidRootPart ОБЯЗАН быть CanCollide = false)
-        if initialChar then
-            pcall(function()
-                for _, part in ipairs(initialChar:GetDescendants()) do
-                    if part:IsA("BasePart") then
-                        local n = part.Name
-                        if n == "Head" or n == "Torso" or n == "UpperTorso" or n == "LowerTorso" then
-                            part.CanCollide = true
-                        else
-                            part.CanCollide = false
-                        end
-                    end
-                end
-            end)
-        end
 
         -- Находим физическую зону текущего поля
         local anchorZone = getActiveFlowerZone(fieldAnchor)
@@ -6089,7 +6165,7 @@ collectTokensFor = function(maxSeconds, stopFn, fieldAnchor)
                     root.AssemblyLinearVelocity = Vector3.zero
                     root.AssemblyAngularVelocity = Vector3.zero
                     root.CFrame = CFrame.new(root.Position.X, safeY, root.Position.Z)
-                    setFlightNoclip(false)
+                    setFlightNoclip(true)
                 end
             end
 
@@ -6294,6 +6370,7 @@ collectTokensFor = function(maxSeconds, stopFn, fieldAnchor)
         end
 
         pcall(function()
+            setFlightNoclip(false)
             local c = player.Character
             local h = c and c:FindFirstChildOfClass("Humanoid")
             local r = c and c:FindFirstChild("HumanoidRootPart")
@@ -6739,7 +6816,7 @@ local localVisitedTasks = {}
 local function isTaskVisited(jobId)
     if not jobId or jobId == "" then return true end
     if jobId == game.JobId then return true end
-    if isVisitedServer(jobId) or isFailed(jobId) then return true end
+    if isFailed(jobId) then return true end
     local t = localVisitedTasks[jobId]
     if t and (os.clock() - t < 180) then return true end
     return false
@@ -6940,7 +7017,10 @@ function Looter:fetchNext()
         if ok2 and data and not data.empty and data.jobId then
             local jid = tostring(data.jobId)
             local age = tonumber(data.age) or 0
-            if age <= 120 and not isTaskVisited(jid) then
+            local taskRarity = string.lower(tostring(data.level or "basic"))
+            if taskRarity == "common" or taskRarity == "normal" then taskRarity = "basic" end
+            local isRarityAllowed = not CONFIG.ALLOWED_SPROUT_RARITIES or (CONFIG.ALLOWED_SPROUT_RARITIES[taskRarity] ~= false)
+            if age <= 120 and not isTaskVisited(jid) and isRarityAllowed then
                 return data, nil
             end
         end
@@ -7908,7 +7988,7 @@ new("TextLabel", {
 })
 new("TextLabel", {
     Size = UDim2.new(0, 220, 0, 25), Position = UDim2.new(0, 58, 0, 10),
-    BackgroundTransparency = 1, Text = "BSS Hopper v1.3.88",
+    BackgroundTransparency = 1, Text = "BSS Hopper v1.3.89",
     TextColor3 = C.text, Font = Enum.Font.GothamBold, TextSize = 22,
     TextXAlignment = Enum.TextXAlignment.Left, Parent = head,
 })
@@ -8924,6 +9004,11 @@ local getAvoidFriends = makeToggle(pageSettings, "🛡️ АНТИ-ПАЛЕВО:
     CONFIG.AVOID_FRIENDS = v
     if saveNow then pcall(saveNow) end
 end)
+local get3dRender = makeToggle(pageSettings, "🛑 ОТКЛЮЧИТЬ 3D РЕНДЕРИНГ (Защита от крашей)", CONFIG.DISABLE_3D_RENDERING == true, 57, function(v)
+    CONFIG.DISABLE_3D_RENDERING = v
+    apply3dRendering(v)
+    if saveNow then pcall(saveNow) end
+end)
 
 applySettings = function()
     local function num(v, def)
@@ -8960,6 +9045,10 @@ applySettings = function()
     if getSuperOpt then
         CONFIG.SUPER_OPTIMIZE = getSuperOpt()
         applySuperOptimization(CONFIG.SUPER_OPTIMIZE)
+    end
+    if get3dRender then
+        CONFIG.DISABLE_3D_RENDERING = get3dRender()
+        apply3dRendering(CONFIG.DISABLE_3D_RENDERING)
     end
     if getAvoidFriends then
         CONFIG.AVOID_FRIENDS = getAvoidFriends()
@@ -9481,6 +9570,7 @@ syncGuiWithConfig = function()
         if applyWalkSpeed then applyWalkSpeed() end
         if applyAntiLag then applyAntiLag(CONFIG.ANTI_LAG) end
         if applySuperOptimization then applySuperOptimization(CONFIG.SUPER_OPTIMIZE) end
+        if apply3dRendering then apply3dRendering(CONFIG.DISABLE_3D_RENDERING) end
         if fDisc and CONFIG.DISCORD_WEBHOOK_URL ~= nil then fDisc.Text = tostring(CONFIG.DISCORD_WEBHOOK_URL) end
         if fTgToken and CONFIG.TELEGRAM_BOT_TOKEN ~= nil then fTgToken.Text = tostring(CONFIG.TELEGRAM_BOT_TOKEN) end
         if fTgChat and CONFIG.TELEGRAM_CHAT_ID ~= nil then fTgChat.Text = tostring(CONFIG.TELEGRAM_CHAT_ID) end
