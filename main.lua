@@ -328,6 +328,7 @@ local CONFIG = {
     },
     CHECK_METEORS = true,
     CHECK_WINDY = true,
+    WINDY_HOVER_HEIGHT = 16,
     AUTO_HARVEST_PLANTERS = true,
     SHOW_PLANTER_HUD = true,
     PLANTER_HUD_COLLAPSED = false,
@@ -1948,7 +1949,7 @@ function fightWindyBee(windy)
     local started = os.clock()
 
     setFlightNoclip(true)
-    local hoverHeight = 6 -- Высота парения прямо над Windy Bee (в точности как над Vicious Bee)
+    local hoverHeight = math.clamp(tonumber(CONFIG.WINDY_HOVER_HEIGHT) or 16, 12, 28) -- Безопасная высота парения над телом Windy Bee и торнадо
     local smoothedTarget = nil
     local lastFacingAt = 0
     local speed = 110
@@ -2265,22 +2266,50 @@ local function getAllPlanterCandidates()
     local seen = {}
 
     local function addCandidate(model)
-        if model and not seen[model] and (model:IsA("Model") or model:IsA("Folder") or model:IsA("BasePart")) then
+        if model and not seen[model] and (model:IsA("Model") or model:IsA("BasePart")) then
             seen[model] = true
             table.insert(candidates, model)
+        end
+    end
+
+    local function checkAndAdd(item)
+        if not item then return end
+        if item:IsA("Model") or item:IsA("BasePart") then
+            addCandidate(item)
+        elseif item:IsA("Folder") or item:IsA("Configuration") then
+            for _, sub in ipairs(item:GetChildren()) do
+                if sub:IsA("Model") or sub:IsA("BasePart") or sub:FindFirstChildWhichIsA("BasePart", true) then
+                    addCandidate(sub)
+                end
+            end
         end
     end
 
     -- 1. Сначала проверяем кэшированную папку
     if cachedPlantersFolder and cachedPlantersFolder.Parent then
         for _, ch in ipairs(cachedPlantersFolder:GetChildren()) do
-            addCandidate(ch)
+            checkAndAdd(ch)
         end
     end
 
-    -- 2. Известные контейнеры плантаторов в Workspace
+    -- 2. Проверяем Workspace.Planters и LocalPlanters (основное хранилище плантаторов BSS)
+    local plantersFolder = Workspace:FindFirstChild("Planters")
+    if plantersFolder then
+        cachedPlantersFolder = plantersFolder
+        local localPlanters = plantersFolder:FindFirstChild("LocalPlanters")
+        if localPlanters then
+            for _, ch in ipairs(localPlanters:GetChildren()) do
+                checkAndAdd(ch)
+            end
+        end
+        for _, ch in ipairs(plantersFolder:GetChildren()) do
+            checkAndAdd(ch)
+        end
+    end
+
+    -- 3. Известные контейнеры плантаторов в Workspace
     local folders = {
-        Workspace:FindFirstChild("Planters"),
+        Workspace:FindFirstChild("LocalPlanters"),
         Workspace:FindFirstChild("ActivePlanters"),
         Workspace:FindFirstChild("PlanterModels"),
         Workspace:FindFirstChild("Core") and Workspace.Core:FindFirstChild("Planters"),
@@ -2294,46 +2323,48 @@ local function getAllPlanterCandidates()
         if f then
             for _, ch in ipairs(f:GetChildren()) do
                 local nLow = string.lower(ch.Name)
-                if string.find(nLow, "planter", 1, true) or f.Name == "Planters" or f.Name == "ActivePlanters" or f.Name == "PlanterModels" then
-                    addCandidate(ch)
+                if string.find(nLow, "planter", 1, true) or f.Name == "Planters" or f.Name == "LocalPlanters" or f.Name == "ActivePlanters" or f.Name == "PlanterModels" then
+                    checkAndAdd(ch)
                     cachedPlantersFolder = f
                 end
             end
         end
     end
 
-    -- 3. Прямые потомки Workspace
+    -- 4. Прямые потомки Workspace
     for _, ch in ipairs(Workspace:GetChildren()) do
         if string.find(string.lower(ch.Name), "planter", 1, true) then
-            addCandidate(ch)
+            checkAndAdd(ch)
         end
     end
 
-    -- 4. Поиск по всему Workspace по ProximityPrompt и BillboardGui плантаторов
-    for _, desc in ipairs(Workspace:GetDescendants()) do
-        if desc:IsA("ProximityPrompt") then
-            local act = string.lower(desc.ActionText or "")
-            local obj = string.lower(desc.ObjectText or "")
-            if string.find(act, "harvest", 1, true) or string.find(act, "planter", 1, true)
-               or string.find(obj, "planter", 1, true) then
-                local m = desc:FindFirstAncestorWhichIsA("Model") or desc.Parent
-                if m then
-                    addCandidate(m)
-                    if m.Parent then cachedPlantersFolder = m.Parent end
+    -- 5. Быстрый поиск по потомкам Workspace по ProximityPrompt и BillboardGui (если кандидатов нет)
+    if #candidates == 0 then
+        for _, desc in ipairs(Workspace:GetDescendants()) do
+            if desc:IsA("ProximityPrompt") then
+                local act = string.lower(desc.ActionText or "")
+                local obj = string.lower(desc.ObjectText or "")
+                if string.find(act, "harvest", 1, true) or string.find(act, "planter", 1, true)
+                   or string.find(obj, "planter", 1, true) then
+                    local m = desc:FindFirstAncestorWhichIsA("Model") or desc.Parent
+                    if m then
+                        addCandidate(m)
+                        if m.Parent then cachedPlantersFolder = m.Parent end
+                    end
                 end
-            end
-        elseif desc:IsA("BillboardGui") then
-            local isPlanter = false
-            for _, lbl in ipairs(desc:GetChildren()) do
-                if lbl:IsA("TextLabel") and string.find(string.lower(lbl.Text or ""), "planter", 1, true) then
-                    isPlanter = true; break
+            elseif desc:IsA("BillboardGui") then
+                local isPlanter = false
+                for _, lbl in ipairs(desc:GetChildren()) do
+                    if lbl:IsA("TextLabel") and string.find(string.lower(lbl.Text or ""), "planter", 1, true) then
+                        isPlanter = true; break
+                    end
                 end
-            end
-            if isPlanter then
-                local m = desc:FindFirstAncestorWhichIsA("Model") or desc.Parent
-                if m then
-                    addCandidate(m)
-                    if m.Parent then cachedPlantersFolder = m.Parent end
+                if isPlanter then
+                    local m = desc:FindFirstAncestorWhichIsA("Model") or desc.Parent
+                    if m then
+                        addCandidate(m)
+                        if m.Parent then cachedPlantersFolder = m.Parent end
+                    end
                 end
             end
         end
@@ -2346,6 +2377,15 @@ function isPlanterMine(pModel)
     if not pModel then return false end
     local myName = string.lower(player.Name)
     local myId = tostring(player.UserId)
+
+    -- 0. Если модель находится внутри "LocalPlanters" - это гарантированно НАШ плантатор!
+    if pModel:FindFirstAncestor("LocalPlanters") then
+        return true
+    end
+    local parent = pModel.Parent
+    if parent and (string.lower(parent.Name) == "localplanters" or string.find(string.lower(parent.Name), "local", 1, true)) then
+        return true
+    end
 
     -- 1. ProximityPrompt (В BSS у чужих плантаторов НЕТ промпта сбора для локального игрока!)
     for _, prompt in ipairs(pModel:GetDescendants()) do
@@ -2582,24 +2622,29 @@ task.spawn(function()
 end)
 
 function managePlanters()
-    if CONFIG.AUTO_HARVEST_PLANTERS == false then return end
+    if CONFIG.AUTO_HARVEST_PLANTERS == false then return false end
     local rep = game:GetService("ReplicatedStorage")
     local pCmd = rep:FindFirstChild("Events") and rep.Events:FindFirstChild("PlanterCommand")
     local repPkg = rep:FindFirstChild("Events") and rep.Events:FindFirstChild("PlanterPackage")
     local activePlanters = findMyActivePlanters()
     local activeTypes = {}
+    local harvestedAny = false
 
-    -- 1. Сбор созревших плантаторов (ТОЛЬКО если достигли порога % или готовы)
+    -- 1. Сбор созревших плантаторов (если созрели, достигли % или включены пользователем)
     for _, info in ipairs(activePlanters) do
         activeTypes[info.type] = true
         local pCfg = CONFIG.PLANTERS_CONFIG and CONFIG.PLANTERS_CONFIG[info.type]
         local isEnabled = pCfg and (pCfg.enabled == true)
         local targetPct = (pCfg and tonumber(pCfg.percent)) or 100
 
-        -- Собираем если плантатор созрел (Ready/100%) ИЛИ если он включен пользователем и (достиг targetPct или проценты не отображаются в BSS)
-        local shouldHarvest = (info.ready == true) or (isEnabled and (info.percent >= targetPct or info.percent == 0))
+        -- Собираем если:
+        -- 1) info.ready == true (плантатор созрел / Ready!)
+        -- 2) info.percent >= targetPct (достиг порога %, по умолч. 100%)
+        -- 3) ИЛИ если включен пользователем (isEnabled) и (info.percent >= targetPct or info.percent == 0)
+        local shouldHarvest = (info.ready == true) or (info.percent >= targetPct) or (isEnabled and (info.percent >= targetPct or info.percent == 0))
 
         if shouldHarvest then
+            harvestedAny = true
             log("Плантатор", string.format("🪴 Плантатор %s на поле %s готов к сбору (%.1f%%, порог %d%%)! Собираю урожай...", info.type, info.field, info.percent, targetPct))
             notifyAllWebhooks("Сбор плантатора!", string.format("Плантатор %s на поле %s собран!", info.type, info.field), "00f5a0")
 
@@ -2652,14 +2697,15 @@ function managePlanters()
             end
 
             -- Шаг 2: Подтверждаем всплывающий диалог "Harvest the Planter before it's done growing? [Yes]"
-            for _ = 1, 10 do
-                task.wait(0.12)
+            for _ = 1, 15 do
+                task.wait(0.1)
                 if confirmPlanterHarvestModal() then
                     break
                 end
             end
 
-            collectTokensFor(6, function() return not alive() end, pPos)
+            LOOT_REPORT_STATS.planters = (LOOT_REPORT_STATS.planters or 0) + 1
+            collectTokensFor(10, function() return not alive() end, pPos)
             activeTypes[info.type] = false
             task.wait(0.5)
         end
@@ -2699,6 +2745,7 @@ function managePlanters()
             end
         end
     end
+    return harvestedAny
 end
 harvestMaturePlanters = managePlanters
 
@@ -5624,6 +5671,13 @@ collectTokensFor = function(maxSeconds, stopFn, fieldAnchor)
             if not root or not humanoid or humanoid.Health <= 0 then
                 break
             end
+            if humanoid.PlatformStand or humanoid.Sit then
+                pcall(function()
+                    humanoid.PlatformStand = false
+                    humanoid.Sit = false
+                    humanoid:ChangeState(Enum.HumanoidStateType.Running)
+                end)
+            end
 
             -- Fast Tween к редчайшим наградам ТОЛЬКО на текущем поле ростка
             if CONFIG.FAST_TWEEN_RAREST_ENABLED and not isFastTweenActive and anchorZone then
@@ -6318,27 +6372,14 @@ function Looter:harvest()
 
         end
 
-        if isBackpackFull() then
-            stopAutoDig()
-            tokenCollectorBusy = false
-            patrolTarget = nil
-            while isBackpackFull() and alive() do
-                s.currentStatus = "Рюкзак полный — делаю Honey на улье..."
-                makeHoney()
-                task.wait(1)
-            end
-            if not alive() or not isSproutAlive(sprout, sproutAnchor) then break end
-            s.currentStatus = "Возвращаюсь к ростку"
-            moveToSprout(sprout)
-        end
         s.currentStatus = CONFIG.ENABLE_AUTO_DIG and "Росток: копаю и бегаю по полю" or "Росток: собираю токены"
         collectTokensFor(6, function()
-            return not alive() or not isSproutAlive(sprout, sproutAnchor) or isBackpackFull()
+            return not alive() or not isSproutAlive(sprout, sproutAnchor)
         end, sproutAnchor)
         task.wait(0.05)
     end
 
-    -- Фаза 2: Росток сломан! Лутаем оставшиеся ценные токены (игнорируя honey tokens)
+    -- Фаза 2: Росток сломан! Лутаем оставшиеся ценные токены (НЕ прерывать из-за полного рюкзака!)
     if alive() and sproutAnchor then
         local char = player.Character
         local root = char and char:FindFirstChild("HumanoidRootPart")
@@ -6350,41 +6391,31 @@ function Looter:harvest()
             if newRoot and sproutAnchor then
                 moveRootToPosition(newRoot, getGroundPos(sproutAnchor), 10)
             end
-
         end
 
-        if isBackpackFull() then
-            stopAutoDig()
-            tokenCollectorBusy = false
-            patrolTarget = nil
-            while isBackpackFull() and alive() do
-                s.currentStatus = "Рюкзак полный — делаю Honey"
-                makeHoney()
-                task.wait(1)
-            end
-        end
-        if alive() and not isBackpackFull() then
-            -- BURST-РЕЖИМ СБОРА
-            if CONFIG.BURST_LOOT_ENABLED ~= false then
-                s.currentStatus = "⚡ BURST-СБОР: Сверхбыстрый сбор редкого лута!"
-                stopAutoDig()
-                tokenCollectorBusy = false
-                patrolTarget = nil
-                isBurstLootActive = true
-                local burstTime = tonumber(CONFIG.BURST_LOOT_TIME) or 7
-                local burstStart = os.clock()
-                collectTokensFor(burstTime, function()
-                    return not alive() or isBackpackFull() or (os.clock() - burstStart >= burstTime)
-                end, sproutAnchor)
-                isBurstLootActive = false
-            end
+        stopAutoDig()
+        tokenCollectorBusy = false
+        patrolTarget = nil
 
-            if alive() and not isBackpackFull() then
-                s.currentStatus = "Росток сломан — собираю оставшиеся токены..."
-                collectTokensFor(tonumber(CONFIG.BROKEN_WAIT) or 20, function()
-                    return not alive() or isBackpackFull()
-                end, sproutAnchor)
-            end
+        -- BURST-РЕЖИМ СБОРА
+        if CONFIG.BURST_LOOT_ENABLED ~= false then
+            s.currentStatus = "⚡ BURST-СБОР: Сверхбыстрый сбор редкого лута!"
+            isBurstLootActive = true
+            local burstTime = tonumber(CONFIG.BURST_LOOT_TIME) or 7
+            local burstStart = os.clock()
+            collectTokensFor(burstTime, function()
+                return not alive() or (os.clock() - burstStart >= burstTime)
+            end, sproutAnchor)
+            isBurstLootActive = false
+        end
+
+        if alive() then
+            s.currentStatus = "Росток сломан — собираю оставшиеся токены..."
+            local brokenWait = tonumber(CONFIG.BROKEN_WAIT) or 20
+            local waitStart = os.clock()
+            collectTokensFor(brokenWait, function()
+                return not alive() or (os.clock() - waitStart >= brokenWait)
+            end, sproutAnchor)
         end
     end
 
@@ -6466,6 +6497,11 @@ function Looter:Start()
         myClaimedHivePos = nil
         cachedHiveSlot = nil
         cachedHivePos = nil
+
+        -- Авто-сбор созревших плантаторов на сервере
+        if CONFIG.AUTO_HARVEST_PLANTERS ~= false then
+            pcall(managePlanters)
+        end
 
         -- 1. Сначала при заходе на сервер ищем росток/вициус ровно 5 секунд
         local initialTargetFound = false
@@ -6671,6 +6707,7 @@ function Looter:Start()
                 if alive() then
                     s.teleports += 1
                     s.currentStatus = "Телепортируюсь на новый сервер..."
+                    task.wait(0.02)
                     hopRandom()
                     task.wait(6)
                     return
@@ -6872,30 +6909,16 @@ function Solo:Start()
                                 end
                             end
 
-                            if isBackpackFull() then
-                                stopAutoDig()
-                                tokenCollectorBusy = false
-                                patrolTarget = nil
-                                while isBackpackFull() and alive() do
-                                    s.currentStatus = "Рюкзак полный — делаю Honey на улье..."
-                                    makeHoney()
-                                    task.wait(0.5)
-                                end
-                                if not alive() or not isSproutAlive(sprout, sproutAnchor) then break end
-                                s.currentStatus = "Возвращаюсь к ростку"
-                                moveToSprout(sprout)
-                            end
                             if CONFIG.CHECK_VICIOUS and findVicious() then break end
                             s.currentStatus = CONFIG.ENABLE_AUTO_DIG and "Росток: копаю и бегаю по полю" or "Росток: бегаю и собираю токены"
                             collectTokensFor(6, function()
                                 return not alive() or not isSproutAlive(sprout, sproutAnchor)
-                                    or isBackpackFull()
                                     or (CONFIG.CHECK_VICIOUS and findVicious() ~= nil)
                             end, sproutAnchor)
                             task.wait(0.05)
                         end
 
-                        -- Фаза 2: Росток сломан! Лутаем оставшиеся ценные токены (игнорируя honey tokens)
+                        -- Фаза 2: Росток сломан! Лутаем оставшиеся ценные токены (НЕ прерывать из-за полного рюкзака!)
                         if alive() and sproutAnchor and not (CONFIG.CHECK_VICIOUS and findVicious()) then
                             local char = player.Character
                             local root = char and char:FindFirstChild("HumanoidRootPart")
@@ -6911,40 +6934,33 @@ function Solo:Start()
                                 end
                             end
 
-                            if isBackpackFull() then
-                                stopAutoDig()
-                                tokenCollectorBusy = false
-                                patrolTarget = nil
-                                while isBackpackFull() and alive() do
-                                    s.currentStatus = "Рюкзак полный — делаю Honey"
-                                    makeHoney()
-                                    task.wait(0.5)
-                                end
-                            end
-                            if alive() and not isBackpackFull() then
-                                -- BURST-РЕЖИМ СБОРА
-                                if CONFIG.BURST_LOOT_ENABLED ~= false then
-                                    s.currentStatus = "⚡ BURST-СБОР: Сверхбыстрый сбор редкого лута!"
-                                    stopAutoDig()
-                                    tokenCollectorBusy = false
-                                    patrolTarget = nil
-                                    isBurstLootActive = true
-                                    local burstTime = tonumber(CONFIG.BURST_LOOT_TIME) or 7
-                                    local burstStart = os.clock()
-                                    collectTokensFor(burstTime, function()
-                                        return not alive() or isBackpackFull()
-                                            or (CONFIG.CHECK_VICIOUS and findVicious() ~= nil)
-                                            or (os.clock() - burstStart >= burstTime)
-                                    end, sproutAnchor)
-                                    isBurstLootActive = false
-                                end
+                            stopAutoDig()
+                            tokenCollectorBusy = false
+                            patrolTarget = nil
 
-                                if alive() and not isBackpackFull() and not (CONFIG.CHECK_VICIOUS and findVicious()) then
-                                    s.currentStatus = "Росток сломан — собираю оставшиеся токены..."
-                                    collectTokensFor(tonumber(CONFIG.BROKEN_WAIT) or 20, function()
-                                        return not alive() or isBackpackFull() or (CONFIG.CHECK_VICIOUS and findVicious() ~= nil)
-                                    end, sproutAnchor)
-                                end
+                            -- BURST-РЕЖИМ СБОРА
+                            if CONFIG.BURST_LOOT_ENABLED ~= false then
+                                s.currentStatus = "⚡ BURST-СБОР: Сверхбыстрый сбор редкого лута!"
+                                isBurstLootActive = true
+                                local burstTime = tonumber(CONFIG.BURST_LOOT_TIME) or 7
+                                local burstStart = os.clock()
+                                collectTokensFor(burstTime, function()
+                                    return not alive()
+                                        or (CONFIG.CHECK_VICIOUS and findVicious() ~= nil)
+                                        or (os.clock() - burstStart >= burstTime)
+                                end, sproutAnchor)
+                                isBurstLootActive = false
+                            end
+
+                            if alive() and not (CONFIG.CHECK_VICIOUS and findVicious()) then
+                                s.currentStatus = "Росток сломан — собираю оставшиеся токены..."
+                                local brokenWait = tonumber(CONFIG.BROKEN_WAIT) or 20
+                                local waitStart = os.clock()
+                                collectTokensFor(brokenWait, function()
+                                    return not alive()
+                                        or (CONFIG.CHECK_VICIOUS and findVicious() ~= nil)
+                                        or (os.clock() - waitStart >= brokenWait)
+                                end, sproutAnchor)
                             end
                         end
                     end
@@ -7306,7 +7322,7 @@ new("TextLabel", {
 })
 new("TextLabel", {
     Size = UDim2.new(0, 220, 0, 25), Position = UDim2.new(0, 58, 0, 10),
-    BackgroundTransparency = 1, Text = "BSS Hopper v1.3.79",
+    BackgroundTransparency = 1, Text = "BSS Hopper v1.3.80",
     TextColor3 = C.text, Font = Enum.Font.GothamBold, TextSize = 22,
     TextXAlignment = Enum.TextXAlignment.Left, Parent = head,
 })
