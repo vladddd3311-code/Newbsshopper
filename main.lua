@@ -1944,10 +1944,73 @@ end
 
 function fightWindyBee(windy)
     if not windy or not windy.Parent then return false end
-    log("Windy", "🌪️ Найдена Windy Bee! Взлетаю и парю прямо над ней, как над Vicious Bee...")
-    notifyAllWebhooks("Windy Bee!", "Обнаружена дикая Windy Bee! Лечу и парю прямо над ней...", "00e5ff")
+    log("Windy", "🌪️ Найдена Windy Bee! Лечу на поле, подбегаю под неё по земле, затем взлетаю парить прямо над ней...")
+    notifyAllWebhooks("Windy Bee!", "Обнаружена дикая Windy Bee! Лечу на поле, подбегаю под неё и взлетаю парить над ней...", "00e5ff")
     local started = os.clock()
 
+    -- ШАГ 1: Летим на поле, где находится Windy Bee
+    local wPos = worldPos(windy)
+    if wPos then
+        local fieldZone = getActiveFlowerZone(wPos)
+        local targetGround = (fieldZone and getGroundPos(fieldZone.Position)) or getGroundPos(wPos)
+        local char = player.Character
+        local root = char and char:FindFirstChild("HumanoidRootPart")
+        if root and targetGround then
+            log("Windy", "Подлетаю к полю с Windy Bee...")
+            moveRootToPosition(root, targetGround, 6)
+            task.wait(0.2)
+        end
+    end
+
+    -- ШАГ 2: Бежим по земле прямо ПОД Windy Bee
+    setFlightNoclip(false)
+    local char = player.Character
+    local root = char and char:FindFirstChild("HumanoidRootPart")
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+    if hum then
+        pcall(function()
+            hum.PlatformStand = false
+            hum.Sit = false
+            hum:ChangeState(Enum.HumanoidStateType.Landed)
+            hum:ChangeState(Enum.HumanoidStateType.Running)
+        end)
+        pcall(applyWalkSpeed)
+    end
+    if char then
+        pcall(function()
+            for _, part in ipairs(char:GetDescendants()) do
+                if part:IsA("BasePart") then
+                    local n = part.Name
+                    if n == "HumanoidRootPart" or n == "Head" or n == "Torso" or n == "UpperTorso" or n == "LowerTorso" then
+                        part.CanCollide = true
+                    end
+                end
+            end
+        end)
+    end
+
+    local runUnderStart = os.clock()
+    log("Windy", "Бегу по земле прямо под Windy Bee...")
+    while alive() and windy.Parent and (os.clock() - runUnderStart < 5) do
+        local curPos = worldPos(windy)
+        local c = player.Character
+        local r = c and c:FindFirstChild("HumanoidRootPart")
+        local h = c and c:FindFirstChildOfClass("Humanoid")
+        if not r or not h then break end
+
+        if curPos then
+            local flatDelta = Vector3.new(curPos.X - r.Position.X, 0, curPos.Z - r.Position.Z)
+            if flatDelta.Magnitude <= 8 then
+                log("Windy", string.format("✅ Добежали под Windy Bee (расстояние %.1f studs)! Взлетаю над ней...", flatDelta.Magnitude))
+                break
+            end
+            h:MoveTo(Vector3.new(curPos.X, r.Position.Y, curPos.Z))
+        end
+        pcall(swingDigTool)
+        task.wait(0.1)
+    end
+
+    -- ШАГ 3: Теперь взлетаем и парим прямо НАД Windy Bee, как над Vicious Bee!
     setFlightNoclip(true)
     local hoverHeight = math.clamp(tonumber(CONFIG.WINDY_HOVER_HEIGHT) or 16, 12, 28) -- Безопасная высота парения над телом Windy Bee и торнадо
     local smoothedTarget = nil
@@ -2630,17 +2693,13 @@ function managePlanters()
     local activeTypes = {}
     local harvestedAny = false
 
-    -- 1. Сбор созревших плантаторов (если созрели, достигли % или включены пользователем)
+    -- 1. Сбор созревших плантаторов
     for _, info in ipairs(activePlanters) do
         activeTypes[info.type] = true
         local pCfg = CONFIG.PLANTERS_CONFIG and CONFIG.PLANTERS_CONFIG[info.type]
         local isEnabled = pCfg and (pCfg.enabled == true)
         local targetPct = (pCfg and tonumber(pCfg.percent)) or 100
 
-        -- Собираем если:
-        -- 1) info.ready == true (плантатор созрел / Ready!)
-        -- 2) info.percent >= targetPct (достиг порога %, по умолч. 100%)
-        -- 3) ИЛИ если включен пользователем (isEnabled) и (info.percent >= targetPct or info.percent == 0)
         local shouldHarvest = (info.ready == true) or (info.percent >= targetPct) or (isEnabled and (info.percent >= targetPct or info.percent == 0))
 
         if shouldHarvest then
@@ -2648,24 +2707,40 @@ function managePlanters()
             log("Плантатор", string.format("🪴 Плантатор %s на поле %s готов к сбору (%.1f%%, порог %d%%)! Собираю урожай...", info.type, info.field, info.percent, targetPct))
             notifyAllWebhooks("Сбор плантатора!", string.format("Плантатор %s на поле %s собран!", info.type, info.field), "00f5a0")
 
+            -- ШАГ 0: Летим к плантатору
             local root = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
             local pPos = worldPos(info.model)
             if root and pPos then
-                moveRootToPosition(root, getGroundPos(pPos), 3.5)
+                moveRootToPosition(root, getGroundPos(pPos), 6)
+                task.wait(0.15)
             end
 
-            -- Шаг 1: Активируем ProximityPrompt ("Harvest the ... Planter")
+            -- ШАГ 1: Нажимаем E (VirtualInputManager) — как в скриншоте "Harvest the Candy Planter (It's still growing)"
+            -- Сначала пробуем fireproximityprompt, затем VIM E, затем getconnections
             for _, prompt in ipairs(info.model:GetDescendants()) do
                 if prompt:IsA("ProximityPrompt") then
                     pcall(function()
                         prompt.HoldDuration = 0
                         prompt.RequiresLineOfSight = false
-                        prompt.MaxActivationDistance = 99
+                        prompt.MaxActivationDistance = 999
                     end)
+                    -- fireproximityprompt (самый надежный)
                     if type(fireproximityprompt) == "function" then
                         pcall(fireproximityprompt, prompt, 0, true)
                         pcall(fireproximityprompt, prompt)
                     end
+                    -- getconnections
+                    pcall(function()
+                        if type(getconnections) == "function" then
+                            for _, conn in ipairs(getconnections(prompt.Triggered)) do
+                                conn:Fire()
+                            end
+                            for _, conn in ipairs(getconnections(prompt.TriggerEnded)) do
+                                conn:Fire()
+                            end
+                        end
+                    end)
+                    -- InputHoldBegin/End
                     pcall(function()
                         prompt:InputHoldBegin()
                         task.wait(0.06)
@@ -2673,15 +2748,29 @@ function managePlanters()
                     end)
                 end
             end
+
+            -- VIM E key (имитация нажатия E рядом с плантатором)
             pcall(function()
                 local vim = game:GetService("VirtualInputManager")
                 if vim then
                     vim:SendKeyEvent(true, Enum.KeyCode.E, false, game)
-                    task.wait(0.08)
+                    task.wait(0.1)
+                    vim:SendKeyEvent(false, Enum.KeyCode.E, false, game)
+                end
+            end)
+            task.wait(0.2)
+
+            -- Повторная попытка E через секунду (на случай если первый раз не сработал из-за загрузки промпта)
+            pcall(function()
+                local vim = game:GetService("VirtualInputManager")
+                if vim then
+                    vim:SendKeyEvent(true, Enum.KeyCode.E, false, game)
+                    task.wait(0.1)
                     vim:SendKeyEvent(false, Enum.KeyCode.E, false, game)
                 end
             end)
 
+            -- FireServer (на случай если промпт активировал серверное событие)
             if pCmd then
                 pcall(function()
                     pCmd:FireServer({ Type = "Harvest", Planter = info.model, Confirm = true })
@@ -2696,16 +2785,39 @@ function managePlanters()
                 end)
             end
 
-            -- Шаг 2: Подтверждаем всплывающий диалог "Harvest the Planter before it's done growing? [Yes]"
-            for _ = 1, 15 do
+            -- ШАГ 2: Ждём и подтверждаем "Yes" в диалоге сбора плантатора
+            for attempt = 1, 20 do
                 task.wait(0.1)
                 if confirmPlanterHarvestModal() then
+                    log("Плантатор", "✅ Нажали [Yes] в диалоге сбора плантатора!")
                     break
                 end
+                -- Повторно жмем E если диалог не появился за 1 секунду
+                if attempt == 10 then
+                    pcall(function()
+                        local vim = game:GetService("VirtualInputManager")
+                        if vim then
+                            vim:SendKeyEvent(true, Enum.KeyCode.E, false, game)
+                            task.wait(0.1)
+                            vim:SendKeyEvent(false, Enum.KeyCode.E, false, game)
+                        end
+                    end)
+                end
             end
+            task.wait(0.3)
 
+            -- ШАГ 3: Определяем поле, на котором стоял плантатор, и БЕГАЕМ по нему 10 секунд!
             LOOT_REPORT_STATS.planters = (LOOT_REPORT_STATS.planters or 0) + 1
-            collectTokensFor(10, function() return not alive() end, pPos)
+
+            -- Определяем центр поля для сбора токенов
+            local fieldZone = getActiveFlowerZone(pPos)
+            if not fieldZone and info.field then
+                fieldZone = getFieldPart(info.field)
+            end
+            local fieldAnchorPos = (fieldZone and fieldZone.Position) or pPos
+
+            log("Плантатор", string.format("🏃 Бегаю по полю %s 10 секунд, собираю выпавшие токены!", info.field or "?"))
+            collectTokensFor(10, function() return not alive() end, fieldAnchorPos)
             activeTypes[info.type] = false
             task.wait(0.5)
         end
@@ -5647,7 +5759,23 @@ collectTokensFor = function(maxSeconds, stopFn, fieldAnchor)
             pcall(function()
                 initialHum.PlatformStand = false
                 initialHum.Sit = false
+                initialHum:ChangeState(Enum.HumanoidStateType.Landed)
                 initialHum:ChangeState(Enum.HumanoidStateType.Running)
+            end)
+        end
+        -- Принудительно выставляем скорость бега, чтобы персонаж БЕЖАЛ а не стоял
+        pcall(applyWalkSpeed)
+        -- Восстанавливаем коллизии на основных частях тела (после полета они могут быть выключены)
+        if initialChar then
+            pcall(function()
+                for _, part in ipairs(initialChar:GetDescendants()) do
+                    if part:IsA("BasePart") then
+                        local n = part.Name
+                        if n == "HumanoidRootPart" or n == "Head" or n == "Torso" or n == "UpperTorso" or n == "LowerTorso" then
+                            part.CanCollide = true
+                        end
+                    end
+                end
             end)
         end
 
@@ -7322,7 +7450,7 @@ new("TextLabel", {
 })
 new("TextLabel", {
     Size = UDim2.new(0, 220, 0, 25), Position = UDim2.new(0, 58, 0, 10),
-    BackgroundTransparency = 1, Text = "BSS Hopper v1.3.80",
+    BackgroundTransparency = 1, Text = "BSS Hopper v1.3.81",
     TextColor3 = C.text, Font = Enum.Font.GothamBold, TextSize = 22,
     TextXAlignment = Enum.TextXAlignment.Left, Parent = head,
 })
