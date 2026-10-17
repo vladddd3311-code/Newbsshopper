@@ -290,7 +290,7 @@ local CONFIG = {
     DEBUG_SPROUT = true, CHECK_VICIOUS = true, CHECK_SPROUTS = true,
     AUTO_START = true,
 
-    WALK_SPEED_MULT = 2.5, FLY_SPEED = 100, JUMP_POWER = 60,
+    WALK_SPEED_MULT = 5.625, FLY_SPEED = 100, JUMP_POWER = 60,
 
     BACKPACK_FILL_THRESHOLD = 0.95, HONEY_MAX_WAIT = 45,
 
@@ -1017,10 +1017,11 @@ function setFlightNoclip(enabled)
         if character then
             for _, part in ipairs(character:GetDescendants()) do
                 if part:IsA("BasePart") then
-                    if part.Name == "HumanoidRootPart" then
-                        pcall(function() part.CanCollide = false end)
-                    else
+                    local n = part.Name
+                    if n == "Head" or n == "Torso" or n == "UpperTorso" or n == "LowerTorso" then
                         pcall(function() part.CanCollide = true end)
+                    else
+                        pcall(function() part.CanCollide = false end)
                     end
                 end
             end
@@ -1100,10 +1101,84 @@ function getGroundPos(pos)
     return ground
 end
 
+function getFieldPart(fieldName)
+    if not fieldName or fieldName == "" then return nil end
+    local zones = Workspace:FindFirstChild("FlowerZones")
+    if not zones then return nil end
+    local clean = string.lower(fieldName):gsub("%s*field%s*", ""):gsub("%s*patch%s*", ""):gsub("%s*forest%s*", "")
+    for _, z in ipairs(zones:GetChildren()) do
+        local zn = string.lower(z.Name)
+        if zn == string.lower(fieldName) or string.find(zn, clean, 1, true) then
+            return z
+        end
+    end
+    return nil
+end
+
+local isReroutingFlight = false
+
+local UPPER_15_BEE_FIELDS = {
+    ["pine tree forest"] = true,
+    ["pumpkin patch"] = true,
+    ["cactus field"] = true,
+}
+
+local LOWER_10_BEE_FIELDS = {
+    ["pineapple patch"] = true,
+    ["stump field"] = true,
+}
+
+function isUpper15BeeField(posOrName)
+    if typeof(posOrName) == "string" then
+        return UPPER_15_BEE_FIELDS[string.lower(posOrName)] == true
+    end
+    if typeof(posOrName) == "Vector3" then
+        local fName = getFieldForPos(posOrName, 45)
+        if fName then
+            return UPPER_15_BEE_FIELDS[string.lower(fName)] == true
+        end
+    end
+    return false
+end
+
+function isLower10BeeField(posOrName)
+    if typeof(posOrName) == "string" then
+        return LOWER_10_BEE_FIELDS[string.lower(posOrName)] == true
+    end
+    if typeof(posOrName) == "Vector3" then
+        local fName = getFieldForPos(posOrName, 45)
+        if fName then
+            return LOWER_10_BEE_FIELDS[string.lower(fName)] == true
+        end
+    end
+    return false
+end
+
+function needsMountainTopReroute(startPos, endPos)
+    if not startPos or not endPos then return false end
+    local aToB = isUpper15BeeField(startPos) and isLower10BeeField(endPos)
+    local bToA = isLower10BeeField(startPos) and isUpper15BeeField(endPos)
+    return aToB or bToA
+end
+
 -- Плавный покадровый полёт через стены: без проваливания под текстуры
 function moveRootToPosition(root, destination, maxDuration)
     if not root or not root.Parent or typeof(destination) ~= "Vector3" then return false end
     flightStopRequested = false
+
+    local startPos = root.Position
+
+    -- Безопасный облёт через Mountain Top Field (над пещерой со смертоносным пауком/оборотнем)
+    if not isReroutingFlight and needsMountainTopReroute(startPos, destination) then
+        local mtnPart = getFieldPart("Mountain Top Field")
+        local mtnPos = mtnPart and (mtnPart.Position + Vector3.new(0, 25, 0)) or Vector3.new(76, 195, -178)
+        log("Маршрут", "🏔️ Безопасный перелёт через Mountain Top Field (облёт пещеры с мобом)!")
+        isReroutingFlight = true
+        moveRootToPosition(root, mtnPos, (maxDuration or 12) * 0.55)
+        isReroutingFlight = false
+        if not alive() or flightStopRequested then return false end
+        return moveRootToPosition(root, destination, (maxDuration or 12) * 0.55)
+    end
 
     -- Защита от полета под текстуры: проверяем, не направлена ли цель под поле
     local zName, zone = getFieldForPos(destination, 35)
@@ -1115,7 +1190,6 @@ function moveRootToPosition(root, destination, maxDuration)
     end
 
     setFlightNoclip(true)
-    local startPos = root.Position
     local offset = destination - startPos
     local distance = offset.Magnitude
     if distance < 2.5 then
@@ -1293,12 +1367,11 @@ end
 lastActiveTargetPos = nil
 
 function getCalculatedWalkSpeed(boostPriority)
-    local mult = tonumber(CONFIG.WALK_SPEED_MULT) or 2.5
+    local mult = tonumber(CONFIG.WALK_SPEED_MULT) or 5.625
     local base = 16 * mult
-    -- Ограничиваем безопасную скорость 24-48 studs/s во избежание тряски и проскакивания целей
-    base = math.clamp(base, 24, 48)
+    if base < 50 then base = 90 end -- быстрая скорость бега (90 studs/s) по требованию пользователя
     if boostPriority then
-        return math.min(base * 1.25, 54)
+        return math.max(base * 1.2, 110)
     end
     return base
 end
@@ -1651,7 +1724,7 @@ end
 
 function fightWindyBee(windy)
     if not windy or not windy.Parent then return false end
-    log("Windy", "Найдена дикая Windy Bee! Начинаю бой...")
+    log("Windy", "🌪️ Найдена дикая Windy Bee! Начинаю бой...")
     notifyAllWebhooks("Windy Bee!", "Обнаружена дикая Windy Bee! Лечу на поле для боя...", "00e5ff")
     local started = os.clock()
 
@@ -1669,28 +1742,59 @@ function fightWindyBee(windy)
     end
 
     local lastBeePos = initialPos
-    local lastMoveToCall = 0
-    local lastMoveToTarget = nil
     local lastWindyJump = 0
 
-    -- ДАЛЬШЕ БЕГАЕМ ПО ПОЛЮ НА ЗЕМЛЕ: БЬЁМ ПЧЁЛУ И УВОРАЧИВАЕМСЯ ОТ ТОРНАДО!
+    -- 1 раз подбегаем под облако Windy Bee и делаем 1 прыжок
+    local char = player.Character
+    local curRoot = char and char:FindFirstChild("HumanoidRootPart")
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+    if curRoot and hum and alive() then
+        local underBee = Vector3.new(initialPos.X, curRoot.Position.Y, initialPos.Z)
+        hum:MoveTo(underBee)
+        local t0 = os.clock()
+        while alive() and (os.clock() - t0 < 3.0) and (curRoot.Position - underBee).Magnitude > 8 do
+            task.wait(0.08)
+        end
+        if hum.FloorMaterial ~= Enum.Material.Air then
+            hum.Jump = true
+            log("Windy", "☁️ Подбежал под облако Windy Bee и прыгнул 1 раз!")
+            task.wait(0.4)
+        end
+    end
+
+    -- ДАЛЬШЕ БЕГАЕМ ПО ПОЛЮ КАК НА РОСТКАХ, УВОРАЧИВАЯСЬ ОТ ТОРНАДО!
     while alive() and windy.Parent and (os.clock() - started < 360) do
-        local char = player.Character
-        local curRoot = char and char:FindFirstChild("HumanoidRootPart")
-        local hum = char and char:FindFirstChildOfClass("Humanoid")
-        if not curRoot or not hum or hum.Health <= 0 then task.wait(0.5); continue end
+        local curChar = player.Character
+        local rootPart = curChar and curChar:FindFirstChild("HumanoidRootPart")
+        local humanoid = curChar and curChar:FindFirstChildOfClass("Humanoid")
+        if not rootPart or not humanoid or humanoid.Health <= 0 then
+            curChar, rootPart, humanoid = waitForRespawn(6)
+            if not rootPart then break end
+        end
 
         local beePos = worldPos(windy)
         if not beePos then break end
 
-        -- Если Windy Bee перелетела на ДРУГОЕ поле (дистанция > 90 studs) - только тогда перелетаем!
+        -- Если Windy Bee перелетела на ДРУГОЕ поле (дистанция > 90 studs) - только тогда перелетаем 1 раз!
         if (beePos - lastBeePos).Magnitude > 90 then
             log("Windy", "Windy Bee сменила поле! Перелетаю 1 раз на новое поле...")
             lastBeePos = beePos
             local newGround = getGroundPos(beePos)
-            moveRootToPosition(curRoot, newGround, 6)
+            moveRootToPosition(rootPart, newGround, 6)
             setFlightNoclip(false)
             task.wait(0.3)
+
+            -- На новом поле снова подбегаем 1 раз под облако и прыгаем
+            local underBee = Vector3.new(beePos.X, rootPart.Position.Y, beePos.Z)
+            humanoid:MoveTo(underBee)
+            local t0 = os.clock()
+            while alive() and (os.clock() - t0 < 3.0) and (rootPart.Position - underBee).Magnitude > 8 do
+                task.wait(0.08)
+            end
+            if humanoid.FloorMaterial ~= Enum.Material.Air then
+                humanoid.Jump = true
+                task.wait(0.4)
+            end
         end
 
         applyWalkSpeed()
@@ -1703,8 +1807,8 @@ function fightWindyBee(windy)
             for _, torn in ipairs(tornadoes:GetChildren()) do
                 if string.find(string.lower(torn.Name), "tornado", 1, true) then
                     local tpos = worldPos(torn)
-                    if tpos and (curRoot.Position - tpos).Magnitude < 25 then
-                        local away = (curRoot.Position - tpos)
+                    if tpos and (rootPart.Position - tpos).Magnitude < 25 then
+                        local away = (rootPart.Position - tpos)
                         tornadoDodgeDir = Vector3.new(away.X, 0, away.Z).Unit
                         break
                     end
@@ -1712,40 +1816,34 @@ function fightWindyBee(windy)
             end
         end
 
-        local runTarget
         if tornadoDodgeDir then
-            runTarget = curRoot.Position + tornadoDodgeDir * 28
+            local runTarget = rootPart.Position + tornadoDodgeDir * 28
             log("Windy", "Уворот по земле от торнадо Windy Bee!")
-            if hum.FloorMaterial ~= Enum.Material.Air and (os.clock() - lastWindyJump > 1.8) then
-                hum.Jump = true
+            if humanoid.FloorMaterial ~= Enum.Material.Air and (os.clock() - lastWindyJump > 1.8) then
+                humanoid.Jump = true
                 lastWindyJump = os.clock()
             end
+            humanoid:MoveTo(runTarget)
+            task.wait(0.4)
         else
-            -- Бегаем вокруг проекции пчелы на землю (в радиусе 12 studs), чтобы пчёлы атаковали
-            local angle = (os.clock() * 2) % (math.pi * 2)
-            runTarget = Vector3.new(beePos.X + math.cos(angle) * 12, curRoot.Position.Y, beePos.Z + math.sin(angle) * 12)
+            -- Бегаем по полю точно так же, как будто лутаем ростки!
+            collectTokensFor(3.0, function()
+                if not alive() or not windy.Parent then return true end
+                local curBee = worldPos(windy)
+                if curBee and (curBee - lastBeePos).Magnitude > 90 then return true end
+                if tornadoes then
+                    for _, torn in ipairs(tornadoes:GetChildren()) do
+                        if string.find(string.lower(torn.Name), "tornado", 1, true) then
+                            local tpos = worldPos(torn)
+                            if tpos and (rootPart.Position - tpos).Magnitude < 25 then
+                                return true
+                            end
+                        end
+                    end
+                end
+                return false
+            end, beePos)
         end
-
-        if fieldZone then
-            local lp = fieldZone.CFrame:PointToObjectSpace(runTarget)
-            local half = fieldZone.Size * 0.5
-            local safeX = math.clamp(lp.X, -half.X + 4, half.X - 4)
-            local safeZ = math.clamp(lp.Z, -half.Z + 4, half.Z - 4)
-            local safeWorld = fieldZone.CFrame:PointToWorldSpace(Vector3.new(safeX, lp.Y, safeZ))
-            runTarget = Vector3.new(safeWorld.X, curRoot.Position.Y, safeWorld.Z)
-        end
-
-        local now = os.clock()
-        if not lastMoveToTarget or (lastMoveToTarget - runTarget).Magnitude > 1.5 or (now - lastMoveToCall > 0.25) then
-            lastMoveToTarget = runTarget
-            lastMoveToCall = now
-            hum:MoveTo(runTarget)
-        end
-
-        -- Микро-сбор падающих Cloud Vials и токенов на земле
-        collectTokensFor(1.2, function()
-            return not alive() or not windy.Parent
-        end, beePos)
 
         task.wait(0.05)
     end
@@ -2034,6 +2132,55 @@ function findMyActivePlanters()
     return myPlanters
 end
 
+function confirmPlanterHarvestModal()
+    local pg = player:FindFirstChild("PlayerGui")
+    if not pg then return false end
+    for _, desc in ipairs(pg:GetDescendants()) do
+        if desc:IsA("TextLabel") then
+            local t = string.lower(desc.Text or "")
+            if string.find(t, "harvest the planter", 1, true)
+               or string.find(t, "done growing", 1, true) then
+                local dialog = desc.Parent
+                for _ = 1, 4 do
+                    if dialog and dialog:IsA("GuiObject") then
+                        for _, btn in ipairs(dialog:GetDescendants()) do
+                            if btn:IsA("TextButton") or btn:IsA("ImageButton") then
+                                local bText = string.lower(btn.Text or "")
+                                local bName = string.lower(btn.Name)
+                                local innerTxt = ""
+                                local innerLabel = btn:FindFirstChildWhichIsA("TextLabel")
+                                if innerLabel then innerTxt = string.lower(innerLabel.Text or "") end
+
+                                if bText == "yes" or innerTxt == "yes" or bName == "yes" or string.find(bName, "yes", 1, true) then
+                                    pcall(function()
+                                        if type(firesignal) == "function" then
+                                            firesignal(btn.MouseButton1Click)
+                                            firesignal(btn.Activated)
+                                        end
+                                    end)
+                                    pcall(function()
+                                        local vim = game:GetService("VirtualInputManager")
+                                        if vim then
+                                            local pos = btn.AbsolutePosition + (btn.AbsoluteSize * 0.5)
+                                            vim:SendMouseButtonEvent(pos.X, pos.Y, 0, true, game, 1)
+                                            task.wait(0.04)
+                                            vim:SendMouseButtonEvent(pos.X, pos.Y, 0, false, game, 1)
+                                        end
+                                    end)
+                                    log("Плантатор", "✅ Нажата кнопка [ Yes ] в диалоге сбора плантатора!")
+                                    return true
+                                end
+                            end
+                        end
+                        dialog = dialog.Parent
+                    end
+                end
+            end
+        end
+    end
+    return false
+end
+
 function managePlanters()
     if CONFIG.AUTO_HARVEST_PLANTERS == false then return end
     local rep = game:GetService("ReplicatedStorage")
@@ -2062,18 +2209,45 @@ function managePlanters()
                 moveRootToPosition(root, getGroundPos(pPos), 3.5)
             end
 
+            -- Шаг 1: Активируем ProximityPrompt ("Harvest the ... Planter")
+            for _, prompt in ipairs(info.model:GetDescendants()) do
+                if prompt:IsA("ProximityPrompt") then
+                    pcall(function() prompt.HoldDuration = 0 end)
+                    if type(fireproximityprompt) == "function" then
+                        pcall(fireproximityprompt, prompt, 0, true)
+                        pcall(fireproximityprompt, prompt)
+                    end
+                    pcall(function()
+                        prompt:InputHoldBegin()
+                        task.wait(0.06)
+                        prompt:InputHoldEnd()
+                    end)
+                end
+            end
+            pcall(function()
+                local vim = game:GetService("VirtualInputManager")
+                if vim then
+                    vim:SendKeyEvent(true, Enum.KeyCode.E, false, game)
+                    task.wait(0.08)
+                    vim:SendKeyEvent(false, Enum.KeyCode.E, false, game)
+                end
+            end)
+
             if pCmd then
                 pcall(function()
-                    pCmd:FireServer({ Type = "Harvest", Planter = info.model })
-                    pCmd:FireServer({ Type = "Harvest", PlanterBox = info.model })
+                    pCmd:FireServer({ Type = "Harvest", Planter = info.model, Confirm = true })
+                    pCmd:FireServer({ Type = "Harvest", PlanterBox = info.model, Confirm = true })
                 end)
             end
             if repPkg then
-                pcall(function() repPkg:FireServer({ Type = "Harvest", Planter = info.model }) end)
+                pcall(function() repPkg:FireServer({ Type = "Harvest", Planter = info.model, Confirm = true }) end)
             end
-            for _, prompt in ipairs(info.model:GetDescendants()) do
-                if prompt:IsA("ProximityPrompt") then
-                    pcall(fireproximityprompt, prompt)
+
+            -- Шаг 2: Подтверждаем всплывающий диалог "Harvest the Planter before it's done growing? [Yes]"
+            for _ = 1, 8 do
+                task.wait(0.15)
+                if confirmPlanterHarvestModal() then
+                    break
                 end
             end
 
@@ -4682,19 +4856,7 @@ function swingDigTool()
         end
     end
 
-    -- Нативная эмуляция зажатия через VirtualInputManager (внутри движка Roblox, мышь Windows свободна 100%)
-    pcall(function()
-        local vim = game:GetService("VirtualInputManager")
-        if vim then
-            task.spawn(function()
-                vim:SendMouseButtonEvent(0, 0, 0, true, game, 1)
-                task.wait(0.02)
-                vim:SendMouseButtonEvent(0, 0, 0, false, game, 1)
-            end)
-        end
-    end)
-
-    -- Серверный RemoteEvent сбора пыльцы в BSS
+    -- Чистая активация инструмента сбора без кликов мыши в экран
     local ev = getToolCollectRemote()
     if ev then
         pcall(function() ev:FireServer() end)
@@ -4838,9 +5000,9 @@ collectTokensFor = function(maxSeconds, stopFn, fieldAnchor)
                 task.wait(0.3)
             end
 
-            -- АКТИВНАЯ ЗАЩИТА: Защита от проваливания под поле (под текстуры)
+            -- АКТИВНАЯ ЗАЩИТА: Защита от реального проваливания в бездну
             if anchorZone and root then
-                local minFieldY = anchorZone.Position.Y - 2.0
+                local minFieldY = anchorZone.Position.Y - 18.0
                 if root.Position.Y < minFieldY then
                     log("Защита", "Персонаж провалился под поле! Мгновенный подъем на поверхность поля...")
                     local safeY = anchorZone.Position.Y + (anchorZone.Size.Y * 0.5) + 3.5
@@ -4979,15 +5141,6 @@ collectTokensFor = function(maxSeconds, stopFn, fieldAnchor)
                 patrolTarget = Vector3.new(safeWorld.X, (anchorZone and (anchorZone.Position.Y + 3.2)) or root.Position.Y, safeWorld.Z)
             end
 
-            -- Защита от вылета с поля: если персонажа оттолкнуло монстром или способностью за пределы клумбы
-            if anchorZone then
-                local myLp = anchorZone.CFrame:PointToObjectSpace(root.Position)
-                local half = anchorZone.Size * 0.5
-                if math.abs(myLp.X) > half.X + 6 or math.abs(myLp.Z) > half.Z + 6 then
-                    humanoid:MoveTo(anchorZone.Position)
-                end
-            end
-
             -- Плавное и безотказное перемещение через нативный MoveTo с защитой от тряски
             if patrolTarget and humanoid and root then
                 local currentPos = root.Position
@@ -4997,10 +5150,10 @@ collectTokensFor = function(maxSeconds, stopFn, fieldAnchor)
 
                 if dist > 3.0 then
                     local now = os.clock()
-                    if not lastMoveToTarget or (lastMoveToTarget - patrolTarget).Magnitude > 2.0 or (now - lastMoveToCall > 0.35) then
-                        lastMoveToTarget = patrolTarget
+                    if not lastMoveToTarget or (lastMoveToTarget - flatTarget).Magnitude > 2.0 or (now - lastMoveToCall > 0.35) then
+                        lastMoveToTarget = flatTarget
                         lastMoveToCall = now
-                        humanoid:MoveTo(patrolTarget)
+                        humanoid:MoveTo(flatTarget)
                     end
                 else
                     lastMoveToTarget = nil
@@ -6500,7 +6653,7 @@ new("TextLabel", {
 })
 new("TextLabel", {
     Size = UDim2.new(0, 220, 0, 25), Position = UDim2.new(0, 58, 0, 10),
-    BackgroundTransparency = 1, Text = "BSS Hopper v1.3.75",
+    BackgroundTransparency = 1, Text = "BSS Hopper v1.3.76",
     TextColor3 = C.text, Font = Enum.Font.GothamBold, TextSize = 22,
     TextXAlignment = Enum.TextXAlignment.Left, Parent = head,
 })
