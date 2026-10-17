@@ -4490,7 +4490,7 @@ function detectRarity(sprout)
         local h, sat, val = hueOf(part.Color)
         local deg = h * 360
         local r, g, b = part.Color.R, part.Color.G, part.Color.B
-        local isGrey = math.abs(r - g) < 0.08 and math.abs(g - b) < 0.08
+        local isGrey = math.abs(r - g) < 0.04 and math.abs(g - b) < 0.04 and math.abs(r - b) < 0.04
 
         -- 🍬 Gummy Sprout: прозрачный/полупрозрачный розовый/маджента (280° - 350°)
         if (part.Material == Enum.Material.Glass or part.Transparency > 0)
@@ -4508,8 +4508,11 @@ function detectRarity(sprout)
             return "epic", "sig:epic"
         end
 
-        -- 🥈 Rare Sprout: серебристый/серый (низкая насыщенность)
-        if isGrey and sat < 0.20 and val >= 0.48 and val <= 0.95 then
+        -- 🥈 Rare Sprout: СТРОГО серебристый/металлический/серый без зеленого оттенка
+        -- У Common зеленоватый оттенок (g > r и g > b). У Rare - чистый серый/серебристый или металл!
+        local isGreenish = (g > r and g > b and (g - r) >= 0.01) or (deg >= 70 and deg <= 155)
+        if not isGreenish and (part.Material == Enum.Material.Metal or part.Material == Enum.Material.Glass or part.Reflectance > 0.05 or isGrey)
+            and sat < 0.15 and val >= 0.45 and val <= 0.95 then
             return "rare", "sig:rare"
         end
     end
@@ -4529,23 +4532,9 @@ function detectRarity(sprout)
         end
     end
 
-    -- 7. ОБЫЧНЫЙ РОСТОК (Common / Basic)
-    -- Зеленый пластик, без неона, без свечения
-    for _, part in ipairs(parts) do
-        local h, sat, val = hueOf(part.Color)
-        local deg = h * 360
-        local r, g, b = part.Color.R, part.Color.G, part.Color.B
-        local knownCommon = math.abs(r - 0.706) <= 0.065 and math.abs(g - 0.745) <= 0.065 and math.abs(b - 0.729) <= 0.065
-        local paleGreen = (part.Material == Enum.Material.Plastic or part.Material == Enum.Material.SmoothPlastic)
-            and g >= r and g >= b and (g - r) >= 0.012 and val >= 0.45 and val <= 0.95
-        if not hasGlow and part.Material ~= Enum.Material.Neon then
-            if knownCommon or paleGreen or (deg >= 75 and deg <= 150 and sat < 0.55) then
-                return "basic", "sig:common"
-            end
-        end
-    end
-
-    return nil, "unconfirmed"
+    -- 7. ЕСЛИ РЕДКОСТЬ НЕ ОПРЕДЕЛЕНА — ЭТО 100% COMMON (BASIC) РОСТОК!
+    -- В BSS у Common ростка нет специальной метки редкости.
+    return "basic", "default:common"
 end
 
 function isRarityAtLeast(rarity, minimum)
