@@ -281,10 +281,18 @@ local CONFIG = {
     PUFF_MIN_RARITY = "common",
     FIXED_LEVEL = "basic",
     MIN_RARITY = "basic",
+    ALLOWED_SPROUT_RARITIES = {
+        basic = true,
+        moon = true,
+        rare = true,
+        gummy = true,
+        epic = true,
+        legendary = true,
+    },
     PLACE_ID = 1537690962,
 
     HOP_DELAY = 0.05, POLL_INTERVAL = 3, BROKEN_WAIT = 20,
-    INITIAL_CHECK = 1, REPORT_DELAY = 2.5,
+    INITIAL_CHECK = 0.05, REPORT_DELAY = 0.2,
     CONNECT_TIMEOUT = 12, MAX_ATTEMPTS = 3, FAILED_TTL = 600,
 
     DEBUG_SPROUT = true, CHECK_VICIOUS = true, CHECK_SPROUTS = true,
@@ -467,7 +475,7 @@ local PERSIST_ENV = _G
 pcall(function() if type(getgenv) == "function" then PERSIST_ENV = getgenv() end end)
 
 local SAVED_KEYS = {
-    "MODE","API_URL","API_KEY","SELF_TAG","VICIOUS_CHANNEL_ID","VICIOUS_FIELD_FROM","VICIOUS_FIELD_TO","FIXED_LEVEL","MIN_RARITY",
+    "MODE","API_URL","API_KEY","SELF_TAG","VICIOUS_CHANNEL_ID","VICIOUS_FIELD_FROM","VICIOUS_FIELD_TO","FIXED_LEVEL","MIN_RARITY","ALLOWED_SPROUT_RARITIES",
     "PLACE_ID","HOP_DELAY","POLL_INTERVAL","BROKEN_WAIT","INITIAL_CHECK",
     "REPORT_DELAY","CONNECT_TIMEOUT","MAX_ATTEMPTS","FAILED_TTL",
     "DEBUG_SPROUT","AUTO_START","CHECK_VICIOUS","CHECK_SPROUTS","CHECK_PUFFSHROOMS",
@@ -1249,12 +1257,13 @@ function moveRootToPosition(root, destination, maxDuration)
     return not flightStopRequested and root.Parent ~= nil and (root.Position - destination).Magnitude < 18
 end
 
-function waitForGameReady(timeout)
+function waitForGameReady(timeout, fastMode)
     local t0 = os.clock()
     timeout = timeout or 25
+    local isSearcher = fastMode or (Hopper and Hopper.Mode == "searcher") or (CONFIG and CONFIG.MODE == "searcher")
     while not game:IsLoaded() and os.clock() - t0 < timeout do
         if not alive() then return end
-        task.wait(0.3)
+        task.wait(0.05)
     end
     while os.clock() - t0 < timeout do
         if not alive() then return end
@@ -1267,9 +1276,15 @@ function waitForGameReady(timeout)
                 break
             end
         end
-        task.wait(0.5)
+        task.wait(isSearcher and 0.05 or 0.2)
     end
-    if alive() then task.wait(2.0) end
+    if alive() then
+        if isSearcher then
+            task.wait(0.05)
+        else
+            task.wait(1.2)
+        end
+    end
 end
 
 function waitForRespawn(timeout)
@@ -4342,6 +4357,17 @@ end
 
 function isSproutEligible(sprout)
     local rarity, source = detectRarity(sprout)
+    if not rarity then return false, nil, source end
+    local rLow = string.lower(tostring(rarity))
+    if rLow == "common" or rLow == "normal" then rLow = "basic" end
+
+    -- Проверяем индивидуальный переключатель редкостей (ВКЛ / ВЫКЛ)
+    if CONFIG.ALLOWED_SPROUT_RARITIES and type(CONFIG.ALLOWED_SPROUT_RARITIES) == "table" then
+        if CONFIG.ALLOWED_SPROUT_RARITIES[rLow] ~= nil then
+            return (CONFIG.ALLOWED_SPROUT_RARITIES[rLow] == true), rarity, source
+        end
+    end
+
     return isRarityAtLeast(rarity, CONFIG.MIN_RARITY), rarity, source
 end
 
@@ -6521,7 +6547,7 @@ function Searcher:report(jobId, rarity, fieldName)
         placeId=CONFIG.PLACE_ID, fieldName=fieldName or "unknown",
         searcherTag=CONFIG.SELF_TAG,
     })
-    local maxAttempts = math.max(5, tonumber(CONFIG.MAX_ATTEMPTS) or 3)
+    local maxAttempts = math.min(3, math.max(2, tonumber(CONFIG.MAX_ATTEMPTS) or 2))
     for attempt = 1, maxAttempts do
         local ok, resp = pcall(function() return postJson("/report", body) end)
         if ok and not responseRejected(resp) then
@@ -6529,7 +6555,7 @@ function Searcher:report(jobId, rarity, fieldName)
             self.stats.lastSprout = { fieldName = "отправлено" }
             return true
         end
-        if attempt < maxAttempts then task.wait(math.min(attempt * 1.5, 6)) end
+        if attempt < maxAttempts then task.wait(0.2) end
     end
     return false
 end
@@ -6541,7 +6567,7 @@ function Searcher:reportVicious(jobId, kind, fieldName)
         searcherTag=CONFIG.SELF_TAG,
         viciousChannelId=(CONFIG.VICIOUS_CHANNEL_ID ~= "" and CONFIG.VICIOUS_CHANNEL_ID) or nil,
     })
-    for attempt = 1, 3 do
+    for attempt = 1, 2 do
         local ok, resp = pcall(function() return postJson("/vicious", body) end)
         if ok then
             local lower = string.lower(tostring(resp))
@@ -6554,7 +6580,7 @@ function Searcher:reportVicious(jobId, kind, fieldName)
                 return true
             end
         end
-        if attempt < 3 then task.wait(attempt * 1.5) end
+        if attempt < 2 then task.wait(0.2) end
     end
     return false
 end
@@ -6567,10 +6593,10 @@ function Searcher:reportPuffshroom(jobId, rarity, level, fieldName, timeRemainin
         timeRemaining=timeRemaining, searcherTag=CONFIG.SELF_TAG,
         puffshroomChannelId=CONFIG.PUFFSHROOM_CHANNEL_ID,
     })
-    for attempt = 1, 3 do
+    for attempt = 1, 2 do
         local ok, resp = pcall(function() return postJson("/puffshroom", body) end)
         if ok and not responseRejected(resp) then self.stats.reportsSent += 1; return true end
-        if attempt < 3 then task.wait(attempt * 0.75) end
+        if attempt < 2 then task.wait(0.2) end
     end
     return false
 end
@@ -6584,14 +6610,14 @@ function Searcher:Start()
 
     self.thread = task.spawn(function()
         s.currentStatus = "Ожидание загрузки игры..."
-        waitForGameReady(25)
-        s.currentStatus = "Запуск сканирования..."
-        task.wait(tonumber(CONFIG.INITIAL_CHECK) or 1)
+        waitForGameReady(12, true)
+        s.currentStatus = "Быстрое сканирование..."
+        task.wait(0.05)
         while alive() do
             -- После смерти ждём новый персонаж и продолжаем тот же цикл.
             if not player.Character or not player.Character:FindFirstChild("HumanoidRootPart") then
                 s.currentStatus = "Персонаж погиб — жду возрождения..."
-                task.wait(0.5)
+                task.wait(0.2)
                 continue
             end
             local ok, err = pcall(function()
@@ -6607,7 +6633,11 @@ function Searcher:Start()
                             puffReported[key] = os.clock()
                             local f = detectField(puff)
                             local tm = findPuffshroomTimer(puff)
-                            if tm then self:reportPuffshroom(game.JobId, puffRarity, puffLevel, f, tm) end
+                            if tm then
+                                task.spawn(function()
+                                    self:reportPuffshroom(game.JobId, puffRarity, puffLevel, f, tm)
+                                end)
+                            end
                         end
                     end
                 end
@@ -6622,7 +6652,7 @@ function Searcher:Start()
                             local rarity = detectRarity(sprout)
                             if rarity then self:report(game.JobId, rarity, detectField(sprout)) end
                         end
-                        task.wait(tonumber(CONFIG.REPORT_DELAY) or 2.5)
+                        task.wait(0.2)
                         hopRandom(); return
                     end
                 end
@@ -6639,20 +6669,19 @@ function Searcher:Start()
                         s.currentStatus = "Репортую Common"
                         self:report(game.JobId, "common", fieldName)
                     end
-                    task.wait(tonumber(CONFIG.REPORT_DELAY) or 2.5)
+                    task.wait(0.2)
                     hopRandom()
                 else
                     s.currentStatus = "Сервер #" .. tostring(s.serversChecked) .. " — пусто"
-                    local hopWait = math.max(0.2, tonumber(CONFIG.HOP_DELAY) or 0.8)
-                    task.wait(hopWait)
+                    task.wait(0.1)
                     hopRandom()
                 end
             end)
             if not ok then
                 log("Ищущий", "Ошибка: " .. tostring(err))
-                task.wait(2); hopRandom()
+                task.wait(0.4); hopRandom()
             end
-            task.wait(math.max(0.5, tonumber(CONFIG.HOP_DELAY) or 0.8))
+            task.wait(0.15)
         end
     end)
 end
@@ -6703,6 +6732,41 @@ function Looter:harvestPuffshrooms()
     return true
 end
 
+local lastSproutBrokenTime = 0
+local lastSproutHarvestAnchor = nil
+local localVisitedTasks = {}
+
+local function isTaskVisited(jobId)
+    if not jobId or jobId == "" then return true end
+    if jobId == game.JobId then return true end
+    if isVisitedServer(jobId) or isFailed(jobId) then return true end
+    local t = localVisitedTasks[jobId]
+    if t and (os.clock() - t < 180) then return true end
+    return false
+end
+
+local function markTaskVisited(jobId)
+    if jobId and jobId ~= "" then
+        localVisitedTasks[jobId] = os.clock()
+        pcall(function() addVisitedServer(jobId) end)
+    end
+end
+
+local function isSproutLootProtected()
+    -- 1. На сервере прямо сейчас есть активный росток для сбора
+    if CONFIG.CHECK_SPROUTS and findLootableSprout() then
+        return true, "на сервере активный росток"
+    end
+    -- 2. Росток сломан, но ещё не прошло 15 секунд обязательного сбора лута
+    if lastSproutBrokenTime > 0 then
+        local elapsed = os.clock() - lastSproutBrokenTime
+        if elapsed < 15 then
+            return true, string.format("долутывание ростка (осталось %dс)", math.ceil(15 - elapsed))
+        end
+    end
+    return false, nil
+end
+
 function Looter:harvest()
     local s = self.stats
     local sprout = findLootableSprout()
@@ -6716,6 +6780,7 @@ function Looter:harvest()
     end
     sproutAnchor = worldPos(sprout) or sproutAnchor or (player.Character and player.Character:FindFirstChild("HumanoidRootPart") and player.Character.HumanoidRootPart.Position)
     currentSproutFieldZone = getActiveFlowerZone(sproutAnchor)
+    lastSproutHarvestAnchor = sproutAnchor
 
     local rar = detectRarity(sprout)
     s.lastSprout = { fieldName = RARITY_LABEL[rar] or "спрут" }
@@ -6759,7 +6824,11 @@ function Looter:harvest()
         task.wait(0.05)
     end
 
-    -- Фаза 2: Росток сломан! Лутаем оставшиеся ценные токены (НЕ прерывать из-за полного рюкзака!)
+    -- Фаза 2: Росток сломан! Засекаем точное время поломки
+    lastSproutBrokenTime = os.clock()
+    lastSproutHarvestAnchor = sproutAnchor
+    log("Спрут", "Росток сломан! Запущен 15-секундный таймер обязательного лутания.")
+
     if alive() and sproutAnchor then
         local char = player.Character
         local root = char and char:FindFirstChild("HumanoidRootPart")
@@ -6789,13 +6858,16 @@ function Looter:harvest()
             isBurstLootActive = false
         end
 
-        if alive() then
-            s.currentStatus = "Росток сломан — собираю оставшиеся токены..."
-            local brokenWait = tonumber(CONFIG.BROKEN_WAIT) or 20
-            local waitStart = os.clock()
-            collectTokensFor(brokenWait, function()
-                return not alive() or (os.clock() - waitStart >= brokenWait)
+        -- Обязательный сбор оставшихся токенов (минимум 15 секунд с момента поломки)
+        local totalLootDuration = math.max(15, tonumber(CONFIG.BROKEN_WAIT) or 20)
+        while alive() and (os.clock() - lastSproutBrokenTime < totalLootDuration) do
+            local elapsed = os.clock() - lastSproutBrokenTime
+            local remaining = math.ceil(totalLootDuration - elapsed)
+            s.currentStatus = string.format("Росток сломан — сбор лута (ещё %dс)...", remaining)
+            collectTokensFor(math.min(remaining, 5), function()
+                return not alive() or (os.clock() - lastSproutBrokenTime >= totalLootDuration)
             end, sproutAnchor)
+            task.wait(0.05)
         end
     end
 
@@ -6814,26 +6886,95 @@ function Looter:harvest()
 end
 
 function Looter:fetchNextVicious()
+    -- 1. Сначала опрашиваем /vicious-next (забирает задачу из очереди)
     local ok, res = pcall(function()
         return game:HttpGet(CONFIG.API_URL .. "/vicious-next?apiKey=" .. CONFIG.API_KEY)
     end)
-    if not ok then return nil, "HTTP Vicious" end
-    local ok2, data = pcall(function() return HttpService:JSONDecode(res) end)
-    if not ok2 or not data then return nil, "плохой JSON" end
-    if data.empty or not data.jobId then return nil, nil end
-    data.isVicious = true
-    return data, nil
+    if ok and res then
+        local ok2, data = pcall(function() return HttpService:JSONDecode(res) end)
+        if ok2 and data and not data.empty and data.jobId then
+            local jid = tostring(data.jobId)
+            local age = tonumber(data.age) or 0
+            if age <= 120 and not isTaskVisited(jid) then
+                data.isVicious = true
+                return data, nil
+            end
+        end
+    end
+
+    -- 2. Сканируем всю очередь /vicious-queue за последние 2 минуты (120 секунд)
+    local okQ, resQ = pcall(function()
+        return game:HttpGet(CONFIG.API_URL .. "/vicious-queue?apiKey=" .. CONFIG.API_KEY)
+    end)
+    if okQ and resQ then
+        local okDec, qData = pcall(function() return HttpService:JSONDecode(resQ) end)
+        if okDec and qData and qData.queue and #qData.queue > 0 then
+            for _, t in ipairs(qData.queue) do
+                local jid = tostring(t.jobId or "")
+                local age = tonumber(t.age) or 0
+                if jid ~= "" and age <= 120 and not isTaskVisited(jid) then
+                    return {
+                        jobId = jid,
+                        kind = t.kind or "wild",
+                        placeId = t.placeId or CONFIG.PLACE_ID,
+                        fieldName = t.fieldName or "unknown",
+                        age = age,
+                        searcherTag = t.searcherTag or "vicious_queue_history",
+                        isVicious = true,
+                    }, nil
+                end
+            end
+        end
+    end
+
+    return nil, nil
 end
 
 function Looter:fetchNext()
+    -- 1. Сначала опрашиваем /next (забирает задачу из очереди)
     local ok, res = pcall(function()
         return game:HttpGet(CONFIG.API_URL .. "/next?apiKey=" .. CONFIG.API_KEY)
     end)
-    if not ok then return nil, "HTTP" end
-    local ok2, data = pcall(function() return HttpService:JSONDecode(res) end)
-    if not ok2 or not data then return nil, "плохой JSON" end
-    if data.empty or not data.jobId then return nil, nil end
-    return data, nil
+    if ok and res then
+        local ok2, data = pcall(function() return HttpService:JSONDecode(res) end)
+        if ok2 and data and not data.empty and data.jobId then
+            local jid = tostring(data.jobId)
+            local age = tonumber(data.age) or 0
+            if age <= 120 and not isTaskVisited(jid) then
+                return data, nil
+            end
+        end
+    end
+
+    -- 2. Сканируем всю очередь /queue за последние 2 минуты (120 секунд)
+    local okQ, resQ = pcall(function()
+        return game:HttpGet(CONFIG.API_URL .. "/queue?apiKey=" .. CONFIG.API_KEY)
+    end)
+    if okQ and resQ then
+        local okDec, qData = pcall(function() return HttpService:JSONDecode(resQ) end)
+        if okDec and qData and qData.queue and #qData.queue > 0 then
+            for _, t in ipairs(qData.queue) do
+                local jid = tostring(t.jobId or "")
+                local age = tonumber(t.age) or 0
+                if jid ~= "" and age <= 120 and not isTaskVisited(jid) then
+                    local taskRarity = string.lower(tostring(t.level or "basic"))
+                    if taskRarity == "common" or taskRarity == "normal" then taskRarity = "basic" end
+                    if not CONFIG.ALLOWED_SPROUT_RARITIES or CONFIG.ALLOWED_SPROUT_RARITIES[taskRarity] ~= false then
+                        return {
+                            jobId = jid,
+                            level = t.level or "basic",
+                            placeId = t.placeId or CONFIG.PLACE_ID,
+                            fieldName = t.fieldName or "unknown",
+                            age = age,
+                            searcherTag = t.searcherTag or "queue_history",
+                        }, nil
+                    end
+                end
+            end
+        end
+    end
+
+    return nil, nil
 end
 
 function Looter:returnTask(taskData, reason)
@@ -6999,6 +7140,12 @@ function Looter:Start()
                 if not taskData and CONFIG.CHECK_SPROUTS then
                     local sData, sReason = self:fetchNext()
                     if sData then
+                        local taskRarity = string.lower(tostring(sData.level or "basic"))
+                        if taskRarity == "common" or taskRarity == "normal" then taskRarity = "basic" end
+                        if CONFIG.ALLOWED_SPROUT_RARITIES and CONFIG.ALLOWED_SPROUT_RARITIES[taskRarity] == false then
+                            self:returnTask(sData, "rarity_disabled")
+                            sData = nil
+                        end
                         taskData = sData
                     elseif not skipReason then
                         skipReason = sReason
@@ -7006,6 +7153,29 @@ function Looter:Start()
                 end
 
                 if taskData and taskData.jobId then
+                    -- ПРОВЕРКА ЗАЩИТЫ: не переходить на другой сервер пока не залутает росток и не пройдет 15 секунд
+                    local isProtected, protectReason = isSproutLootProtected()
+                    if isProtected then
+                        log("Лутающий", "Переход на сервер задачи отложен: " .. tostring(protectReason))
+                        -- Если росток сломан, но ещё не прошло 15 секунд — долутываем
+                        if lastSproutBrokenTime > 0 and (os.clock() - lastSproutBrokenTime < 15) then
+                            while alive() and (os.clock() - lastSproutBrokenTime < 15) do
+                                local rem = math.ceil(15 - (os.clock() - lastSproutBrokenTime))
+                                s.currentStatus = string.format("Долутывание ростка перед переходом (%dс)...", rem)
+                                collectTokensFor(math.min(rem, 3), function()
+                                    return not alive() or (os.clock() - lastSproutBrokenTime >= 15)
+                                end, lastSproutHarvestAnchor)
+                                task.wait(0.1)
+                            end
+                        end
+                        -- Если на сервере всё ещё есть активный росток — возвращаем задачу и лутаем местный росток!
+                        if CONFIG.CHECK_SPROUTS and findLootableSprout() then
+                            self:returnTask(taskData, "farming_local_sprout")
+                            pcall(function() self:harvest() end)
+                            return
+                        end
+                    end
+
                     local targetJob = normalizeJobId(taskData.jobId)
                     local currentJob = normalizeJobId(game.JobId)
 
@@ -7059,6 +7229,7 @@ function Looter:Start()
                     s.currentStatus = "Ищущие нашли задачу! Телепортируюсь..."
                     s.teleports += 1
                     log("Лутающий", "Ищущие нашли задачу! Немедленный переход на сервер: " .. tostring(taskData.jobId))
+                    markTaskVisited(taskData.jobId)
                     if not hopTo(taskData.jobId, taskData.placeId) then
                         self:returnTask(taskData, "teleport failed")
                         task.wait(tonumber(CONFIG.POLL_INTERVAL) or 3)
@@ -7070,6 +7241,21 @@ function Looter:Start()
                 end
 
                 -- ЗАДАЧ НЕТ И ЦЕЛЕЙ НА СЕРВЕРЕ НЕТ:
+                -- Проверка защиты: не прыгать на случайный сервер пока не залутает росток и не пройдет 15 секунд!
+                local isProtected, protectReason = isSproutLootProtected()
+                if isProtected then
+                    if CONFIG.CHECK_SPROUTS and findLootableSprout() then
+                        pcall(function() self:harvest() end)
+                    elseif lastSproutBrokenTime > 0 and (os.clock() - lastSproutBrokenTime < 15) then
+                        local rem = math.ceil(15 - (os.clock() - lastSproutBrokenTime))
+                        s.currentStatus = string.format("Долутывание ростка (%dс)...", rem)
+                        collectTokensFor(math.min(rem, 3), function()
+                            return not alive() or (os.clock() - lastSproutBrokenTime >= 15)
+                        end, lastSproutHarvestAnchor)
+                    end
+                    return
+                end
+
                 -- Лутающий работает автономно в соло-режиме: прыгает по серверам,
                 -- параллельно на каждом сервере проверяя задания от ищущих!
                 while isBackpackFull() and alive() do
@@ -7298,7 +7484,11 @@ function Solo:Start()
                             task.wait(0.05)
                         end
 
-                        -- Фаза 2: Росток сломан! Лутаем оставшиеся ценные токены (НЕ прерывать из-за полного рюкзака!)
+                        -- Фаза 2: Росток сломан! Засекаем точное время поломки
+                        lastSproutBrokenTime = os.clock()
+                        lastSproutHarvestAnchor = sproutAnchor
+                        log("Спрут", "Росток сломан! Запущен 15-секундный таймер обязательного лутания.")
+
                         if alive() and sproutAnchor and not (CONFIG.CHECK_VICIOUS and findVicious()) then
                             local char = player.Character
                             local root = char and char:FindFirstChild("HumanoidRootPart")
@@ -7332,15 +7522,18 @@ function Solo:Start()
                                 isBurstLootActive = false
                             end
 
-                            if alive() and not (CONFIG.CHECK_VICIOUS and findVicious()) then
-                                s.currentStatus = "Росток сломан — собираю оставшиеся токены..."
-                                local brokenWait = tonumber(CONFIG.BROKEN_WAIT) or 20
-                                local waitStart = os.clock()
-                                collectTokensFor(brokenWait, function()
+                            -- Обязательный сбор оставшихся токенов (не менее 15 секунд с момента поломки)
+                            local totalLootDuration = math.max(15, tonumber(CONFIG.BROKEN_WAIT) or 20)
+                            while alive() and not (CONFIG.CHECK_VICIOUS and findVicious()) and (os.clock() - lastSproutBrokenTime < totalLootDuration) do
+                                local elapsed = os.clock() - lastSproutBrokenTime
+                                local remaining = math.ceil(totalLootDuration - elapsed)
+                                s.currentStatus = string.format("Росток сломан — сбор лута (ещё %dс)...", remaining)
+                                collectTokensFor(math.min(remaining, 5), function()
                                     return not alive()
                                         or (CONFIG.CHECK_VICIOUS and findVicious() ~= nil)
-                                        or (os.clock() - waitStart >= brokenWait)
+                                        or (os.clock() - lastSproutBrokenTime >= totalLootDuration)
                                 end, sproutAnchor)
+                                task.wait(0.05)
                             end
                         end
                     end
@@ -7366,7 +7559,20 @@ function Solo:Start()
                     return
                 end
 
-                -- Если ростка нет на сервере — быстрый переход
+                -- Если ростка нет на сервере — быстрый переход (с защитой от ухода до завершения сбора и 15с)
+                local isProtected, protectReason = isSproutLootProtected()
+                if isProtected then
+                    if CONFIG.CHECK_SPROUTS and findSprout() then
+                        -- росток есть на сервере
+                    elseif lastSproutBrokenTime > 0 and (os.clock() - lastSproutBrokenTime < 15) then
+                        local rem = math.ceil(15 - (os.clock() - lastSproutBrokenTime))
+                        collectTokensFor(math.min(rem, 3), function()
+                            return not alive() or (os.clock() - lastSproutBrokenTime >= 15)
+                        end, lastSproutHarvestAnchor)
+                    end
+                    return
+                end
+
                 currentSproutFieldZone = nil
                 s.hops += 1
                 s.currentStatus = "Телепортируюсь на новый сервер..."
@@ -7702,7 +7908,7 @@ new("TextLabel", {
 })
 new("TextLabel", {
     Size = UDim2.new(0, 220, 0, 25), Position = UDim2.new(0, 58, 0, 10),
-    BackgroundTransparency = 1, Text = "BSS Hopper v1.3.86",
+    BackgroundTransparency = 1, Text = "BSS Hopper v1.3.88",
     TextColor3 = C.text, Font = Enum.Font.GothamBold, TextSize = 22,
     TextXAlignment = Enum.TextXAlignment.Left, Parent = head,
 })
@@ -8404,7 +8610,7 @@ new("UIListLayout", {
     Parent = PAGE_SPROUTS,
 })
 
-section("МИНИМАЛЬНАЯ РЕДКОСТЬ ДЛЯ ЛУТА", 1).Parent = PAGE_SPROUTS
+section("ВЫБОР РЕДКОСТЕЙ РОСТКОВ ДЛЯ ФАРМА (ВКЛ / ВЫКЛ)", 1).Parent = PAGE_SPROUTS
 
 local sproutRarityOrder = { "basic", "moon", "rare", "gummy", "epic", "legendary" }
 local sproutRarityLabels = {
@@ -8416,7 +8622,11 @@ local sproutRarityColors = {
     rare=Color3.fromRGB(190,200,210), epic=Color3.fromRGB(255,195,70),
     legendary=Color3.fromRGB(75,220,205), gummy=Color3.fromRGB(255,115,220),
 }
-if not RARITY_PRIORITY[CONFIG.MIN_RARITY] then CONFIG.MIN_RARITY = "basic" end
+if not CONFIG.ALLOWED_SPROUT_RARITIES or type(CONFIG.ALLOWED_SPROUT_RARITIES) ~= "table" then
+    CONFIG.ALLOWED_SPROUT_RARITIES = {
+        basic = true, moon = true, rare = true, gummy = true, epic = true, legendary = true,
+    }
+end
 
 local sproutRarityRow = new("Frame", {
     Size = UDim2.new(1, 0, 0, 70), BackgroundTransparency = 1,
@@ -8430,15 +8640,21 @@ new("UIGridLayout", {
     Parent = sproutRarityRow,
 })
 local sproutRarityButtons = {}
+local sproutFilterHint
+
 local function paintSproutRarity()
     for _, rarityName in ipairs(sproutRarityOrder) do
         local button = sproutRarityButtons[rarityName]
         if button then
-            local selected = CONFIG.MIN_RARITY == rarityName
-            button.BackgroundColor3 = selected and C.cardHi or C.field
-            button.TextColor3 = sproutRarityColors[rarityName]
+            local isEnabled = CONFIG.ALLOWED_SPROUT_RARITIES[rarityName] ~= false
+            button.BackgroundColor3 = isEnabled and Color3.fromRGB(14, 48, 30) or Color3.fromRGB(12, 16, 22)
+            button.TextColor3 = isEnabled and sproutRarityColors[rarityName] or Color3.fromRGB(90, 100, 115)
             local outline = button:FindFirstChildOfClass("UIStroke")
-            if outline then outline.Thickness = selected and 2 or 1 end
+            if outline then
+                outline.Color = isEnabled and sproutRarityColors[rarityName] or Color3.fromRGB(40, 50, 60)
+                outline.Thickness = isEnabled and 2 or 1
+                outline.Transparency = isEnabled and 0.1 or 0.6
+            end
         end
     end
 end
@@ -8456,19 +8672,45 @@ for index, rarityName in ipairs(sproutRarityOrder) do
     round(button, 8)
     stroke(button, sproutRarityColors[rarityName], 1)
     sproutRarityButtons[rarityName] = button
+
     button.MouseButton1Click:Connect(function()
-        CONFIG.MIN_RARITY = rarityName
-        paintSproutRarity(); saveNow()
-        statusVal.Text = "Минимальная редкость: " .. sproutRarityLabels[rarityName] .. "+"
-        statusVal.TextColor3 = C.accent
+        if not CONFIG.ALLOWED_SPROUT_RARITIES then CONFIG.ALLOWED_SPROUT_RARITIES = {} end
+        local isCurrentlyOn = CONFIG.ALLOWED_SPROUT_RARITIES[rarityName] ~= false
+        CONFIG.ALLOWED_SPROUT_RARITIES[rarityName] = not isCurrentlyOn
+        paintSproutRarity()
+        if saveNow then pcall(saveNow) end
+
+        local enabledList = {}
+        for _, rName in ipairs(sproutRarityOrder) do
+            if CONFIG.ALLOWED_SPROUT_RARITIES[rName] ~= false then
+                table.insert(enabledList, sproutRarityLabels[rName])
+            end
+        end
+        if sproutFilterHint then
+            if #enabledList > 0 then
+                sproutFilterHint.Text = "Включено для сбора: " .. table.concat(enabledList, ", ")
+                sproutFilterHint.TextColor3 = C.accent
+            else
+                sproutFilterHint.Text = "⚠️ Внимание: ВСЕ ростки выключены! Бот не будет фармить ни один росток."
+                sproutFilterHint.TextColor3 = C.warn
+            end
+        end
     end)
 end
 paintSproutRarity()
 
-new("TextLabel", {
+local initialEnabled = {}
+for _, rName in ipairs(sproutRarityOrder) do
+    if CONFIG.ALLOWED_SPROUT_RARITIES[rName] ~= false then
+        table.insert(initialEnabled, sproutRarityLabels[rName])
+    end
+end
+
+sproutFilterHint = new("TextLabel", {
     Size = UDim2.new(1, 0, 0, 20), BackgroundTransparency = 1,
-    Text = "Минимальная редкость",
-    TextColor3 = C.dim, Font = Enum.Font.Gotham, TextSize = 10,
+    Text = (#initialEnabled > 0) and ("Включено для сбора: " .. table.concat(initialEnabled, ", ")) or "⚠️ Все ростки выключены",
+    TextColor3 = (#initialEnabled > 0) and C.accent or C.warn,
+    Font = Enum.Font.Gotham, TextSize = 10,
     TextWrapped = true, TextXAlignment = Enum.TextXAlignment.Left,
     LayoutOrder = 3, Parent = PAGE_SPROUTS,
 })
