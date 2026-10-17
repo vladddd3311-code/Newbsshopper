@@ -1943,14 +1943,22 @@ function fightWindyBee(windy)
         task.wait(0.1)
     end
 
-    -- ШАГ 3: Теперь взлетаем и парим прямо НАД Windy Bee, как над Vicious Bee!
+    -- ШАГ 3: Теперь взлетаем и парим прямо НАД Windy Bee на безопасной высоте (22 studs)!
     setFlightNoclip(true)
-    local hoverHeight = math.clamp(tonumber(CONFIG.WINDY_HOVER_HEIGHT) or 16, 12, 28) -- Безопасная высота парения над телом Windy Bee и торнадо
+    local hoverHeight = math.clamp(tonumber(CONFIG.WINDY_HOVER_HEIGHT) or 22, 16, 36) -- Безопасная повышенная высота парения над телом Windy Bee и торнадо
     local smoothedTarget = nil
     local lastFacingAt = 0
     local speed = 110
 
-    while alive() and not flightStopRequested and windy.Parent and (os.clock() - started < 360) do
+    while alive() and not flightStopRequested and (windy.Parent or findWindyBee()) and (os.clock() - started < 600) do
+        if not windy or not windy.Parent then
+            local nextBee = findWindyBee()
+            if nextBee then
+                windy = nextBee
+            else
+                break -- Windy Bee повержена или исчезла по таймеру
+            end
+        end
         local targetPos = worldPos(windy)
         if not targetPos then
             local ok, p = pcall(function()
@@ -5055,6 +5063,7 @@ local TOKEN_PRIO_CACHE = setmetatable({}, { __mode = "k" })
 
 -- Реестр всех токенов со спрутов в Bee Swarm Simulator
 TOKEN_REGISTRY = {
+    { id = "token_link", name = "Token Link (🔗)", icon = "🔗", keywords = { "token link", "tokenlink", "link" }, defaultPrio = 0 },
     { id = "star_treat", name = "Star Treat", icon = "⭐", keywords = { "star treat" }, defaultPrio = 1 },
     { id = "eggs", name = "Mythic / Diamond Eggs", icon = "🥚", keywords = { "egg", "diamond egg", "gold egg", "silver egg", "mythic egg" }, defaultPrio = 1 },
     { id = "star_jelly", name = "Star Jelly", icon = "🌟", keywords = { "star jelly" }, defaultPrio = 1 },
@@ -5083,6 +5092,72 @@ TOKEN_REGISTRY = {
 
 isBurstLootActive = false
 
+local tokenLinkTextureId = nil
+function findTokenLinkTextureId()
+    if tokenLinkTextureId then return tokenLinkTextureId end
+    pcall(function()
+        local rep = game:GetService("ReplicatedStorage")
+        for _, d in ipairs(rep:GetDescendants()) do
+            local low = string.lower(d.Name)
+            if string.find(low, "token link", 1, true) or string.find(low, "tokenlink", 1, true) or (string.find(low, "link", 1, true) and not string.find(low, "blink", 1, true)) then
+                if d:IsA("Decal") or d:IsA("Texture") or d:IsA("ImageLabel") or d:IsA("ImageButton") then
+                    local id = string.match(tostring(d.Texture or d.Image or ""), "%d+")
+                    if id and #id >= 6 then
+                        tokenLinkTextureId = id
+                        TOKEN_TEXTURE_MAP[id] = "token_link"
+                        return
+                    end
+                end
+            end
+        end
+    end)
+    return tokenLinkTextureId
+end
+
+function isTokenLink(obj)
+    if not obj then return false end
+    local oName = string.lower(tostring(obj.Name or ""))
+    if string.find(oName, "token link", 1, true) or string.find(oName, "tokenlink", 1, true) or (string.find(oName, "link", 1, true) and not string.find(oName, "blink", 1, true)) then
+        return true
+    end
+
+    local linkId = findTokenLinkTextureId()
+    local ok, descendants = pcall(function() return obj:GetDescendants() end)
+    if ok and descendants then
+        for _, d in ipairs(descendants) do
+            local dn = string.lower(tostring(d.Name or ""))
+            if string.find(dn, "token link", 1, true) or string.find(dn, "tokenlink", 1, true) or (string.find(dn, "link", 1, true) and not string.find(dn, "blink", 1, true)) then
+                return true
+            end
+            if d:IsA("Decal") or d:IsA("Texture") then
+                local tex = tostring(d.Texture or "")
+                local lowTex = string.lower(tex)
+                if string.find(lowTex, "link", 1, true) and not string.find(lowTex, "blink", 1, true) then
+                    return true
+                end
+                local id = string.match(tex, "%d+")
+                if id then
+                    if linkId and id == linkId then return true end
+                    if TOKEN_TEXTURE_MAP[id] == "token_link" or TOKEN_TEXTURE_MAP[id] == "token link" then return true end
+                end
+            end
+        end
+    end
+
+    local okAttr, attrs = pcall(function() return obj:GetAttributes() end)
+    if okAttr and attrs then
+        for k, v in pairs(attrs) do
+            local lowVal = string.lower(tostring(v or ""))
+            local lowKey = string.lower(tostring(k or ""))
+            if string.find(lowVal, "token link", 1, true) or string.find(lowVal, "tokenlink", 1, true) or (string.find(lowVal, "link", 1, true) and not string.find(lowVal, "blink", 1, true)) or string.find(lowKey, "token link", 1, true) or string.find(lowKey, "tokenlink", 1, true) then
+                return true
+            end
+        end
+    end
+
+    return false
+end
+
 function isAbilityToken(low)
     local n = string.lower(tostring(low or ""))
     return string.find(n, "focus", 1, true)
@@ -5095,11 +5170,15 @@ function isAbilityToken(low)
         or string.find(n, "rage", 1, true)
         or string.find(n, "beam", 1, true)
         or string.find(n, "combo", 1, true)
-        or string.find(n, "link", 1, true)
 end
 
 function tokenPriority(name)
     local low = string.lower(tostring(name or ""))
+    -- Token Link (🔗) — СВЕРХПРИОРИТЕТ 0 (мгновенно пылесосит всё поле!)
+    if string.find(low, "token link", 1, true) or string.find(low, "tokenlink", 1, true) or (string.find(low, "link", 1, true) and not string.find(low, "blink", 1, true)) then
+        return 0
+    end
+
     local pMap = CONFIG.TOKEN_PRIORITIES
 
     -- 1. Пользовательские приоритеты из настроек
@@ -5109,7 +5188,7 @@ function tokenPriority(name)
             local prio = (userPrio ~= nil) and userPrio or def.defaultPrio
             for _, kw in ipairs(def.keywords) do
                 if string.find(low, kw, 1, true) then
-                    if prio == 0 then return 999 end -- Полный пропуск токена
+                    if prio == 0 then return (def.id == "token_link" and 0 or 999) end
                     return prio -- 1, 2 или 3
                 end
             end
@@ -5135,6 +5214,7 @@ end
 
 function resolveTokenName(obj)
     if not obj then return "token" end
+    if isTokenLink(obj) then return "token_link" end
     local cached = TOKEN_NAME_CACHE[obj]
     if cached and cached ~= "token" and cached ~= "cframe" and cached ~= "part" then
         return cached
@@ -5233,6 +5313,7 @@ end
 
 function getTokenPriorityForObj(obj)
     if not obj then return 3 end
+    if isTokenLink(obj) then return 0 end
     local cached = TOKEN_PRIO_CACHE[obj]
     if cached and cached ~= 3 then return cached end
     local name = resolveTokenName(obj)
@@ -5311,7 +5392,6 @@ function ensureHarvestToolEquipped()
         for _, item in ipairs(bp:GetChildren()) do
             if item:IsA("Tool") and not string.find(string.lower(item.Name), "sprinkler", 1, true) then
                 pcall(function() hum:EquipTool(item) end)
-                if item.Parent ~= char then pcall(function() item.Parent = char end) end
                 cachedHarvestTool = item
                 return item
             end
@@ -5455,51 +5535,32 @@ function getActiveFlowerZone(anchorPos)
     return bestZone
 end
 
-local function getObstacleAvoidanceTarget(rootPos, targetPos, character)
-    local dir = targetPos - rootPos
-    local dist = dir.Magnitude
-    if dist < 2.5 then return targetPos end
-
-    local forward = Vector3.new(dir.X, 0, dir.Z).Unit
-    local rayOrigin = rootPos + Vector3.new(0, 1.2, 0)
-    local feelerDist = math.min(dist, 12.0)
-
-    local rayParams = RaycastParams.new()
-    rayParams.FilterType = RaycastFilterType.Exclude
-    local filter = { character }
-    local zones = Workspace:FindFirstChild("FlowerZones")
-    if zones then table.insert(filter, zones) end
-    rayParams.FilterDescendantsInstances = filter
-
-    local hit = Workspace:Raycast(rayOrigin, forward * feelerDist, rayParams)
-    if hit and hit.Instance and hit.Instance.CanCollide and not hit.Instance:IsA("Terrain") then
-        local norm = hit.Normal
-        local flatNorm = Vector3.new(norm.X, 0, norm.Z)
-        if math.abs(norm.Y) < 0.5 and flatNorm.Magnitude > 0.05 then
-            flatNorm = flatNorm.Unit
-            local leftTangent = Vector3.new(-flatNorm.Z, 0, flatNorm.X)
-            local rightTangent = Vector3.new(flatNorm.Z, 0, -flatNorm.X)
-
-            local leftPoint = hit.Position + leftTangent * 8 + flatNorm * 3
-            local rightPoint = hit.Position + rightTangent * 8 + flatNorm * 3
-
-            local leftClear = not Workspace:Raycast(rayOrigin, (leftPoint - rayOrigin).Unit * math.min((leftPoint - rayOrigin).Magnitude, 10), rayParams)
-            local rightClear = not Workspace:Raycast(rayOrigin, (rightPoint - rayOrigin).Unit * math.min((rightPoint - rayOrigin).Magnitude, 10), rayParams)
-
-            if leftClear and not rightClear then
-                return Vector3.new(leftPoint.X, targetPos.Y, leftPoint.Z)
-            elseif rightClear and not leftClear then
-                return Vector3.new(rightPoint.X, targetPos.Y, rightPoint.Z)
-            else
-                if (leftPoint - targetPos).Magnitude < (rightPoint - targetPos).Magnitude then
-                    return Vector3.new(leftPoint.X, targetPos.Y, leftPoint.Z)
-                else
-                    return Vector3.new(rightPoint.X, targetPos.Y, rightPoint.Z)
+function disableSprinklerCollision()
+    pcall(function()
+        local g = Workspace:FindFirstChild("Gadgets")
+        if g then
+            for _, d in ipairs(g:GetDescendants()) do
+                if d:IsA("BasePart") and d.CanCollide then
+                    d.CanCollide = false
                 end
             end
         end
-    end
+        for _, obj in ipairs(Workspace:GetChildren()) do
+            if obj:IsA("Model") then
+                local n = string.lower(obj.Name)
+                if string.find(n, "sprinkler", 1, true) or string.find(n, "saturator", 1, true) or string.find(n, "drencher", 1, true) or string.find(n, "gusher", 1, true) or string.find(n, "soaker", 1, true) then
+                    for _, p in ipairs(obj:GetDescendants()) do
+                        if p:IsA("BasePart") and p.CanCollide then
+                            p.CanCollide = false
+                        end
+                    end
+                end
+            end
+        end
+    end)
+end
 
+local function getObstacleAvoidanceTarget(rootPos, targetPos, character)
     return targetPos
 end
 
@@ -5706,8 +5767,9 @@ collectTokensFor = function(maxSeconds, stopFn, fieldAnchor)
                     local dx = p.X - rootPos.X
                     local dz = p.Z - rootPos.Z
                     if (dx * dx + dz * dz) > 4.0 then
-                        best = { obj = activeTokenObj, pos = p, priority = 1 }
-                        bestKey = 0
+                        local isLink = isTokenLink(activeTokenObj)
+                        best = { obj = activeTokenObj, pos = p, priority = isLink and 0 or 1 }
+                        bestKey = isLink and -10000000 or 0
                     end
                 end
             end
@@ -5726,10 +5788,13 @@ collectTokensFor = function(maxSeconds, stopFn, fieldAnchor)
                             end
                         end)
                     else
-                        local p = token.priority
+                        local isLink = (token.priority == 0) or isTokenLink(tobj)
+                        local p = isLink and 0 or token.priority
                         if p < 999 then
                             local score
-                            if isBurstLootActive then
+                            if p == 0 then
+                                score = -10000000 -- Token Link СВЕРХПРИОРИТЕТ 0 (пылесосит всё поле!)
+                            elseif isBurstLootActive then
                                 score = (p == 1 and 0) or 5000000
                             else
                                 score = (p == 1 and 0) or (p == 2 and 100000) or 200000
@@ -5737,6 +5802,7 @@ collectTokensFor = function(maxSeconds, stopFn, fieldAnchor)
                             local key = score + distSq
                             if key < bestKey then
                                 best = token
+                                best.priority = p
                                 bestKey = key
                             end
                         end
@@ -5745,18 +5811,22 @@ collectTokensFor = function(maxSeconds, stopFn, fieldAnchor)
             end
 
             -- Приоритетная скорость бега (без резких скачков и перезаписи Heartbeat)
-            local isP1 = best and best.priority == 1
+            local isP1 = best and (best.priority == 1 or best.priority == 0)
             applyWalkSpeed(isP1 or isBurstLootActive)
 
-            -- Не копаем во время охоты за P1 токеном, чтобы не сбивать спринт!
+            -- Не копаем во время охоты за P1 / Token Link токеном, чтобы не сбивать спринт!
             if not isP1 and not isBurstLootActive then
                 pcall(swingDigTool)
             end
 
             if best then
-                if activeTokenObj ~= best.obj and isP1 then
+                if activeTokenObj ~= best.obj then
                     local tName = resolveTokenName(best.obj)
-                    log("Token", string.format("⚡ Бегу за приоритетным токеном: %s (P1) на расстоянии %.1f studs!", tName, math.sqrt(bestKey)))
+                    if best.priority == 0 then
+                        log("Token", string.format("🔗 НАЙДЕН TOKEN LINK! Бегу собрать его в первую очередь (дистанция %.1f studs)!", math.sqrt(math.max(0, bestKey + 10000000))))
+                    elseif isP1 then
+                        log("Token", string.format("⚡ Бегу за приоритетным токеном: %s (P1) на расстоянии %.1f studs!", tName, math.sqrt(bestKey)))
+                    end
                 end
                 activeTokenObj = best.obj
                 patrolTarget = Vector3.new(best.pos.X, (anchorZone and (anchorZone.Position.Y + 3.2)) or root.Position.Y, best.pos.Z)
@@ -5764,14 +5834,23 @@ collectTokensFor = function(maxSeconds, stopFn, fieldAnchor)
                 activeTokenObj = nil
                 local needNewPatrol = not patrolTarget 
                     or (root.Position - patrolTarget).Magnitude < 3.2
-                    or (os.clock() - lastPatrolPickAt > 2.8)
+                    or (os.clock() - lastPatrolPickAt > 2.2)
 
                 if needNewPatrol then
                     lastPatrolPickAt = os.clock()
-                    if anchorZone then
+                    if fieldAnchor then
+                        -- При наличии активного центра (росток / плантатор) бегаем вокруг него кругами (8-22 studs)
+                        local angle = math.random() * math.pi * 2
+                        local dist = math.random(8, 22)
+                        patrolTarget = Vector3.new(
+                            fieldAnchor.X + math.cos(angle) * dist,
+                            (anchorZone and (anchorZone.Position.Y + 3.2)) or root.Position.Y,
+                            fieldAnchor.Z + math.sin(angle) * dist
+                        )
+                    elseif anchorZone then
                         local half = anchorZone.Size * 0.5
-                        local xSpan = half.X * 0.99
-                        local zSpan = half.Z * 0.99
+                        local xSpan = half.X * 0.85
+                        local zSpan = half.Z * 0.85
                         local localTarget = Vector3.new(
                             (math.random() * 2 - 1) * xSpan,
                             0,
@@ -5779,10 +5858,6 @@ collectTokensFor = function(maxSeconds, stopFn, fieldAnchor)
                         )
                         local worldPoint = anchorZone.CFrame:PointToWorldSpace(localTarget)
                         patrolTarget = Vector3.new(worldPoint.X, (anchorZone and (anchorZone.Position.Y + 3.2)) or root.Position.Y, worldPoint.Z)
-                    elseif fieldAnchor then
-                        local angle = math.random() * math.pi * 2
-                        local dist = math.random(6, 25)
-                        patrolTarget = Vector3.new(fieldAnchor.X + math.cos(angle) * dist, (anchorZone and (anchorZone.Position.Y + 3.2)) or root.Position.Y, fieldAnchor.Z + math.sin(angle) * dist)
                     else
                         patrolTarget = root.Position
                     end
@@ -5799,19 +5874,18 @@ collectTokensFor = function(maxSeconds, stopFn, fieldAnchor)
                 patrolTarget = Vector3.new(safeWorld.X, (anchorZone and (anchorZone.Position.Y + 3.2)) or root.Position.Y, safeWorld.Z)
             end
 
-            -- Плавное и безотказное перемещение: активный бег через humanoid:Move() + MoveTo()
+            -- Плавное и безотказное прямое перемещение: активный бег через humanoid:Move() + MoveTo()
             if patrolTarget and humanoid and root then
                 local currentPos = root.Position
                 local flatTarget = Vector3.new(patrolTarget.X, currentPos.Y, patrolTarget.Z)
-                local steerTarget = getObstacleAvoidanceTarget(currentPos, flatTarget, char)
-                local flatDelta = Vector3.new(steerTarget.X - currentPos.X, 0, steerTarget.Z - currentPos.Z)
+                local flatDelta = flatTarget - currentPos
                 local dist = flatDelta.Magnitude
 
                 if dist > 1.2 then
                     local moveDir = flatDelta.Unit
                     humanoid.AutoRotate = true
                     humanoid:Move(moveDir, false)
-                    humanoid:MoveTo(steerTarget)
+                    humanoid:MoveTo(flatTarget)
                 else
                     humanoid:Move(Vector3.zero, false)
                     if not activeTokenObj then
@@ -5819,29 +5893,13 @@ collectTokensFor = function(maxSeconds, stopFn, fieldAnchor)
                     end
                 end
 
-                -- Защита от застревания в преградах (ножки грибов, деревья, кактусы, заборы):
+                -- Защита от застревания в преградах (прыжок при остановке):
                 local now = os.clock()
                 if not lastRecordedPos then lastRecordedPos = currentPos end
                 if (currentPos - lastRecordedPos).Magnitude < 0.6 then
                     if not stuckStartTime then stuckStartTime = now end
-                    if (now - stuckStartTime > 0.9) then
+                    if (now - stuckStartTime > 0.6) then
                         pcall(function() humanoid.Jump = true end)
-                        local rayP = RaycastParams.new()
-                        rayP.FilterType = RaycastFilterType.Exclude
-                        local fList = { char }
-                        if anchorZone then table.insert(fList, anchorZone) end
-                        rayP.FilterDescendantsInstances = fList
-
-                        local hitFront = Workspace:Raycast(currentPos + Vector3.new(0, 1.2, 0), root.CFrame.LookVector * 6, rayP)
-                        if hitFront and hitFront.Normal then
-                            local norm = Vector3.new(hitFront.Normal.X, 0, hitFront.Normal.Z)
-                            if norm.Magnitude > 0.05 then
-                                norm = norm.Unit
-                                local sideDir = Vector3.new(-norm.Z, 0, norm.X) * 12
-                                humanoid:Move(sideDir.Unit, false)
-                                humanoid:MoveTo(currentPos + sideDir + norm * 4)
-                            end
-                        end
                         patrolTarget = nil
                         stuckStartTime = nil
                         lastRecordedPos = currentPos
@@ -5990,12 +6048,18 @@ useSprinklerBuilder = function(fieldAnchor)
 
     -- Синхронное снятие лейки и немедленное вооружение палкой
     pcall(function() hum:UnequipTools() end)
-    local bp = player:FindFirstChildOfClass("Backpack")
-    if bp and tool and tool.Parent == char then
-        pcall(function() tool.Parent = bp end)
-    end
-    task.wait(0.05)
+    task.wait(0.1)
     ensureHarvestToolEquipped()
+    pcall(disableSprinklerCollision)
+
+    -- Если есть anchor ростка — отходим на 5 стадсов от последней поливалки к ростку
+    if fieldAnchor and root then
+        local delta = fieldAnchor - root.Position
+        local flatD = Vector3.new(delta.X, 0, delta.Z)
+        if flatD.Magnitude > 3 then
+            root.CFrame = CFrame.new(root.Position + flatD.Unit * 5 + Vector3.new(0, 0.5, 0))
+        end
+    end
     return placed > 0
 end
 
@@ -7282,7 +7346,7 @@ new("TextLabel", {
 })
 new("TextLabel", {
     Size = UDim2.new(0, 220, 0, 25), Position = UDim2.new(0, 58, 0, 10),
-    BackgroundTransparency = 1, Text = "BSS Hopper v1.3.83",
+    BackgroundTransparency = 1, Text = "BSS Hopper v1.3.84",
     TextColor3 = C.text, Font = Enum.Font.GothamBold, TextSize = 22,
     TextXAlignment = Enum.TextXAlignment.Left, Parent = head,
 })
