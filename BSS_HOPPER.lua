@@ -763,7 +763,6 @@ function applySuperOptimization(enabled)
                     obj.CastShadow = false
                 end
             end
-            pcall(function() settings().Rendering.QualityLevel = Enum.QualityLevel.Level01 end)
             pcall(function() settings().Network.IncomingReplicationLag = 0 end)
             if type(setfpscap) == "function" then
                 pcall(setfpscap, 999)
@@ -772,7 +771,6 @@ function applySuperOptimization(enabled)
             log("Оптимизация", "⚡ Ультра-оптимизация включена: тени, частицы и тяжелые эффекты отключены, FPS разблокирован!")
         else
             Lighting.GlobalShadows = true
-            pcall(function() settings().Rendering.QualityLevel = Enum.QualityLevel.Automatic end)
             if Terrain then
                 pcall(function() Terrain.Decoration = true end)
             end
@@ -811,11 +809,9 @@ function applyAntiLag(enabled)
                 terrain.WaterReflectance = 0
                 terrain.WaterTransparency = 1
             end
-            pcall(function() settings().Rendering.QualityLevel = Enum.QualityLevel.Level01 end)
         else
-            -- При выключении возвращаем базовую графику; Roblox может управлять качеством автоматически.
+            -- При выключении возвращаем базовую графику
             Lighting.GlobalShadows = true
-            pcall(function() settings().Rendering.QualityLevel = Enum.QualityLevel.Automatic end)
         end
     end)
 end
@@ -1931,21 +1927,29 @@ function fightWindyBee(windy)
         if curPos then
             local flatDelta = Vector3.new(curPos.X - r.Position.X, 0, curPos.Z - r.Position.Z)
             if flatDelta.Magnitude <= 8 then
-                pcall(function() h:Move(Vector3.zero, false) end)
+                pcall(function()
+                    h:Move(Vector3.zero, false)
+                    r.AssemblyLinearVelocity = Vector3.new(0, r.AssemblyLinearVelocity.Y, 0)
+                end)
                 log("Windy", string.format("✅ Добежали под Windy Bee (расстояние %.1f studs)! Взлетаю над ней...", flatDelta.Magnitude))
                 break
             end
+            local moveDir = flatDelta.Unit
+            local curSpd = getCalculatedWalkSpeed(true)
             h.AutoRotate = true
-            h:Move(flatDelta.Unit, false)
+            h:Move(moveDir, false)
             h:MoveTo(Vector3.new(curPos.X, r.Position.Y, curPos.Z))
+            pcall(function()
+                r.AssemblyLinearVelocity = Vector3.new(moveDir.X * curSpd, r.AssemblyLinearVelocity.Y, moveDir.Z * curSpd)
+            end)
         end
         pcall(swingDigTool)
         task.wait(0.1)
     end
 
-    -- ШАГ 3: Теперь взлетаем и парим прямо НАД Windy Bee на безопасной высоте (22 studs)!
+    -- ШАГ 3: Теперь взлетаем и парим прямо НАД Windy Bee на безопасной высоте (32 studs)!
     setFlightNoclip(true)
-    local hoverHeight = math.clamp(tonumber(CONFIG.WINDY_HOVER_HEIGHT) or 22, 16, 36) -- Безопасная повышенная высота парения над телом Windy Bee и торнадо
+    local hoverHeight = math.clamp(tonumber(CONFIG.WINDY_HOVER_HEIGHT) or 32, 20, 48) -- Повышенная безопасная высота парения над телом Windy Bee и торнадо
     local smoothedTarget = nil
     local lastFacingAt = 0
     local speed = 110
@@ -2499,13 +2503,18 @@ function confirmPlanterHarvestModal()
     for _, desc in ipairs(pg:GetDescendants()) do
         if desc:IsA("TextLabel") or desc:IsA("TextButton") then
             local t = string.lower(desc.Text or "")
-            if (string.find(t, "harvest", 1, true) and string.find(t, "planter", 1, true))
-               or string.find(t, "done growing", 1, true)
-               or string.find(t, "before it", 1, true) then
+            local isPlanterModal = (
+                (string.find(t, "harvest", 1, true) and (string.find(t, "planter", 1, true) or string.find(t, "growing", 1, true) or string.find(t, "before", 1, true) or string.find(t, "it's", 1, true)))
+                or string.find(t, "done growing", 1, true)
+                or string.find(t, "before it", 1, true)
+                or (string.find(t, "harvest the", 1, true) and string.find(t, "planter", 1, true))
+                or (string.find(t, "claim", 1, true) and string.find(t, "planter", 1, true))
+            )
 
+            if isPlanterModal then
                 local dialogContainer = desc.Parent
                 if dialogContainer then
-                    local searchScopes = { dialogContainer, dialogContainer.Parent, dialogContainer.Parent and dialogContainer.Parent.Parent }
+                    local searchScopes = { dialogContainer, dialogContainer.Parent, dialogContainer.Parent and dialogContainer.Parent.Parent, dialogContainer.Parent and dialogContainer.Parent.Parent and dialogContainer.Parent.Parent.Parent }
                     for _, container in ipairs(searchScopes) do
                         if container then
                             for _, elem in ipairs(container:GetDescendants()) do
@@ -2516,11 +2525,13 @@ function confirmPlanterHarvestModal()
                                     local lbl = elem:FindFirstChildWhichIsA("TextLabel", true)
                                     if lbl then childTxt = string.lower(lbl.Text or "") end
 
-                                    -- Определяем кнопку "Yes"
+                                    -- Определяем кнопку "Yes" / "Confirm"
                                     local isYes = (eTxt == "yes" or childTxt == "yes" or eName == "yes"
                                         or string.find(eName, "yes", 1, true)
                                         or string.find(eTxt, "yes", 1, true)
-                                        or string.find(childTxt, "yes", 1, true))
+                                        or string.find(childTxt, "yes", 1, true)
+                                        or string.find(eTxt, "confirm", 1, true)
+                                        or string.find(eName, "confirm", 1, true))
 
                                     if isYes then
                                         log("Плантатор", "🟢 Нажата кнопка [ Yes ] в диалоге сбора плантатора!")
@@ -2614,14 +2625,14 @@ function confirmPlanterHarvestModal()
     return false
 end
 
--- Фоновый наблюдатель за диалогом сбора плантатора (мгновенно подтверждает Yes если окно появилось на экране)
+-- Фоновый наблюдатель за диалогом сбора плантатора (подтверждает Yes если окно появилось на экране)
 task.spawn(function()
     while true do
         if not alive() then return end
         if CONFIG.AUTO_HARVEST_PLANTERS ~= false then
             pcall(confirmPlanterHarvestModal)
         end
-        task.wait(0.12)
+        task.wait(0.5)
     end
 end)
 
@@ -2641,23 +2652,34 @@ function managePlanters()
         local isEnabled = pCfg and (pCfg.enabled == true)
         local targetPct = (pCfg and tonumber(pCfg.percent)) or 100
 
-        local shouldHarvest = (info.ready == true) or (info.percent >= targetPct) or (isEnabled and (info.percent >= targetPct or info.percent == 0))
+        local shouldHarvest = (info.ready == true) or (info.percent > 0 and info.percent >= targetPct)
 
         if shouldHarvest then
             harvestedAny = true
+            local pPos = worldPos(info.model)
+            local fieldName = info.field
+            if not fieldName or fieldName == "Unknown Field" then
+                if pPos then
+                    fieldName = getFieldForPos(pPos, 45) or detectField(info.model) or "Unknown Field"
+                end
+            end
+            info.field = fieldName
             log("Плантатор", string.format("🪴 Плантатор %s на поле %s готов к сбору (%.1f%%, порог %d%%)! Собираю урожай...", info.type, info.field, info.percent, targetPct))
             notifyAllWebhooks("Сбор плантатора!", string.format("Плантатор %s на поле %s собран!", info.type, info.field), "00f5a0")
 
-            -- ШАГ 0: Летим к плантатору
+            -- ШАГ 0: Летим в упор к плантатору
             local root = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
-            local pPos = worldPos(info.model)
             if root and pPos then
-                moveRootToPosition(root, getGroundPos(pPos), 6)
-                task.wait(0.15)
+                local targetG = getGroundPos(pPos)
+                moveRootToPosition(root, targetG, 6)
+                setFlightNoclip(false)
+                if (root.Position - pPos).Magnitude > 6 then
+                    root.CFrame = CFrame.new(targetG)
+                end
+                task.wait(0.2)
             end
 
-            -- ШАГ 1: Нажимаем E (VirtualInputManager) — как в скриншоте "Harvest the Candy Planter (It's still growing)"
-            -- Сначала пробуем fireproximityprompt, затем VIM E, затем getconnections
+            -- ШАГ 1: Нажимаем E (VirtualInputManager + ProximityPrompt)
             for _, prompt in ipairs(info.model:GetDescendants()) do
                 if prompt:IsA("ProximityPrompt") then
                     pcall(function()
@@ -2701,16 +2723,6 @@ function managePlanters()
             end)
             task.wait(0.2)
 
-            -- Повторная попытка E через секунду (на случай если первый раз не сработал из-за загрузки промпта)
-            pcall(function()
-                local vim = game:GetService("VirtualInputManager")
-                if vim then
-                    vim:SendKeyEvent(true, Enum.KeyCode.E, false, game)
-                    task.wait(0.1)
-                    vim:SendKeyEvent(false, Enum.KeyCode.E, false, game)
-                end
-            end)
-
             -- FireServer (на случай если промпт активировал серверное событие)
             if pCmd then
                 pcall(function()
@@ -2727,22 +2739,27 @@ function managePlanters()
             end
 
             -- ШАГ 2: Ждём и подтверждаем "Yes" в диалоге сбора плантатора
-            for attempt = 1, 20 do
+            for attempt = 1, 25 do
                 task.wait(0.1)
                 if confirmPlanterHarvestModal() then
                     log("Плантатор", "✅ Нажали [Yes] в диалоге сбора плантатора!")
                     break
                 end
-                -- Повторно жмем E если диалог не появился за 1 секунду
-                if attempt == 10 then
+                -- Повторно жмем E если диалог не появился
+                if attempt % 6 == 0 then
                     pcall(function()
                         local vim = game:GetService("VirtualInputManager")
                         if vim then
                             vim:SendKeyEvent(true, Enum.KeyCode.E, false, game)
-                            task.wait(0.1)
+                            task.wait(0.08)
                             vim:SendKeyEvent(false, Enum.KeyCode.E, false, game)
                         end
                     end)
+                    for _, prompt in ipairs(info.model:GetDescendants()) do
+                        if prompt:IsA("ProximityPrompt") and type(fireproximityprompt) == "function" then
+                            pcall(fireproximityprompt, prompt, 0, true)
+                        end
+                    end
                 end
             end
             task.wait(0.3)
@@ -2752,7 +2769,7 @@ function managePlanters()
 
             -- Определяем центр поля для сбора токенов
             local fieldZone = getActiveFlowerZone(pPos)
-            if not fieldZone and info.field then
+            if not fieldZone and info.field and info.field ~= "Unknown Field" then
                 fieldZone = getFieldPart(info.field)
             end
             local fieldAnchorPos = (fieldZone and fieldZone.Position) or pPos
@@ -5092,9 +5109,12 @@ TOKEN_REGISTRY = {
 
 isBurstLootActive = false
 
+local TOKEN_LINK_CACHE = setmetatable({}, { __mode = "k" })
+local tokenLinkScanned = false
 local tokenLinkTextureId = nil
 function findTokenLinkTextureId()
-    if tokenLinkTextureId then return tokenLinkTextureId end
+    if tokenLinkScanned then return tokenLinkTextureId end
+    tokenLinkScanned = true
     pcall(function()
         local rep = game:GetService("ReplicatedStorage")
         for _, d in ipairs(rep:GetDescendants()) do
@@ -5116,8 +5136,12 @@ end
 
 function isTokenLink(obj)
     if not obj then return false end
+    local cached = TOKEN_LINK_CACHE[obj]
+    if cached ~= nil then return cached end
+
     local oName = string.lower(tostring(obj.Name or ""))
     if string.find(oName, "token link", 1, true) or string.find(oName, "tokenlink", 1, true) or (string.find(oName, "link", 1, true) and not string.find(oName, "blink", 1, true)) then
+        TOKEN_LINK_CACHE[obj] = true
         return true
     end
 
@@ -5127,18 +5151,26 @@ function isTokenLink(obj)
         for _, d in ipairs(descendants) do
             local dn = string.lower(tostring(d.Name or ""))
             if string.find(dn, "token link", 1, true) or string.find(dn, "tokenlink", 1, true) or (string.find(dn, "link", 1, true) and not string.find(dn, "blink", 1, true)) then
+                TOKEN_LINK_CACHE[obj] = true
                 return true
             end
             if d:IsA("Decal") or d:IsA("Texture") then
                 local tex = tostring(d.Texture or "")
                 local lowTex = string.lower(tex)
                 if string.find(lowTex, "link", 1, true) and not string.find(lowTex, "blink", 1, true) then
+                    TOKEN_LINK_CACHE[obj] = true
                     return true
                 end
                 local id = string.match(tex, "%d+")
                 if id then
-                    if linkId and id == linkId then return true end
-                    if TOKEN_TEXTURE_MAP[id] == "token_link" or TOKEN_TEXTURE_MAP[id] == "token link" then return true end
+                    if linkId and id == linkId then
+                        TOKEN_LINK_CACHE[obj] = true
+                        return true
+                    end
+                    if TOKEN_TEXTURE_MAP[id] == "token_link" or TOKEN_TEXTURE_MAP[id] == "token link" then
+                        TOKEN_LINK_CACHE[obj] = true
+                        return true
+                    end
                 end
             end
         end
@@ -5150,11 +5182,13 @@ function isTokenLink(obj)
             local lowVal = string.lower(tostring(v or ""))
             local lowKey = string.lower(tostring(k or ""))
             if string.find(lowVal, "token link", 1, true) or string.find(lowVal, "tokenlink", 1, true) or (string.find(lowVal, "link", 1, true) and not string.find(lowVal, "blink", 1, true)) or string.find(lowKey, "token link", 1, true) or string.find(lowKey, "tokenlink", 1, true) then
+                TOKEN_LINK_CACHE[obj] = true
                 return true
             end
         end
     end
 
+    TOKEN_LINK_CACHE[obj] = false
     return false
 end
 
@@ -5446,7 +5480,7 @@ local TOKEN_CACHE, TOKEN_CACHE_AT = {}, 0
 local collectedTokens = setmetatable({}, { __mode = "k" })
 function findFieldTokens(anchorZone, limitX, limitZ, fieldAnchor)
     local now = os.clock()
-    if now - TOKEN_CACHE_AT < 0.08 then
+    if now - TOKEN_CACHE_AT < 0.15 then
         return TOKEN_CACHE
     end
     TOKEN_CACHE_AT = now
@@ -5488,10 +5522,12 @@ function findFieldTokens(anchorZone, limitX, limitZ, fieldAnchor)
                             if inField then
                                 local prio = getTokenPriorityForObj(obj)
                                 if prio <= 3 then
+                                    local isLink = (prio == 0) or (TOKEN_LINK_CACHE[obj] == true)
                                     out[#out+1] = {
                                         obj = obj,
                                         pos = pos,
-                                        priority = prio,
+                                        priority = isLink and 0 or prio,
+                                        isLink = isLink,
                                     }
                                 end
                             end
@@ -5635,6 +5671,7 @@ collectTokensFor = function(maxSeconds, stopFn, fieldAnchor)
 
         -- Принудительный сброс физики, полетных флагов и переход в бег по земле
         setFlightNoclip(false)
+        pcall(disableSprinklerCollision)
         local initialChar = player.Character
         local initialRoot = initialChar and initialChar:FindFirstChild("HumanoidRootPart")
         local initialHum = initialChar and initialChar:FindFirstChildOfClass("Humanoid")
@@ -5766,10 +5803,11 @@ collectTokensFor = function(maxSeconds, stopFn, fieldAnchor)
                 if p then
                     local dx = p.X - rootPos.X
                     local dz = p.Z - rootPos.Z
-                    if (dx * dx + dz * dz) > 4.0 then
-                        local isLink = isTokenLink(activeTokenObj)
-                        best = { obj = activeTokenObj, pos = p, priority = isLink and 0 or 1 }
-                        bestKey = isLink and -10000000 or 0
+                    local distSq = dx * dx + dz * dz
+                    if distSq > 4.0 then
+                        local isLink = (TOKEN_LINK_CACHE[activeTokenObj] == true)
+                        best = { obj = activeTokenObj, pos = p, priority = isLink and 0 or 1, isLink = isLink }
+                        bestKey = isLink and -10000000 or distSq
                     end
                 end
             end
@@ -5788,7 +5826,7 @@ collectTokensFor = function(maxSeconds, stopFn, fieldAnchor)
                             end
                         end)
                     else
-                        local isLink = (token.priority == 0) or isTokenLink(tobj)
+                        local isLink = (token.priority == 0) or (token.isLink == true)
                         local p = isLink and 0 or token.priority
                         if p < 999 then
                             local score
@@ -5874,20 +5912,25 @@ collectTokensFor = function(maxSeconds, stopFn, fieldAnchor)
                 patrolTarget = Vector3.new(safeWorld.X, (anchorZone and (anchorZone.Position.Y + 3.2)) or root.Position.Y, safeWorld.Z)
             end
 
-            -- Плавное и безотказное прямое перемещение: активный бег через humanoid:Move() + MoveTo()
+            -- Плавное и безотказное прямое перемещение: активный бег через humanoid:Move() + MoveTo() + AssemblyLinearVelocity
             if patrolTarget and humanoid and root then
                 local currentPos = root.Position
                 local flatTarget = Vector3.new(patrolTarget.X, currentPos.Y, patrolTarget.Z)
                 local flatDelta = flatTarget - currentPos
                 local dist = flatDelta.Magnitude
 
+                local currentSpd = getCalculatedWalkSpeed(isP1 or isBurstLootActive)
                 if dist > 1.2 then
                     local moveDir = flatDelta.Unit
                     humanoid.AutoRotate = true
                     humanoid:Move(moveDir, false)
                     humanoid:MoveTo(flatTarget)
+                    -- Физический толчок скорости (гарантирует что персонаж БЕЖИТ даже если PlayerModule сбрасывает Move):
+                    local currentY = root.AssemblyLinearVelocity.Y
+                    root.AssemblyLinearVelocity = Vector3.new(moveDir.X * currentSpd, currentY, moveDir.Z * currentSpd)
                 else
                     humanoid:Move(Vector3.zero, false)
+                    root.AssemblyLinearVelocity = Vector3.new(0, root.AssemblyLinearVelocity.Y, 0)
                     if not activeTokenObj then
                         patrolTarget = nil
                     end
@@ -5900,6 +5943,7 @@ collectTokensFor = function(maxSeconds, stopFn, fieldAnchor)
                     if not stuckStartTime then stuckStartTime = now end
                     if (now - stuckStartTime > 0.6) then
                         pcall(function() humanoid.Jump = true end)
+                        pcall(disableSprinklerCollision)
                         patrolTarget = nil
                         stuckStartTime = nil
                         lastRecordedPos = currentPos
@@ -5916,7 +5960,9 @@ collectTokensFor = function(maxSeconds, stopFn, fieldAnchor)
         pcall(function()
             local c = player.Character
             local h = c and c:FindFirstChildOfClass("Humanoid")
+            local r = c and c:FindFirstChild("HumanoidRootPart")
             if h then h:Move(Vector3.zero, false) end
+            if r then r.AssemblyLinearVelocity = Vector3.new(0, r.AssemblyLinearVelocity.Y, 0) end
         end)
     end
 
@@ -7346,7 +7392,7 @@ new("TextLabel", {
 })
 new("TextLabel", {
     Size = UDim2.new(0, 220, 0, 25), Position = UDim2.new(0, 58, 0, 10),
-    BackgroundTransparency = 1, Text = "BSS Hopper v1.3.84",
+    BackgroundTransparency = 1, Text = "BSS Hopper v1.3.85",
     TextColor3 = C.text, Font = Enum.Font.GothamBold, TextSize = 22,
     TextXAlignment = Enum.TextXAlignment.Left, Parent = head,
 })
