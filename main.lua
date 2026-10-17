@@ -360,7 +360,9 @@ local CONFIG = {
     MIN_PLAYERS = 2,
     TOKEN_PRIORITIES = {},
     FAST_TWEEN_RAREST_ENABLED = false,
-    FAST_TWEEN_SPEED = 250,
+    FAST_TWEEN_SPEED = 175,
+    PERIODIC_REPORT_ENABLED = true,
+    PERIODIC_REPORT_INTERVAL = 15,
     FAST_TWEEN_SELECTED_ITEMS = {
         ["Mythic Egg"] = true,
         ["Diamond Egg"] = true,
@@ -506,6 +508,7 @@ local SAVED_KEYS = {
     "PLANTERS_CONFIG","PUFF_AUTO_BOOST_EPIC","PUFF_SELECTED_BOOSTS","PUFF_MIN_LEVEL","PUFF_MAX_LEVEL",
     "DISCORD_WEBHOOK_URL","TELEGRAM_BOT_TOKEN","TELEGRAM_CHAT_ID",
     "FAST_TWEEN_RAREST_ENABLED","FAST_TWEEN_SPEED","FAST_TWEEN_SELECTED_ITEMS",
+    "PERIODIC_REPORT_ENABLED","PERIODIC_REPORT_INTERVAL",
 }
 
 function applySavedData(data, source)
@@ -1699,6 +1702,109 @@ function notifyAllWebhooks(title, text, colorHex)
 end
 
 -- ══════════════════════════════════════════════════════════════════════
+--  ПЕРИОДИЧЕСКИЙ ОТЧЕТ О ДОБЫТЫХ РЕСУРСАХ (DISCORD & TELEGRAM)
+-- ══════════════════════════════════════════════════════════════════════
+local function formatNumber(n)
+    local str = tostring(math.floor(math.abs(tonumber(n) or 0)))
+    local formatted = str:reverse():gsub("(%d%d%d)", "%1,"):reverse():gsub("^,", "")
+    return (n < 0 and "-" or "") .. formatted
+end
+
+local function getPlayerHoney()
+    local ls = player:FindFirstChild("leaderstats")
+    if ls then
+        local h = ls:FindFirstChild("Honey")
+        if h and typeof(h.Value) == "number" then return h.Value end
+    end
+    local cs = player:FindFirstChild("CoreStats")
+    if cs then
+        local h = cs:FindFirstChild("Honey")
+        if h and typeof(h.Value) == "number" then return h.Value end
+    end
+    return 0
+end
+
+local LOOT_REPORT_STATS = {
+    startTime = os.clock(),
+    lastReportTime = os.clock(),
+    startHoney = 0,
+    lastHoney = 0,
+    sprouts = 0,
+    vicious = 0,
+    windy = 0,
+    meteors = 0,
+    planters = 0,
+    items = {},
+    periodItems = {},
+}
+
+function recordLootItem(name, count)
+    if not name or name == "" then return end
+    count = count or 1
+    LOOT_REPORT_STATS.items[name] = (LOOT_REPORT_STATS.items[name] or 0) + count
+    LOOT_REPORT_STATS.periodItems[name] = (LOOT_REPORT_STATS.periodItems[name] or 0) + count
+end
+
+function sendPeriodicLootReport()
+    if CONFIG.PERIODIC_REPORT_ENABLED == false then return end
+    local hasDiscord = CONFIG.DISCORD_WEBHOOK_URL and CONFIG.DISCORD_WEBHOOK_URL ~= ""
+    local hasTg = CONFIG.TELEGRAM_BOT_TOKEN and CONFIG.TELEGRAM_BOT_TOKEN ~= "" and CONFIG.TELEGRAM_CHAT_ID and CONFIG.TELEGRAM_CHAT_ID ~= ""
+    if not hasDiscord and not hasTg then return end
+
+    local curHoney = getPlayerHoney()
+    if LOOT_REPORT_STATS.startHoney == 0 and curHoney > 0 then
+        LOOT_REPORT_STATS.startHoney = curHoney
+        LOOT_REPORT_STATS.lastHoney = curHoney
+    end
+    local periodHoney = math.max(0, curHoney - LOOT_REPORT_STATS.lastHoney)
+    local totalHoney = math.max(0, curHoney - LOOT_REPORT_STATS.startHoney)
+    LOOT_REPORT_STATS.lastHoney = curHoney
+
+    local intervalMins = math.max(1, tonumber(CONFIG.PERIODIC_REPORT_INTERVAL) or 15)
+    local elapsedMins = math.floor((os.clock() - LOOT_REPORT_STATS.startTime) / 60)
+
+    local itemLines = {}
+    for name, cnt in pairs(LOOT_REPORT_STATS.periodItems) do
+        if cnt > 0 then
+            table.insert(itemLines, string.format("• %s: +%d", name, cnt))
+        end
+    end
+    table.sort(itemLines)
+    local itemsText = (#itemLines > 0) and table.concat(itemLines, "\n") or "• За этот период редких предметов не выпадало"
+    LOOT_REPORT_STATS.periodItems = {}
+
+    local desc = string.format(
+        "📊 **Отчет о фарме за последние %d мин** (Всего в игре: %d мин)\n\n" ..
+        "🍯 **Мёд:** +%s (Всего за сессию: +%s)\n" ..
+        "🌱 **Ростки:** %d | 🐝 **Vicious:** %d | 🌪️ **Windy:** %d\n" ..
+        "☄️ **Метеориты:** %d | 🪴 **Плантаторы:** %d\n\n" ..
+        "💎 **Добытые ресурсы за период:**\n%s",
+        intervalMins, elapsedMins,
+        formatNumber(periodHoney), formatNumber(totalHoney),
+        LOOT_REPORT_STATS.sprouts, LOOT_REPORT_STATS.vicious, LOOT_REPORT_STATS.windy,
+        LOOT_REPORT_STATS.meteors, LOOT_REPORT_STATS.planters,
+        itemsText
+    )
+
+    sendDiscordWebhook("Периодический отчет о ресурсах", desc, "00f5a0")
+    sendTelegramMessage("*Периодический отчет о ресурсах*\n" .. desc)
+    log("Отчет", string.format("Отправлен периодический отчет о луте за последние %d мин!", intervalMins))
+end
+
+task.spawn(function()
+    while true do
+        if not alive() then return end
+        local intervalMins = math.max(1, tonumber(CONFIG.PERIODIC_REPORT_INTERVAL) or 15)
+        local now = os.clock()
+        if CONFIG.PERIODIC_REPORT_ENABLED ~= false and (now - LOOT_REPORT_STATS.lastReportTime >= intervalMins * 60) then
+            LOOT_REPORT_STATS.lastReportTime = now
+            pcall(sendPeriodicLootReport)
+        end
+        task.wait(5)
+    end
+end)
+
+-- ══════════════════════════════════════════════════════════════════════
 --  АВТО-БУСТЫ ИЗ ИНВЕНТАРЯ ДЛЯ EPIC+ ГРИБОВ
 -- ══════════════════════════════════════════════════════════════════════
 local BOOST_ITEM_NAMES = {
@@ -1784,8 +1890,41 @@ function fightPuffshroom(puffRoot, rarity, level)
 end
 
 -- ══════════════════════════════════════════════════════════════════════
---  WINDY BEE (БОЙ В ОБЛАКЕ С УВОРОТОМ ОТ ТОРНАДО)
+--  WINDY BEE (БЕГ ПО ПОЛЮ КАК НА РОСТКАХ, УВОРОТ ОТ ТОРНАДО, БЕЗ ПОЛЕТОВ И ПРЫЖКОВ)
 -- ══════════════════════════════════════════════════════════════════════
+local poppedWindyClouds = {}
+
+local function isWindyAlreadyHatched(windy)
+    if not windy or not windy.Parent then return true end
+    if poppedWindyClouds[windy] then return true end
+
+    -- 1. Если на сервере уже есть торнадо — значит пчела 100% вылупилась и атакует
+    local tornadoes = Workspace:FindFirstChild("Tornadoes") or (Workspace:FindFirstChild("Happenings") and Workspace.Happenings:FindFirstChild("Tornadoes"))
+    if tornadoes and #tornadoes:GetChildren() > 0 then
+        return true
+    end
+
+    -- 2. Если пчела перемещается в пространстве (активный полет, а не статичное облако)
+    local p1 = worldPos(windy)
+    if p1 then
+        task.wait(0.2)
+        local p2 = worldPos(windy)
+        if p2 and (p1 - p2).Magnitude > 5 then
+            return true
+        end
+    end
+
+    -- 3. Если у модели есть боевые элементы / индикатор уровня / здоровья
+    for _, child in ipairs(windy:GetChildren()) do
+        local cn = string.lower(child.Name)
+        if string.find(cn, "combat", 1, true) or string.find(cn, "level", 1, true) or string.find(cn, "enemy", 1, true) or string.find(cn, "health", 1, true) then
+            return true
+        end
+    end
+
+    return false
+end
+
 function findWindyBee()
     local npcFolder = Workspace:FindFirstChild("NPCBees")
     if not npcFolder then return nil end
@@ -1806,39 +1945,47 @@ function fightWindyBee(windy)
 
     local initialPos = worldPos(windy)
     if not initialPos then return false end
-    local fieldName, fieldZone = getFieldForPos(initialPos, 50)
-    local groundTarget = getGroundPos(initialPos)
 
-    -- ПОДЛЕТАЕМ ТОЛЬКО 1 РАЗ к полю / к земле под Windy Bee!
+    -- Определяем физическую зону поля
+    local currentZone = getActiveFlowerZone(initialPos)
+    local currentZonePos = currentZone and currentZone.Position or initialPos
+    local groundTarget = getGroundPos(currentZonePos)
+
+    -- ПОДЛЕТАЕМ ТОЛЬКО 1 РАЗ чтобы добраться до поля с другого конца карты!
     local root = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
     if root then
-        log("Windy", string.format("Подлетаю 1 раз на поле к Windy Bee (%s)...", tostring(fieldName or "Поле")))
+        log("Windy", string.format("Прибываю на поле к Windy Bee (%s)...", tostring(currentZone and currentZone.Name or "Поле")))
         moveRootToPosition(root, groundTarget, 6)
         setFlightNoclip(false)
+        root.AssemblyLinearVelocity = Vector3.zero
+        root.AssemblyAngularVelocity = Vector3.zero
     end
 
-    local lastBeePos = initialPos
-    local lastWindyJump = 0
-
-    -- 1 раз подбегаем под облако Windy Bee и делаем 1 прыжок
+    -- Проверяем: если Windy Bee в облаке (еще не вылупилась), только тогда 1 раз подбегаем и прыгаем
     local char = player.Character
     local curRoot = char and char:FindFirstChild("HumanoidRootPart")
     local hum = char and char:FindFirstChildOfClass("Humanoid")
     if curRoot and hum and alive() then
-        local underBee = Vector3.new(initialPos.X, curRoot.Position.Y, initialPos.Z)
-        hum:MoveTo(underBee)
-        local t0 = os.clock()
-        while alive() and (os.clock() - t0 < 3.0) and (curRoot.Position - underBee).Magnitude > 8 do
-            task.wait(0.08)
-        end
-        if hum.FloorMaterial ~= Enum.Material.Air then
-            hum.Jump = true
-            log("Windy", "☁️ Подбежал под облако Windy Bee и прыгнул 1 раз!")
-            task.wait(0.4)
+        if not isWindyAlreadyHatched(windy) then
+            log("Windy", "☁️ Windy Bee еще в облаке — подбегаю и делаю 1 прыжок чтобы разбудить...")
+            local underBee = Vector3.new(initialPos.X, curRoot.Position.Y, initialPos.Z)
+            hum:MoveTo(underBee)
+            local t0 = os.clock()
+            while alive() and (os.clock() - t0 < 2.5) and (curRoot.Position - underBee).Magnitude > 8 do
+                task.wait(0.08)
+            end
+            if hum.FloorMaterial ~= Enum.Material.Air then
+                hum.Jump = true
+                task.wait(0.4)
+            end
+            poppedWindyClouds[windy] = true
+        else
+            poppedWindyClouds[windy] = true
+            log("Windy", "🌪️ Windy Bee уже вылупилась из облака! Прыжок НЕ нужен — сразу бегаю по полю.")
         end
     end
 
-    -- ДАЛЬШЕ БЕГАЕМ ПО ПОЛЮ КАК НА РОСТКАХ, УВОРАЧИВАЯСЬ ОТ ТОРНАДО!
+    -- ДАЛЬШЕ ТОЛЬКО БЕГАЕМ ПО ПОЛЮ КАК НА РОСТКЕ (БЕЗ ПОЛЕТОВ!), УВОРАЧИВАЯСЬ ОТ ТОРНАДО
     while alive() and windy.Parent and (os.clock() - started < 360) do
         local curChar = player.Character
         local rootPart = curChar and curChar:FindFirstChild("HumanoidRootPart")
@@ -1851,32 +1998,34 @@ function fightWindyBee(windy)
         local beePos = worldPos(windy)
         if not beePos then break end
 
-        -- Если Windy Bee перелетела на ДРУГОЕ поле (дистанция > 90 studs) - только тогда перелетаем 1 раз!
-        if (beePos - lastBeePos).Magnitude > 90 then
-            log("Windy", "Windy Bee сменила поле! Перелетаю 1 раз на новое поле...")
-            lastBeePos = beePos
-            local newGround = getGroundPos(beePos)
-            moveRootToPosition(rootPart, newGround, 6)
-            setFlightNoclip(false)
-            task.wait(0.3)
-
-            -- На новом поле просто подбегаем поближе к позиции боя
-            local underBee = Vector3.new(beePos.X, rootPart.Position.Y, beePos.Z)
-            humanoid:MoveTo(underBee)
-            task.wait(0.2)
+        -- Проверяем: перелетела ли Windy Bee на ДРУГОЕ поле (по FlowerZones, а не по кругам на текущем поле!)
+        local beeZone = getActiveFlowerZone(beePos)
+        if beeZone and currentZone and beeZone ~= currentZone then
+            local interFieldDist = (beeZone.Position - currentZone.Position).Magnitude
+            if interFieldDist > 140 then
+                log("Windy", string.format("Windy Bee перелетела на другое поле: '%s' -> '%s'! Перехожу на новое поле...", currentZone.Name, beeZone.Name))
+                currentZone = beeZone
+                currentZonePos = currentZone.Position
+                local newGround = getGroundPos(currentZonePos)
+                moveRootToPosition(rootPart, newGround, 6)
+                setFlightNoclip(false)
+                rootPart.AssemblyLinearVelocity = Vector3.zero
+                rootPart.AssemblyAngularVelocity = Vector3.zero
+                task.wait(0.2)
+            end
         end
 
         applyWalkSpeed()
         pcall(swingDigTool)
 
-        -- Сканируем торнадо для уворота на земле
+        -- Сканируем торнадо для уворота по земле
         local tornadoDodgeDir = nil
         local tornadoes = Workspace:FindFirstChild("Tornadoes") or (Workspace:FindFirstChild("Happenings") and Workspace.Happenings:FindFirstChild("Tornadoes"))
         if tornadoes then
             for _, torn in ipairs(tornadoes:GetChildren()) do
                 if string.find(string.lower(torn.Name), "tornado", 1, true) then
                     local tpos = worldPos(torn)
-                    if tpos and (rootPart.Position - tpos).Magnitude < 25 then
+                    if tpos and (rootPart.Position - tpos).Magnitude < 24 then
                         local away = (rootPart.Position - tpos)
                         tornadoDodgeDir = Vector3.new(away.X, 0, away.Z).Unit
                         break
@@ -1886,36 +2035,50 @@ function fightWindyBee(windy)
         end
 
         if tornadoDodgeDir then
-            local runTarget = rootPart.Position + tornadoDodgeDir * 28
-            log("Windy", "Уворот по земле от торнадо Windy Bee (без прыжков)!")
+            local runTarget = rootPart.Position + tornadoDodgeDir * 26
+            if currentZone then
+                local lp = currentZone.CFrame:PointToObjectSpace(runTarget)
+                local half = currentZone.Size * 0.5
+                local cx = math.clamp(lp.X, -half.X * 0.95, half.X * 0.95)
+                local cz = math.clamp(lp.Z, -half.Z * 0.95, half.Z * 0.95)
+                runTarget = currentZone.CFrame:PointToWorldSpace(Vector3.new(cx, lp.Y, cz))
+            end
+            log("Windy", "Уворот по земле от торнадо Windy Bee!")
             humanoid:MoveTo(runTarget)
-            task.wait(0.3)
+            task.wait(0.25)
         else
-            -- Бегаем по полю точно так же, как будто лутаем ростки!
-            collectTokensFor(3.0, function()
+            -- БЕГАЕМ ПО ПОЛЮ КАК НА РОСТКЕ (MoveTo по земле, сбор Cloud Vials и жетонов до 99% зоны)
+            setFlightNoclip(false)
+            collectTokensFor(2.5, function()
                 if not alive() or not windy.Parent then return true end
                 local curBee = worldPos(windy)
-                if curBee and (curBee - lastBeePos).Magnitude > 90 then return true end
+                if curBee and currentZone then
+                    local bz = getActiveFlowerZone(curBee)
+                    if bz and bz ~= currentZone and (bz.Position - currentZone.Position).Magnitude > 140 then
+                        return true
+                    end
+                end
                 if tornadoes then
                     for _, torn in ipairs(tornadoes:GetChildren()) do
                         if string.find(string.lower(torn.Name), "tornado", 1, true) then
                             local tpos = worldPos(torn)
-                            if tpos and (rootPart.Position - tpos).Magnitude < 25 then
+                            if tpos and (rootPart.Position - tpos).Magnitude < 24 then
                                 return true
                             end
                         end
                     end
                 end
                 return false
-            end, beePos)
+            end, currentZonePos)
         end
 
-        task.wait(0.05)
+        task.wait(0.04)
     end
 
     setFlightNoclip(false)
-    log("Windy", "Windy Bee повержена или исчезла! Сбор оставшихся Cloud Vials 8 секунд...")
-    collectTokensFor(8, function() return not alive() end, lastBeePos)
+    log("Windy", "Windy Bee повержена или исчезла! Сбор Cloud Vials и жетонов 8 секунд...")
+    collectTokensFor(8, function() return not alive() end, currentZonePos)
+    LOOT_REPORT_STATS.windy = (LOOT_REPORT_STATS.windy or 0) + 1
     notifyAllWebhooks("Windy Bee залутана!", "Фаза Windy Bee завершена, собраны Cloud Vials и жетоны.", "00f5a0")
     return true
 end
@@ -2320,46 +2483,99 @@ end
 function confirmPlanterHarvestModal()
     local pg = player:FindFirstChild("PlayerGui")
     if not pg then return false end
-    for _, desc in ipairs(pg:GetDescendants()) do
-        if desc:IsA("TextLabel") then
-            local t = string.lower(desc.Text or "")
-            if string.find(t, "harvest the planter", 1, true)
-               or string.find(t, "done growing", 1, true)
-               or string.find(t, "before it's done", 1, true) then
-                local rootGui = desc:FindFirstAncestorWhichIsA("ScreenGui") or desc.Parent
-                if rootGui then
-                    for _, btn in ipairs(rootGui:GetDescendants()) do
-                        if btn:IsA("TextButton") or btn:IsA("ImageButton") then
-                            local bText = string.lower(btn.Text or "")
-                            local bName = string.lower(btn.Name)
-                            local innerTxt = ""
-                            local innerLabel = btn:FindFirstChildWhichIsA("TextLabel")
-                            if innerLabel then innerTxt = string.lower(innerLabel.Text or "") end
 
-                            if bText == "yes" or innerTxt == "yes" or bName == "yes" or string.find(bName, "yes", 1, true) then
-                                pcall(function()
-                                    if type(firesignal) == "function" then
-                                        firesignal(btn.MouseButton1Click)
-                                        firesignal(btn.Activated)
+    -- Ищем диалоговое окно подтверждения сбора плантатора
+    for _, desc in ipairs(pg:GetDescendants()) do
+        if desc:IsA("TextLabel") or desc:IsA("TextButton") then
+            local t = string.lower(desc.Text or "")
+            if (string.find(t, "harvest", 1, true) and string.find(t, "planter", 1, true))
+               or string.find(t, "done growing", 1, true)
+               or string.find(t, "before it", 1, true) then
+
+                local dialogContainer = desc.Parent
+                if dialogContainer then
+                    local searchScopes = { dialogContainer, dialogContainer.Parent }
+                    for _, container in ipairs(searchScopes) do
+                        if container then
+                            for _, elem in ipairs(container:GetDescendants()) do
+                                if elem:IsA("TextButton") or elem:IsA("ImageButton") then
+                                    local eTxt = string.lower(elem.Text or "")
+                                    local eName = string.lower(elem.Name or "")
+                                    local childTxt = ""
+                                    local lbl = elem:FindFirstChildWhichIsA("TextLabel")
+                                    if lbl then childTxt = string.lower(lbl.Text or "") end
+
+                                    -- Определяем зеленую кнопку "Yes"
+                                    local isYes = (eTxt == "yes" or childTxt == "yes" or eName == "yes"
+                                        or string.find(eName, "yes", 1, true)
+                                        or string.find(eTxt, "yes", 1, true))
+
+                                    if isYes then
+                                        log("Плантатор", "🟢 Нажата кнопка [ Yes ] в диалоге сбора плантатора!")
+
+                                        -- 1. firesignal
+                                        pcall(function()
+                                            if type(firesignal) == "function" then
+                                                firesignal(elem.MouseButton1Click)
+                                                firesignal(elem.MouseButton1Down)
+                                                firesignal(elem.MouseButton1Up)
+                                                firesignal(elem.Activated)
+                                            end
+                                        end)
+
+                                        -- 2. getconnections
+                                        pcall(function()
+                                            if type(getconnections) == "function" then
+                                                for _, c in ipairs(getconnections(elem.MouseButton1Click)) do c:Fire() end
+                                                for _, c in ipairs(getconnections(elem.MouseButton1Down)) do c:Fire() end
+                                                for _, c in ipairs(getconnections(elem.MouseButton1Up)) do c:Fire() end
+                                                for _, c in ipairs(getconnections(elem.Activated)) do c:Fire() end
+                                            end
+                                        end)
+
+                                        -- 3. VirtualInputManager (по обоим координатам: с Inset и без)
+                                        pcall(function()
+                                            local vim = game:GetService("VirtualInputManager")
+                                            if vim then
+                                                local center = elem.AbsolutePosition + (elem.AbsoluteSize * 0.5)
+                                                local inset = game:GetService("GuiService"):GetGuiInset()
+
+                                                vim:SendMouseButtonEvent(center.X, center.Y, 0, true, game, 1)
+                                                task.wait(0.02)
+                                                vim:SendMouseButtonEvent(center.X, center.Y, 0, false, game, 1)
+
+                                                vim:SendMouseButtonEvent(center.X + inset.X, center.Y + inset.Y, 0, true, game, 1)
+                                                task.wait(0.02)
+                                                vim:SendMouseButtonEvent(center.X + inset.X, center.Y + inset.Y, 0, false, game, 1)
+                                            end
+                                        end)
+
+                                        -- 4. VirtualUser
+                                        pcall(function()
+                                            local vu = game:GetService("VirtualUser")
+                                            if vu then
+                                                local center = elem.AbsolutePosition + (elem.AbsoluteSize * 0.5)
+                                                vu:CaptureController()
+                                                vu:ClickButton1(Vector2.new(center.X, center.Y))
+                                            end
+                                        end)
+
+                                        -- 5. Прямой вызов Remote подтверждения
+                                        pcall(function()
+                                            local rep = game:GetService("ReplicatedStorage")
+                                            local events = rep:FindFirstChild("Events")
+                                            if events then
+                                                local pCmd = events:FindFirstChild("PlanterCommand")
+                                                if pCmd then
+                                                    pCmd:FireServer({ Type = "ConfirmHarvest" })
+                                                    pCmd:FireServer({ Type = "Harvest", Confirm = true })
+                                                end
+                                            end
+                                        end)
+
+                                        return true
                                     end
-                                end)
-                                pcall(function()
-                                    if type(getconnections) == "function" then
-                                        for _, conn in ipairs(getconnections(btn.MouseButton1Click)) do conn:Fire() end
-                                        for _, conn in ipairs(getconnections(btn.Activated)) do conn:Fire() end
-                                    end
-                                end)
-                                pcall(function()
-                                    local vim = game:GetService("VirtualInputManager")
-                                    if vim then
-                                        local pos = btn.AbsolutePosition + (btn.AbsoluteSize * 0.5)
-                                        vim:SendMouseButtonEvent(pos.X, pos.Y, 0, true, game, 1)
-                                        task.wait(0.04)
-                                        vim:SendMouseButtonEvent(pos.X, pos.Y, 0, false, game, 1)
-                                    end
-                                end)
-                                log("Плантатор", "✅ Нажата кнопка [ Yes ] в диалоге сбора плантатора!")
-                                return true
+                                end
                             end
                         end
                     end
@@ -2369,6 +2585,17 @@ function confirmPlanterHarvestModal()
     end
     return false
 end
+
+-- Фоновый наблюдатель за диалогом сбора плантатора (мгновенно подтверждает Yes если окно появилось на экране)
+task.spawn(function()
+    while true do
+        if not alive() then return end
+        if CONFIG.AUTO_HARVEST_PLANTERS ~= false then
+            pcall(confirmPlanterHarvestModal)
+        end
+        task.wait(0.12)
+    end
+end)
 
 function managePlanters()
     if CONFIG.AUTO_HARVEST_PLANTERS == false then return end
@@ -5163,7 +5390,7 @@ local function getObstacleAvoidanceTarget(rootPos, targetPos, character)
     if hit and hit.Instance and hit.Instance.CanCollide and not hit.Instance:IsA("Terrain") then
         local norm = hit.Normal
         local flatNorm = Vector3.new(norm.X, 0, norm.Z)
-        if flatNorm.Magnitude > 0.05 then
+        if math.abs(norm.Y) < 0.5 and flatNorm.Magnitude > 0.05 then
             flatNorm = flatNorm.Unit
             local leftTangent = Vector3.new(-flatNorm.Z, 0, flatNorm.X)
             local rightTangent = Vector3.new(flatNorm.Z, 0, -flatNorm.X)
@@ -5192,6 +5419,8 @@ local function getObstacleAvoidanceTarget(rootPos, targetPos, character)
 end
 
 local ONETT_EASTER_EGGS = {}
+local BLACKLISTED_STATIC_EASTER_EGGS = {}
+
 pcall(function()
     local coll = Workspace:FindFirstChild("Collectibles")
     if coll then
@@ -5201,9 +5430,26 @@ pcall(function()
     end
 end)
 
+local function isNearAnyFlowerZone(pos, maxDist)
+    maxDist = maxDist or 85
+    local fz = Workspace:FindFirstChild("FlowerZones")
+    if not fz then return true end
+    for _, z in ipairs(fz:GetChildren()) do
+        if z:IsA("BasePart") then
+            local delta = pos - z.Position
+            local halfX = z.Size.X * 0.5 + maxDist
+            local halfZ = z.Size.Z * 0.5 + maxDist
+            if math.abs(delta.X) <= halfX and math.abs(delta.Z) <= halfZ and math.abs(delta.Y) <= 40 then
+                return true
+            end
+        end
+    end
+    return false
+end
+
 local function isOnettEasterEgg(token)
     if not token or not token.Parent then return true end
-    if ONETT_EASTER_EGGS[token] then return true end
+    if ONETT_EASTER_EGGS[token] or BLACKLISTED_STATIC_EASTER_EGGS[token] then return true end
     local p = worldPos(token)
     if not p then return true end
 
@@ -5216,6 +5462,11 @@ local function isOnettEasterEgg(token)
     if (p - Vector3.new(-425, 72, 0)).Magnitude < 20 then return true end
     -- 4. В секретных комнатах/лабиринтах (компьютерная комната, gummy lair)
     if p.Y < 6 or p.Y > 360 then return true end
+    -- 5. Если токен вне цветущих полей (> 85 studs) — это 100% статичная пасхалка (карамельная трость, стены, секреты)
+    if not isNearAnyFlowerZone(p, 85) then
+        BLACKLISTED_STATIC_EASTER_EGGS[token] = true
+        return true
+    end
 
     return false
 end
@@ -5284,14 +5535,22 @@ function checkAndExecuteFastTweenRarest()
                     isFastTweenActive = true
                     local returnCF = root.CFrame
                     local returnPos = root.Position
-                    local speed = tonumber(CONFIG.FAST_TWEEN_SPEED) or 250
+                    local speed = tonumber(CONFIG.FAST_TWEEN_SPEED) or 175
                     log("FastTween", string.format("⭐ FAST TWEEN: Найден %s (%s)! Лечу сломя голову на скорости %d studs/s...", itemTitle, realName, speed))
                     notifyAllWebhooks("Fast Tween к редкой награде!", string.format("Обнаружен редкий токен %s! Лечу на скорости %d studs/s...", itemTitle, speed), "ffcc00")
 
                     fastTweenToPosition(root, tokenPos + Vector3.new(0, 1.5, 0), speed)
                     pcall(function() root.CFrame = CFrame.new(tokenPos) end)
-                    task.wait(0.06)
+                    task.wait(0.12)
                     pcall(swingDigTool)
+
+                    -- Проверка: если токен не собрался, это пасхалка или заблокированный токен
+                    if token.Parent and worldPos(token) and (worldPos(token) - root.Position).Magnitude < 10 then
+                        BLACKLISTED_STATIC_EASTER_EGGS[token] = true
+                        log("FastTween", string.format("⚠️ Токен %s не собрался (пасхалка Онетта/за стеной). Внесен в черный список!", itemTitle))
+                    else
+                        if recordLootItem then recordLootItem(itemTitle, 1) end
+                    end
 
                     -- Возврат на исходную точку
                     log("FastTween", "✅ Лут забран! Мгновенно возвращаюсь на исходную позицию...")
@@ -5354,11 +5613,6 @@ collectTokensFor = function(maxSeconds, stopFn, fieldAnchor)
                 break
             end
 
-            -- Проверка Fast Tween to Rarest со всего сервера
-            if CONFIG.FAST_TWEEN_RAREST_ENABLED then
-                checkAndExecuteFastTweenRarest()
-            end
-
             -- Защита от реальной потери поля (только если возродился в улье или упал далеко за пределы)
             local targetFieldPos = fieldAnchor or (anchorZone and anchorZone.Position)
             local maxAllowedFieldDist = (anchorZone and (math.sqrt((anchorZone.Size.X * 0.5)^2 + (anchorZone.Size.Z * 0.5)^2) + 38)) or 120
@@ -5405,6 +5659,12 @@ collectTokensFor = function(maxSeconds, stopFn, fieldAnchor)
                         local dz = p.Z - rootPos.Z
                         if (dx * dx + dz * dz) <= 18.0 then
                             collectedTokens[activeTokenObj] = true
+                            pcall(function()
+                                local tName = resolveTokenName(activeTokenObj)
+                                if tName and tName ~= "token" and recordLootItem then
+                                    recordLootItem(tName, 1)
+                                end
+                            end)
                             activeTokenObj = nil
                         end
                     else
@@ -5435,6 +5695,12 @@ collectTokensFor = function(maxSeconds, stopFn, fieldAnchor)
                     local distSq = dx * dx + dz * dz
                     if distSq <= 6.25 then
                         collectedTokens[tobj] = true
+                        pcall(function()
+                            local tName = resolveTokenName(tobj)
+                            if tName and tName ~= "token" and recordLootItem then
+                                recordLootItem(tName, 1)
+                            end
+                        end)
                     else
                         local p = token.priority
                         if p < 999 then
@@ -6486,21 +6752,10 @@ function Solo:Start()
 
                 -- Если целей нет — улей не ставим, переходим на другой сервер мгновенно!
                 if not vicious and not sprout and not puffRoot and not windy and not meteors then
-                    s.currentStatus = "Целей нет — быстрый телепорт..."
-                    local hopWait = math.clamp(tonumber(CONFIG.HOP_DELAY) or 0.05, 0.02, 3)
-                    if hopWait > 0.05 then task.wait(hopWait) end
-                    if alive() then
-                        s.hops += 1
-                        s.currentStatus = "Телепортируюсь на новый сервер..."
-                        local hopped = hopRandom()
-                        if not hopped then
-                            s.currentStatus = "Ищу свободный сервер..."
-                            task.wait(0.8)
-                        else
-                            task.wait(2.0)
-                        end
-                        return
-                    end
+                    s.hops += 1
+                    s.currentStatus = "Телепортируюсь на новый сервер..."
+                    task.wait(0.02)
+                    hopRandom()
                     return
                 end
 
@@ -6526,7 +6781,7 @@ function Solo:Start()
 
                 -- ШАГ 3: ЛЕТИТ ЛУТАТЬ!
                 if windy then
-                    s.currentStatus = "🌪️ Найдена Windy Bee — взлетаю в облако!"
+                    s.currentStatus = "🌪️ Найдена Windy Bee — бегу на поле для боя!"
                     pcall(function() fightWindyBee(windy) end)
                     task.wait(1)
                     return
@@ -6575,7 +6830,7 @@ function Solo:Start()
                             local char = player.Character
                             local root = char and char:FindFirstChild("HumanoidRootPart")
                             local hum = char and char:FindFirstChildOfClass("Humanoid")
-                            if not root or not hum or hum.Health <= 0 or (sproutAnchor and (root.Position - sproutAnchor).Magnitude > 70) then
+                            if not root or not hum or hum.Health <= 0 or (sproutAnchor and (root.Position - sproutAnchor).Magnitude > 135) then
                                 if not root or not hum or hum.Health <= 0 then
                                     s.currentStatus = "Персонаж погиб — жду возрождения..."
                                     char, root, hum = waitForRespawn(8)
@@ -6619,7 +6874,7 @@ function Solo:Start()
                             local char = player.Character
                             local root = char and char:FindFirstChild("HumanoidRootPart")
                             local hum = char and char:FindFirstChildOfClass("Humanoid")
-                            if not root or not hum or hum.Health <= 0 or (root.Position - sproutAnchor).Magnitude > 70 then
+                            if not root or not hum or hum.Health <= 0 or (root.Position - sproutAnchor).Magnitude > 135 then
                                 if not root or not hum or hum.Health <= 0 then
                                     char, root, hum = waitForRespawn(8)
                                 end
@@ -6681,34 +6936,19 @@ function Solo:Start()
                     end
 
                     -- Фаза 3: Росток залутан! Переход на следующий сервер
-                    s.currentStatus = "Росток залутан — перехожу на другой сервер..."
-                    local hopWait = math.max(0.2, tonumber(CONFIG.HOP_DELAY) or 0.8)
-                    task.wait(hopWait)
-                    if alive() then
-                        s.hops += 1
-                        s.currentStatus = "Телепортируюсь на новый сервер..."
-                        hopRandom()
-                        task.wait(6)
-                        return
-                    end
+                    s.hops += 1
+                    s.currentStatus = "Телепортируюсь на новый сервер..."
+                    task.wait(0.02)
+                    hopRandom()
+                    return
                 end
 
                 -- Если ростка нет на сервере — быстрый переход
-                s.currentStatus = "Целей нет — быстрый телепорт..."
-                local hopWait = math.clamp(tonumber(CONFIG.HOP_DELAY) or 0.05, 0.02, 3)
-                if hopWait > 0.05 then task.wait(hopWait) end
-                if alive() then
-                    s.hops += 1
-                    s.currentStatus = "Телепортируюсь на новый сервер..."
-                    local hopped = hopRandom()
-                    if not hopped then
-                        s.currentStatus = "Ищу свободный сервер..."
-                        task.wait(0.8)
-                    else
-                        task.wait(2.0)
-                    end
-                    return
-                end
+                s.hops += 1
+                s.currentStatus = "Телепортируюсь на новый сервер..."
+                task.wait(0.02)
+                hopRandom()
+                return
             end)
             if not ok then
                 log("Соло", "Ошибка: " .. tostring(err))
@@ -7037,7 +7277,7 @@ new("TextLabel", {
 })
 new("TextLabel", {
     Size = UDim2.new(0, 220, 0, 25), Position = UDim2.new(0, 58, 0, 10),
-    BackgroundTransparency = 1, Text = "BSS Hopper v1.3.77",
+    BackgroundTransparency = 1, Text = "BSS Hopper v1.3.78",
     TextColor3 = C.text, Font = Enum.Font.GothamBold, TextSize = 22,
     TextXAlignment = Enum.TextXAlignment.Left, Parent = head,
 })
@@ -7503,6 +7743,21 @@ local fDisc = makeField(PAGE_WEBHOOKS, "DISCORD WEBHOOK URL", CONFIG.DISCORD_WEB
 local fTgToken = makeField(PAGE_WEBHOOKS, "TELEGRAM BOT TOKEN", CONFIG.TELEGRAM_BOT_TOKEN or "", "123456789:ABCdef...", 3)
 local fTgChat = makeField(PAGE_WEBHOOKS, "TELEGRAM CHAT ID", CONFIG.TELEGRAM_CHAT_ID or "", "123456789", 4)
 
+section("📊 ПЕРИОДИЧЕСКИЙ ОТЧЕТ О ЛУТЕ И РЕСУРСАХ", 5).Parent = PAGE_WEBHOOKS
+
+makeToggle(PAGE_WEBHOOKS, "Отправлять отчет о добытых ресурсах", CONFIG.PERIODIC_REPORT_ENABLED ~= false, 6, function(v)
+    CONFIG.PERIODIC_REPORT_ENABLED = v
+    saveNow()
+end)
+
+local fRepInterval = makeField(PAGE_WEBHOOKS, "ИНТЕРВАЛ ОТЧЕТА (В МИНУТАХ)", CONFIG.PERIODIC_REPORT_INTERVAL or 15, "15", 7)
+fRepInterval.FocusLost:Connect(function()
+    local val = tonumber(string.gsub(tostring(fRepInterval.Text), ",", "."))
+    CONFIG.PERIODIC_REPORT_INTERVAL = (val and val >= 1 and val <= 1440) and math.floor(val) or 15
+    fRepInterval.Text = tostring(CONFIG.PERIODIC_REPORT_INTERVAL)
+    saveNow()
+end)
+
 makeBtn(PAGE_WEBHOOKS, "💾 Сохранить и проверить вебхуки", function()
     CONFIG.DISCORD_WEBHOOK_URL = fDisc.Text
     CONFIG.TELEGRAM_BOT_TOKEN = fTgToken.Text
@@ -7510,7 +7765,16 @@ makeBtn(PAGE_WEBHOOKS, "💾 Сохранить и проверить вебху
     saveNow()
     notifyAllWebhooks("Тестовое уведомление!", "Вебхуки BSS Hopper успешно подключены и работают!", "00f5a0")
     log("Вебхуки", "Настройки сохранены! Отправлено тестовое уведомление.")
-end, C.accent2, 5)
+end, C.accent2, 8)
+
+makeBtn(PAGE_WEBHOOKS, "📤 Отправить отчет о ресурсах прямо сейчас", function()
+    CONFIG.DISCORD_WEBHOOK_URL = fDisc.Text
+    CONFIG.TELEGRAM_BOT_TOKEN = fTgToken.Text
+    CONFIG.TELEGRAM_CHAT_ID = fTgChat.Text
+    saveNow()
+    pcall(sendPeriodicLootReport)
+    log("Вебхуки", "Отправлен внеочередной отчет о ресурсах!")
+end, Color3.fromRGB(36, 120, 80), 9)
 
 -- ══════════════════════════════════════════════════════════════════════
 --  ВКЛАДКА: 🪴 ПЛАНТАТОРЫ (14 ТИПОВ: СБОР ПО % И ПОСАДКА НА ПОЛЕ)
@@ -7788,7 +8052,7 @@ new("TextLabel", {
     Size = UDim2.new(1, -120, 0, 16),
     Position = UDim2.new(0, 12, 0, 32),
     BackgroundTransparency = 1,
-    Text = "Стандарт: 250 studs/s. Рекомендуется от 150 до 350.",
+    Text = "Стандарт: 175 studs/s. Рекомендуется от 120 до 250.",
     Font = Enum.Font.Gotham,
     TextSize = 9,
     TextColor3 = C.dim,
@@ -7801,7 +8065,7 @@ local ftSpeedBox = new("TextBox", {
     Size = UDim2.new(0, 85, 0, 30),
     Position = UDim2.new(1, -97, 0.5, -15),
     BackgroundColor3 = Color3.fromRGB(11, 16, 25),
-    Text = tostring(CONFIG.FAST_TWEEN_SPEED or 250),
+    Text = tostring(CONFIG.FAST_TWEEN_SPEED or 175),
     TextColor3 = C.accent,
     Font = Enum.Font.GothamBold,
     TextSize = 13,
@@ -7818,7 +8082,7 @@ ftSpeedBox.FocusLost:Connect(function()
     if val and val >= 50 and val <= 1000 then
         CONFIG.FAST_TWEEN_SPEED = math.floor(val)
     else
-        CONFIG.FAST_TWEEN_SPEED = 250
+        CONFIG.FAST_TWEEN_SPEED = 175
     end
     ftSpeedBox.Text = tostring(CONFIG.FAST_TWEEN_SPEED)
     saveNow()
@@ -8045,7 +8309,7 @@ end)
 
 local function openFastTweenSettings()
     if not fastTweenModal then return end
-    ftSpeedBox.Text = tostring(CONFIG.FAST_TWEEN_SPEED or 250)
+    ftSpeedBox.Text = tostring(CONFIG.FAST_TWEEN_SPEED or 175)
     for _, fn in ipairs(ftItemUpdaters) do pcall(fn) end
     fastTweenModal.Visible = true
 end
@@ -8172,7 +8436,7 @@ do
         Size = UDim2.new(1, -115, 0, 16),
         Position = UDim2.new(0, 12, 0, 24),
         BackgroundTransparency = 1,
-        Text = "Полет по всему серверу за редким лутом (250 studs/s) и возврат",
+        Text = "Полет по всему серверу за редким лутом (175 studs/s) и возврат",
         TextColor3 = C.dim,
         Font = Enum.Font.Gotham,
         TextSize = 9,
