@@ -313,6 +313,8 @@ local CONFIG = {
 
     SPRINKLER_KEYWORD = "sprinkler", DIG_TOOL_KEYWORD = "scooper",
     ENABLE_AUTO_DIG = true,
+    FALLBACK_FARM_FIELD = "None",
+    IGNORE_TREAT_TOKENS = false,
 
     EMPTY_SLOT_KEYWORD = "claim hive", MY_HIVE_KEYWORD = "make honey",
     CLAIM_TIMEOUT = 8, CLAIM_APPROACH = 6, CLAIM_PROMPT_WAIT = 6,
@@ -486,7 +488,7 @@ local SAVED_KEYS = {
     "WALK_SPEED_MULT","FLY_SPEED","JUMP_POWER","BACKPACK_FILL_THRESHOLD","HONEY_MAX_WAIT",
     "TOKEN_SCAN_INTERVAL","TOKEN_PATROL_TIME","FARM_REGION","ANTI_LAG","SUPER_OPTIMIZE","DISABLE_3D_RENDERING","AVOID_FRIENDS","SPRINKLER_KEYWORD","DIG_TOOL_KEYWORD",
     "ENABLE_AUTO_SPRINKLER","SPRINKLER_COUNT",
-    "ENABLE_AUTO_DIG","EMPTY_SLOT_KEYWORD","MY_HIVE_KEYWORD","CLAIM_TIMEOUT",
+    "ENABLE_AUTO_DIG","FALLBACK_FARM_FIELD","IGNORE_TREAT_TOKENS","EMPTY_SLOT_KEYWORD","MY_HIVE_KEYWORD","CLAIM_TIMEOUT",
     "BURST_LOOT_ENABLED","BURST_LOOT_TIME","PREFER_LOW_PLAYERS","MAX_PLAYERS","MIN_PLAYERS","TOKEN_PRIORITIES",
     "CHECK_METEORS","CHECK_WINDY","WINDY_HOVER_HEIGHT","AUTO_HARVEST_PLANTERS","SHOW_PLANTER_HUD","PLANTER_HUD_COLLAPSED",
     "PLANTERS_CONFIG","PUFF_AUTO_BOOST_EPIC","PUFF_SELECTED_BOOSTS","PUFF_MIN_LEVEL","PUFF_MAX_LEVEL",
@@ -5848,6 +5850,14 @@ function tokenPriority(name)
         return 0
     end
 
+    -- Игнорирование Treat токенов (печенья)
+    if CONFIG.IGNORE_TREAT_TOKENS and string.find(low, "treat", 1, true)
+        and not string.find(low, "star", 1, true)
+        and not string.find(low, "atomic", 1, true)
+        and not string.find(low, "heat", 1, true) then
+        return 999
+    end
+
     local pMap = CONFIG.TOKEN_PRIORITIES
 
     -- 1. Пользовательские приоритеты из настроек
@@ -5981,6 +5991,16 @@ function getTokenPriorityForObj(obj)
     if isTokenLink(obj) then
         TOKEN_PRIO_CACHE[obj] = 0
         return 0
+    end
+
+    local name = resolveTokenName(obj)
+    local lowName = string.lower(tostring(name or ""))
+    if CONFIG.IGNORE_TREAT_TOKENS and string.find(lowName, "treat", 1, true)
+        and not string.find(lowName, "star", 1, true)
+        and not string.find(lowName, "atomic", 1, true)
+        and not string.find(lowName, "heat", 1, true) then
+        TOKEN_PRIO_CACHE[obj] = 999
+        return 999
     end
 
     -- 1. Метод Atlas BSS: проверка спец-эффектов редкости (Spots, Rainbow, Sparkles)
@@ -7648,13 +7668,59 @@ function Looter:Start()
                     return
                 end
 
-                -- Ожидание задач от ищущих (опрос очереди)
-                if skipReason and skipReason ~= "" then
-                    s.currentStatus = "Ожидание задач (" .. tostring(skipReason) .. ")..."
+                -- Ожидание задач от ищущих (опрос очереди) или фарм на выбранном поле
+                local fallbackField = CONFIG.FALLBACK_FARM_FIELD
+                local canFallbackFarm = fallbackField and fallbackField ~= "" and fallbackField ~= "None"
+
+                if canFallbackFarm then
+                    local fPart = getFieldPart(fallbackField)
+                    if fPart and alive() then
+                        if not hasOwnHive() then
+                            s.currentStatus = "Claiming hive before idle farming..."
+                            pcall(ensureHiveClaimed)
+                        end
+                        if isBackpackFull() then
+                            s.currentStatus = "Backpack full — converting honey..."
+                            stopAutoDig()
+                            pcall(makeHoney)
+                        else
+                            s.currentStatus = string.format("Idle farming @ %s...", tostring(fallbackField))
+                            local safeGround = getGroundPos(fPart.Position)
+                            local root = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
+                            if root and safeGround then
+                                local dist = (Vector3.new(root.Position.X, 0, root.Position.Z) - Vector3.new(safeGround.X, 0, safeGround.Z)).Magnitude
+                                if dist > 35 then
+                                    moveRootToPosition(root, safeGround, 10)
+                                end
+                            end
+                            startAutoDig()
+                            collectTokensFor(1.8, function()
+                                if not alive() then return true end
+                                if CONFIG.CHECK_SPROUTS and findAnySprout() then return true end
+                                if (CONFIG.CHECK_METEORS ~= false) and findActiveMeteors() then return true end
+                                if CONFIG.CHECK_VICIOUS and findVicious() then return true end
+                                if isBackpackFull() then return true end
+                                return false
+                            end, safeGround)
+                        end
+                    else
+                        stopAutoDig()
+                        if skipReason and skipReason ~= "" then
+                            s.currentStatus = "Waiting for tasks (" .. tostring(skipReason) .. ")..."
+                        else
+                            s.currentStatus = "Waiting for searcher tasks..."
+                        end
+                        task.wait(1)
+                    end
                 else
-                    s.currentStatus = "Ожидание задач от ищущих (опрос очереди)..."
+                    stopAutoDig()
+                    if skipReason and skipReason ~= "" then
+                        s.currentStatus = "Waiting for tasks (" .. tostring(skipReason) .. ")..."
+                    else
+                        s.currentStatus = "Waiting for searcher tasks..."
+                    end
+                    task.wait(1)
                 end
-                task.wait(1)
             end)
             if not ok then
                 log("Лутающий", "Ошибка: " .. tostring(err))
@@ -8033,7 +8099,7 @@ function Hopper.Toggle()
 end
 
 -- ══════════════════════════════════════════════════════════════════════
---  GUI
+--  GUI (MODERN CLICK GUI - 100% ENGLISH)
 -- ══════════════════════════════════════════════════════════════════════
 local modeButtons = {}
 local readyPill
@@ -8043,21 +8109,32 @@ local showPage
 local setWindow
 local C
 local gui
+local farmFieldText
+local updateFieldPickerUI
 
 local guiOk, guiErr = pcall(function()
 
 local PlayerGui = player:WaitForChild("PlayerGui")
-trace("PlayerGui получен")
+trace("PlayerGui acquired")
 local old = PlayerGui:FindFirstChild("BssHopperGui")
 if old then old:Destroy() end
 
 C = {
-    bg=Color3.fromRGB(7,11,18), panel=Color3.fromRGB(10,16,25),
-    sidebar=Color3.fromRGB(8,14,23), card=Color3.fromRGB(16,25,37),
-    cardHi=Color3.fromRGB(13,43,34), field=Color3.fromRGB(11,18,29),
-    text=Color3.fromRGB(239,243,248), dim=Color3.fromRGB(148,160,178),
-    accent=Color3.fromRGB(105,235,145), accent2=Color3.fromRGB(54,184,105),
-    danger=Color3.fromRGB(255,105,112), warn=Color3.fromRGB(255,198,100),
+    bg = Color3.fromRGB(13, 16, 23),
+    panel = Color3.fromRGB(18, 22, 32),
+    sidebar = Color3.fromRGB(15, 18, 27),
+    card = Color3.fromRGB(24, 29, 42),
+    cardHover = Color3.fromRGB(30, 36, 52),
+    cardHi = Color3.fromRGB(20, 52, 40),
+    field = Color3.fromRGB(14, 17, 25),
+    border = Color3.fromRGB(36, 44, 64),
+    borderActive = Color3.fromRGB(34, 197, 94),
+    text = Color3.fromRGB(243, 244, 246),
+    dim = Color3.fromRGB(138, 148, 168),
+    accent = Color3.fromRGB(34, 197, 94),     -- #22c55e Emerald
+    accent2 = Color3.fromRGB(16, 185, 129),   -- #10b981 Emerald dark
+    danger = Color3.fromRGB(239, 68, 68),     -- #ef4444 Red
+    warn = Color3.fromRGB(245, 158, 11),      -- #f59e0b Amber
 }
 
 local function new(class, props)
@@ -8065,99 +8142,116 @@ local function new(class, props)
     for k, v in pairs(props or {}) do o[k] = v end
     return o
 end
+
 local function round(o, r)
-    new("UICorner", { CornerRadius = UDim.new(0, r or 12), Parent = o })
+    new("UICorner", { CornerRadius = UDim.new(0, r or 10), Parent = o })
 end
+
 local function stroke(o, c, t)
-    new("UIStroke", {
-        Color = c or Color3.fromRGB(48,62,72),
-        Thickness = t or 1, Transparency = 0.22, Parent = o,
+    return new("UIStroke", {
+        Color = c or C.border,
+        Thickness = t or 1,
+        Transparency = 0.2,
+        Parent = o,
     })
 end
 
 gui = new("ScreenGui", {
-    Name = "BssHopperGui", ResetOnSpawn = false, IgnoreGuiInset = true,
-    DisplayOrder = 999999, ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
+    Name = "BssHopperGui",
+    ResetOnSpawn = false,
+    IgnoreGuiInset = true,
+    DisplayOrder = 999999,
+    ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
     Parent = PlayerGui,
 })
 
-local SNAKE_SIZE = 54
+-- ══════════════════════════════════════════════════════════════════════
+--  FLOATING TOGGLE WIDGET
+-- ══════════════════════════════════════════════════════════════════════
+local SNAKE_SIZE = 46
 local snake = new("TextButton", {
-    Name = "Snake",
+    Name = "FloatingWidget",
     Size = UDim2.new(0, SNAKE_SIZE, 0, SNAKE_SIZE),
-    Position = uiState.snakePos or UDim2.new(0.5, -SNAKE_SIZE/2, 0, 56),
-    BackgroundColor3 = C.bg,
-    Text = "🐍", Font = Enum.Font.GothamBold, TextSize = 27,
-    TextColor3 = C.text, BorderSizePixel = 0,
-    Draggable = true, Active = true, Parent = gui,
+    Position = uiState.snakePos or UDim2.new(0.5, -SNAKE_SIZE/2, 0, 45),
+    BackgroundColor3 = C.panel,
+    Text = "⚡",
+    Font = Enum.Font.GothamBold,
+    TextSize = 22,
+    TextColor3 = C.accent,
+    BorderSizePixel = 0,
+    Draggable = true,
+    Active = true,
+    Parent = gui,
 })
 round(snake, SNAKE_SIZE/2)
-stroke(snake, C.accent2, 2)
+stroke(snake, C.border, 1.5)
 
 local dot = new("Frame", {
-    Size = UDim2.new(0, 13, 0, 13),
-    Position = UDim2.new(1, -15, 1, -15),
-    BackgroundColor3 = C.danger, BorderSizePixel = 0, Parent = snake,
+    Size = UDim2.new(0, 10, 0, 10),
+    Position = UDim2.new(1, -12, 1, -12),
+    BackgroundColor3 = C.danger,
+    BorderSizePixel = 0,
+    Parent = snake,
 })
-round(dot, 7)
-new("UIStroke", { Color = C.bg, Thickness = 2, Parent = dot })
+round(dot, 5)
+stroke(dot, C.bg, 1.5)
 
 local hint = new("TextLabel", {
     Size = UDim2.new(0, 320, 0, 14),
-    Position = UDim2.new(0.5, -160, 0, 56 + SNAKE_SIZE),
+    Position = UDim2.new(0.5, -160, 0, 45 + SNAKE_SIZE + 4),
     BackgroundTransparency = 1,
-    Text = "ЛКМ — вкл/выкл   •   ПКМ/F — меню",
-    TextColor3 = C.dim, Font = Enum.Font.Gotham, TextSize = 11,
-    TextTransparency = 0.35, Parent = gui,
+    Text = "LMB: Toggle Bot  •  RMB / F: Menu  •  P: Pause",
+    TextColor3 = C.dim,
+    Font = Enum.Font.GothamMedium,
+    TextSize = 10,
+    TextTransparency = 0.3,
+    Parent = gui,
 })
 
-trace("ScreenGui создан")
-
 -- ══════════════════════════════════════════════════════════════════════
---  ON-SCREEN HUD: PLANTER TIMERS (ТОЧНО КАК НА СКРИНШОТЕ)
+--  ON-SCREEN PLANTER TIMERS HUD
 -- ══════════════════════════════════════════════════════════════════════
 local planterHudFrame = new("Frame", {
     Name = "PlanterTimersHUD",
-    Size = UDim2.new(0, 260, 0, 0),
+    Size = UDim2.new(0, 240, 0, 0),
     AutomaticSize = Enum.AutomaticSize.Y,
-    Position = UDim2.new(1, -275, 0, 75),
-    BackgroundColor3 = Color3.fromRGB(18, 18, 22),
-    BorderSizePixel = 0, Active = true, Draggable = true,
+    Position = UDim2.new(1, -255, 0, 65),
+    BackgroundColor3 = C.panel,
+    BorderSizePixel = 0,
+    Active = true,
+    Draggable = true,
     Visible = (CONFIG.SHOW_PLANTER_HUD ~= false),
     Parent = gui,
 })
-round(planterHudFrame, 8)
-stroke(planterHudFrame, Color3.fromRGB(48, 50, 62), 1)
+round(planterHudFrame, 10)
+stroke(planterHudFrame, C.border, 1)
 
 local planterHudHeader = new("Frame", {
     Size = UDim2.new(1, 0, 0, 28),
     BackgroundTransparency = 1,
     Parent = planterHudFrame,
 })
-
-local planterHudTitle = new("TextLabel", {
+new("TextLabel", {
     Size = UDim2.new(1, -36, 1, 0),
     Position = UDim2.new(0, 10, 0, 0),
     BackgroundTransparency = 1,
     Text = "Planter Timers",
     Font = Enum.Font.GothamBold,
-    TextSize = 13,
-    TextColor3 = Color3.fromRGB(240, 240, 245),
+    TextSize = 11,
+    TextColor3 = C.text,
     TextXAlignment = Enum.TextXAlignment.Left,
     Parent = planterHudHeader,
 })
-
 local planterHudArrow = new("TextButton", {
     Size = UDim2.new(0, 26, 0, 26),
     Position = UDim2.new(1, -28, 0, 1),
     BackgroundTransparency = 1,
     Text = CONFIG.PLANTER_HUD_COLLAPSED and "▲" or "▼",
     Font = Enum.Font.GothamBold,
-    TextSize = 12,
-    TextColor3 = Color3.fromRGB(200, 200, 210),
+    TextSize = 11,
+    TextColor3 = C.dim,
     Parent = planterHudHeader,
 })
-
 local planterHudContent = new("Frame", {
     Size = UDim2.new(1, 0, 0, 0),
     AutomaticSize = Enum.AutomaticSize.Y,
@@ -8166,18 +8260,8 @@ local planterHudContent = new("Frame", {
     Visible = not CONFIG.PLANTER_HUD_COLLAPSED,
     Parent = planterHudFrame,
 })
-new("UIListLayout", {
-    SortOrder = Enum.SortOrder.LayoutOrder,
-    Padding = UDim.new(0, 4),
-    Parent = planterHudContent,
-})
-new("UIPadding", {
-    PaddingTop = UDim.new(0, 2),
-    PaddingBottom = UDim.new(0, 8),
-    PaddingLeft = UDim.new(0, 10),
-    PaddingRight = UDim.new(0, 10),
-    Parent = planterHudContent,
-})
+new("UIListLayout", { SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0, 4), Parent = planterHudContent })
+new("UIPadding", { PaddingTop = UDim.new(0, 2), PaddingBottom = UDim.new(0, 8), PaddingLeft = UDim.new(0, 10), PaddingRight = UDim.new(0, 10), Parent = planterHudContent })
 
 planterHudArrow.MouseButton1Click:Connect(function()
     CONFIG.PLANTER_HUD_COLLAPSED = not CONFIG.PLANTER_HUD_COLLAPSED
@@ -8189,25 +8273,15 @@ end)
 local function refreshPlanterHud(activeList)
     if not planterHudContent then return end
     planterHudContent:ClearAllChildren()
-    new("UIListLayout", {
-        SortOrder = Enum.SortOrder.LayoutOrder,
-        Padding = UDim.new(0, 4),
-        Parent = planterHudContent,
-    })
-    new("UIPadding", {
-        PaddingTop = UDim.new(0, 2),
-        PaddingBottom = UDim.new(0, 8),
-        PaddingLeft = UDim.new(0, 10),
-        PaddingRight = UDim.new(0, 10),
-        Parent = planterHudContent,
-    })
+    new("UIListLayout", { SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0, 4), Parent = planterHudContent })
+    new("UIPadding", { PaddingTop = UDim.new(0, 2), PaddingBottom = UDim.new(0, 8), PaddingLeft = UDim.new(0, 10), PaddingRight = UDim.new(0, 10), Parent = planterHudContent })
 
     if not activeList or #activeList == 0 then
         new("TextLabel", {
             Size = UDim2.new(1, 0, 0, 18),
             BackgroundTransparency = 1,
-            Text = "Нет активных плантаторов",
-            TextColor3 = Color3.fromRGB(140, 140, 150),
+            Text = "No active planters",
+            TextColor3 = C.dim,
             Font = Enum.Font.Gotham,
             TextSize = 11,
             TextXAlignment = Enum.TextXAlignment.Left,
@@ -8217,13 +8291,13 @@ local function refreshPlanterHud(activeList)
     end
 
     for idx, info in ipairs(activeList) do
-        local isReady = info.ready or (info.percent >= 100) or string.find(string.lower(info.statusStr), "0s", 1, true)
-        local lineText = string.format("%s: %s (%s)", info.type, info.statusStr, info.field)
+        local isReady = info.ready or (info.percent >= 100) or string.find(string.lower(info.statusStr or ""), "0s", 1, true)
+        local lineText = string.format("%s: %s (%s)", info.type or "Planter", info.statusStr or "?", info.field or "?")
         new("TextLabel", {
             Size = UDim2.new(1, 0, 0, 18),
             BackgroundTransparency = 1,
             Text = lineText,
-            TextColor3 = isReady and Color3.fromRGB(80, 240, 120) or Color3.fromRGB(230, 230, 235),
+            TextColor3 = isReady and C.accent or C.text,
             Font = isReady and Enum.Font.GothamBold or Enum.Font.GothamMedium,
             TextSize = 11,
             TextXAlignment = Enum.TextXAlignment.Left,
@@ -8233,99 +8307,120 @@ local function refreshPlanterHud(activeList)
     end
 end
 
-local WIN_W, WIN_H = 880, 500
-local HEADER_H = 58
-local SIDEBAR_W = 154
+-- ══════════════════════════════════════════════════════════════════════
+--  MAIN CLICK GUI WINDOW
+-- ══════════════════════════════════════════════════════════════════════
+local WIN_W, WIN_H = 760, 480
+local HEADER_H = 48
+local SIDEBAR_W = 150
 
 local win = new("Frame", {
-    Name = "Win",
+    Name = "MainWindow",
     Size = UDim2.new(0, WIN_W, 0, WIN_H),
     Position = uiState.winPos or UDim2.new(0.5, -WIN_W/2, 0.5, -WIN_H/2),
     BackgroundColor3 = C.bg,
-    BorderSizePixel = 0, Visible = true, Active = true,
-    ClipsDescendants = true, Parent = gui,
+    BorderSizePixel = 0,
+    Visible = true,
+    Active = true,
+    ClipsDescendants = true,
+    Parent = gui,
 })
-round(win, 16)
-stroke(win, Color3.fromRGB(38,40,52))
+round(win, 12)
+stroke(win, C.border, 1.2)
 
+-- HEADER
 local head = new("Frame", {
     Size = UDim2.new(1, 0, 0, HEADER_H),
-    BackgroundColor3 = C.panel, BorderSizePixel = 0, Parent = win,
+    BackgroundColor3 = C.panel,
+    BorderSizePixel = 0,
+    Parent = win,
 })
-head.ClipsDescendants = true
-round(head, 16)
-new("UIGradient", {
-    Color = ColorSequence.new({
-        ColorSequenceKeypoint.new(0, Color3.fromRGB(20,29,35)),
-        ColorSequenceKeypoint.new(0.55, C.panel),
-        ColorSequenceKeypoint.new(1, Color3.fromRGB(17,23,34)),
-    }),
-    Rotation = 0, Parent = head,
-})
+round(head, 12)
 new("Frame", {
-    Size = UDim2.new(1, 0, 0, 18), Position = UDim2.new(0, 0, 1, -18),
-    BackgroundColor3 = C.panel, BorderSizePixel = 0, Parent = head,
-})
-new("Frame", {
-    Size = UDim2.new(1, 0, 0, 1), Position = UDim2.new(0, 0, 1, -1),
-    BackgroundColor3 = C.accent2, BorderSizePixel = 0,
-    BackgroundTransparency = 0.55, Parent = head,
+    Size = UDim2.new(1, 0, 0, 1),
+    Position = UDim2.new(0, 0, 1, -1),
+    BackgroundColor3 = C.border,
+    BorderSizePixel = 0,
+    Parent = head,
 })
 
+-- Header Title & Badges
 new("TextLabel", {
-    Size = UDim2.new(0, 42, 1, 0), Position = UDim2.new(0, 16, 0, 0),
-    BackgroundTransparency = 1, Text = "🐍",
-    Font = Enum.Font.GothamBold, TextSize = 25,
-    TextColor3 = C.accent, Parent = head,
+    Size = UDim2.new(0, 24, 1, 0),
+    Position = UDim2.new(0, 14, 0, 0),
+    BackgroundTransparency = 1,
+    Text = "⚡",
+    Font = Enum.Font.GothamBold,
+    TextSize = 16,
+    TextColor3 = C.accent,
+    Parent = head,
 })
 new("TextLabel", {
-    Size = UDim2.new(0, 220, 0, 25), Position = UDim2.new(0, 58, 0, 10),
-    BackgroundTransparency = 1, Text = "BSS Hopper v1.3.89",
-    TextColor3 = C.text, Font = Enum.Font.GothamBold, TextSize = 22,
-    TextXAlignment = Enum.TextXAlignment.Left, Parent = head,
-})
-local subTitle = new("TextLabel", {
-    Size = UDim2.new(0, 380, 0, 18), Position = UDim2.new(0, 58, 0, 36),
-    BackgroundTransparency = 1, Text = "",
-    TextColor3 = C.dim, Font = Enum.Font.Gotham, TextSize = 11,
+    Size = UDim2.new(0, 120, 1, 0),
+    Position = UDim2.new(0, 40, 0, 0),
+    BackgroundTransparency = 1,
+    Text = "BSS Hopper",
+    TextColor3 = C.text,
+    Font = Enum.Font.GothamBold,
+    TextSize = 15,
     TextXAlignment = Enum.TextXAlignment.Left,
-    TextTruncate = Enum.TextTruncate.AtEnd, Parent = head,
+    Parent = head,
 })
-
-readyPill = new("Frame", {
-    Name = "SystemReadyPill", Size = UDim2.new(0, 142, 0, 34),
-    Position = UDim2.new(1, -286, 0, 16),
-    BackgroundColor3 = Color3.fromRGB(12,35,29),
-    BorderSizePixel = 0, Parent = head,
+local verBadge = new("Frame", {
+    Size = UDim2.new(0, 42, 0, 20),
+    Position = UDim2.new(0, 150, 0.5, -10),
+    BackgroundColor3 = C.card,
+    BorderSizePixel = 0,
+    Parent = head,
 })
-round(readyPill, 17)
-stroke(readyPill, Color3.fromRGB(36,111,76), 1)
-new("Frame", {
-    Size = UDim2.new(0, 8, 0, 8), Position = UDim2.new(0, 12, 0.5, -4),
-    BackgroundColor3 = C.accent, BorderSizePixel = 0, Parent = readyPill,
-})
-round(readyPill:FindFirstChildOfClass("Frame"), 4)
+round(verBadge, 6)
 new("TextLabel", {
-    Size = UDim2.new(1, -30, 1, 0), Position = UDim2.new(0, 26, 0, 0),
-    BackgroundTransparency = 1, Text = "Система готова", TextColor3 = C.accent,
-    Font = Enum.Font.GothamMedium, TextSize = 11,
-    TextXAlignment = Enum.TextXAlignment.Left, Parent = readyPill,
+    Size = UDim2.new(1, 0, 1, 0),
+    BackgroundTransparency = 1,
+    Text = "v2.0",
+    TextColor3 = C.dim,
+    Font = Enum.Font.GothamBold,
+    TextSize = 10,
+    Parent = verBadge,
 })
 
-local gearBtn = new("TextButton", {
-    Size = UDim2.new(0, 38, 0, 38), Position = UDim2.new(1, -82, 0, 14),
-    BackgroundColor3 = C.card, Text = "⚙", TextColor3 = C.dim,
-    Font = Enum.Font.GothamBold, TextSize = 15,
-    BorderSizePixel = 0, Parent = head,
+-- Status Pill in Header
+readyPill = new("Frame", {
+    Name = "SystemReadyPill",
+    Size = UDim2.new(0, 95, 0, 24),
+    Position = UDim2.new(0, 202, 0.5, -12),
+    BackgroundColor3 = C.card,
+    BorderSizePixel = 0,
+    Parent = head,
 })
-round(gearBtn, 9)
+round(readyPill, 6)
+local pillDot = new("Frame", {
+    Size = UDim2.new(0, 6, 0, 6),
+    Position = UDim2.new(0, 8, 0.5, -3),
+    BackgroundColor3 = C.danger,
+    BorderSizePixel = 0,
+    Parent = readyPill,
+})
+round(pillDot, 3)
+local pillLabel = new("TextLabel", {
+    Size = UDim2.new(1, -20, 1, 0),
+    Position = UDim2.new(0, 18, 0, 0),
+    BackgroundTransparency = 1,
+    Text = "IDLE",
+    TextColor3 = C.dim,
+    Font = Enum.Font.GothamBold,
+    TextSize = 10,
+    TextXAlignment = Enum.TextXAlignment.Left,
+    Parent = readyPill,
+})
 
+-- Header Buttons (Discord, Close)
 local DISCORD_URL = "https://discord.gg/2YmPh2wExu"
-
 local function openUrl(url)
-    local attempts = {}
-    if type(loadurl) == "function" then table.insert(attempts, function() return loadurl(url) end) end
-    if type(open_url) == "function" then table.insert(attempts, function() return open_url(url) end) end
+    local attempts = {
+        function() if type(loadurl) == "function" then return loadurl(url) end end,
+        function() if type(open_url) == "function" then return open_url(url) end end,
+    }
     for _, fn in ipairs(attempts) do
         local ok, result = pcall(fn)
         if ok and result ~= false then return true end
@@ -8335,1583 +8430,1031 @@ local function openUrl(url)
 end
 
 local discordBtn = new("TextButton", {
-    Name = "DiscordBtn", Size = UDim2.new(0, 38, 0, 38),
-    Position = UDim2.new(1, -130, 0, 14),
-    BackgroundColor3 = Color3.fromRGB(88,101,242),
-    Text = "", BorderSizePixel = 0, Parent = head,
+    Size = UDim2.new(0, 30, 0, 30),
+    Position = UDim2.new(1, -72, 0.5, -15),
+    BackgroundColor3 = C.card,
+    Text = "💬",
+    Font = Enum.Font.GothamBold,
+    TextSize = 13,
+    TextColor3 = Color3.fromRGB(88, 101, 242),
+    BorderSizePixel = 0,
+    Parent = head,
 })
-round(discordBtn, 9)
-new("TextLabel", {
-    Size = UDim2.new(1, 0, 1, 0), BackgroundTransparency = 1,
-    Text = "💬", Font = Enum.Font.GothamBold, TextSize = 15,
-    TextColor3 = Color3.fromRGB(255,255,255), Parent = discordBtn,
-})
+round(discordBtn, 6)
 discordBtn.MouseButton1Click:Connect(function() openUrl(DISCORD_URL) end)
 
 local closeBtn = new("TextButton", {
-    Size = UDim2.new(0, 38, 0, 38), Position = UDim2.new(1, -46, 0, 14),
-    BackgroundColor3 = C.card, Text = "✕", TextColor3 = C.dim,
-    Font = Enum.Font.GothamBold, TextSize = 13,
-    BorderSizePixel = 0, Parent = head,
+    Size = UDim2.new(0, 30, 0, 30),
+    Position = UDim2.new(1, -38, 0.5, -15),
+    BackgroundColor3 = C.card,
+    Text = "✕",
+    TextColor3 = C.dim,
+    Font = Enum.Font.GothamBold,
+    TextSize = 12,
+    BorderSizePixel = 0,
+    Parent = head,
 })
-round(closeBtn, 9)
+round(closeBtn, 6)
 
+-- ══════════════════════════════════════════════════════════════════════
+--  SIDEBAR NAVIGATION
+-- ══════════════════════════════════════════════════════════════════════
 local sidebar = new("Frame", {
     Size = UDim2.new(0, SIDEBAR_W, 1, -HEADER_H),
     Position = UDim2.new(0, 0, 0, HEADER_H),
-    BackgroundColor3 = C.sidebar, BorderSizePixel = 0, Parent = win,
+    BackgroundColor3 = C.sidebar,
+    BorderSizePixel = 0,
+    Parent = win,
+})
+new("Frame", {
+    Size = UDim2.new(0, 1, 1, 0),
+    Position = UDim2.new(1, -1, 0, 0),
+    BackgroundColor3 = C.border,
+    BorderSizePixel = 0,
+    Parent = sidebar,
 })
 new("UIListLayout", {
     SortOrder = Enum.SortOrder.LayoutOrder,
-    Padding = UDim.new(0, 4), Parent = sidebar,
+    Padding = UDim.new(0, 4),
+    Parent = sidebar,
 })
 new("UIPadding", {
-    PaddingTop = UDim.new(0, 10), PaddingBottom = UDim.new(0, 10),
-    PaddingLeft = UDim.new(0, 8), PaddingRight = UDim.new(0, 8), Parent = sidebar,
+    PaddingTop = UDim.new(0, 10),
+    PaddingBottom = UDim.new(0, 10),
+    PaddingLeft = UDim.new(0, 8),
+    PaddingRight = UDim.new(0, 8),
+    Parent = sidebar,
 })
+
 new("TextLabel", {
-    Size = UDim2.new(1, 0, 0, 16), BackgroundTransparency = 1,
-    Text = "РАЗДЕЛЫ", TextColor3 = C.dim, Font = Enum.Font.GothamBold,
-    TextSize = 10, TextXAlignment = Enum.TextXAlignment.Left,
-    LayoutOrder = 0, Parent = sidebar,
+    Size = UDim2.new(1, 0, 0, 16),
+    BackgroundTransparency = 1,
+    Text = "NAVIGATION",
+    TextColor3 = C.dim,
+    Font = Enum.Font.GothamBold,
+    TextSize = 9,
+    TextXAlignment = Enum.TextXAlignment.Left,
+    LayoutOrder = 0,
+    Parent = sidebar,
 })
 
 local tabButtons = {}
-local tabOrder = 10
-
-local function makeTab(icon, label, key, locked)
+local tabOrder = 1
+local function makeTab(icon, label, key)
     local b = new("TextButton", {
-        Size = UDim2.new(1, 0, 0, 42), BackgroundColor3 = C.panel, Text = "",
-        BorderSizePixel = 0, LayoutOrder = tabOrder,
-        AutoButtonColor = not locked, Parent = sidebar,
+        Size = UDim2.new(1, 0, 0, 36),
+        BackgroundColor3 = C.sidebar,
+        Text = "",
+        BorderSizePixel = 0,
+        AutoButtonColor = false,
+        LayoutOrder = tabOrder,
+        Parent = sidebar,
     })
-    tabOrder += 1
-    round(b, 10)
+    tabOrder = tabOrder + 1
+    round(b, 8)
+
     local bar = new("Frame", {
-        Size = UDim2.new(0, 3, 1, -16), Position = UDim2.new(0, 0, 0, 8),
-        BackgroundColor3 = C.accent, BorderSizePixel = 0,
-        Visible = false, Parent = b,
+        Size = UDim2.new(0, 3, 1, -12),
+        Position = UDim2.new(0, 0, 0, 6),
+        BackgroundColor3 = C.accent,
+        BorderSizePixel = 0,
+        Visible = false,
+        Parent = b,
     })
     round(bar, 2)
+
     local ico = new("TextLabel", {
-        Size = UDim2.new(0, 26, 1, 0), Position = UDim2.new(0, 6, 0, 0),
-        BackgroundTransparency = 1, Text = icon,
-        Font = Enum.Font.GothamBold, TextSize = 14,
-        TextColor3 = C.dim, Parent = b,
+        Size = UDim2.new(0, 22, 1, 0),
+        Position = UDim2.new(0, 8, 0, 0),
+        BackgroundTransparency = 1,
+        Text = icon,
+        Font = Enum.Font.GothamBold,
+        TextSize = 13,
+        TextColor3 = C.dim,
+        Parent = b,
     })
     local lbl = new("TextLabel", {
-        Size = UDim2.new(1, -34, 1, 0), Position = UDim2.new(0, 32, 0, 0),
-        BackgroundTransparency = 1, Text = label,
-        TextColor3 = C.dim, Font = Enum.Font.Gotham, TextSize = 12,
+        Size = UDim2.new(1, -34, 1, 0),
+        Position = UDim2.new(0, 34, 0, 0),
+        BackgroundTransparency = 1,
+        Text = label,
+        TextColor3 = C.dim,
+        Font = Enum.Font.GothamBold,
+        TextSize = 11,
         TextXAlignment = Enum.TextXAlignment.Left,
-        TextYAlignment = Enum.TextYAlignment.Center,
-        TextTruncate = Enum.TextTruncate.AtEnd, Parent = b,
+        Parent = b,
     })
-    tabButtons[key] = { btn=b, bar=bar, icon=ico, label=lbl, locked=locked }
+    tabButtons[key] = { btn=b, bar=bar, icon=ico, label=lbl }
     return b
 end
 
-makeTab("⌂", "Главная", "main")
-makeTab("🌱", "Спруты", "sprouts")
-makeTab("🍄", "Грибы", "puffshrooms")
-makeTab("🪴", "Плантаторы", "planters")
-makeTab("🌪️", "Windy & Meteors", "windy_meteors")
-makeTab("📡", "Вебхуки", "webhooks")
-makeTab("⚙", "Настройки", "settings")
-makeTab("📁", "Конфиги", "configs")
-makeTab("🐝", "Vicious Bee", "vicious")
+makeTab("⌂", "Dashboard", "main")
+makeTab("🌱", "Sprouts", "sprouts")
+makeTab("🪴", "Planters & Mobs", "planters_mobs")
+makeTab("⚙", "Settings", "settings")
 
-trace("Боковая панель готова")
-
+-- ══════════════════════════════════════════════════════════════════════
+--  CONTENT CONTAINER
+-- ══════════════════════════════════════════════════════════════════════
 local content = new("ScrollingFrame", {
     Name = "Content",
-    Size = UDim2.new(1, -SIDEBAR_W - 12, 1, -HEADER_H - 8),
-    Position = UDim2.new(0, SIDEBAR_W + 6, 0, HEADER_H + 4),
-    BackgroundTransparency = 1, BorderSizePixel = 0,
-    ScrollBarThickness = 4, ScrollBarImageColor3 = C.accent2,
+    Size = UDim2.new(1, -SIDEBAR_W - 16, 1, -HEADER_H - 12),
+    Position = UDim2.new(0, SIDEBAR_W + 8, 0, HEADER_H + 6),
+    BackgroundTransparency = 1,
+    BorderSizePixel = 0,
+    ScrollBarThickness = 4,
+    ScrollBarImageColor3 = C.border,
     AutomaticCanvasSize = Enum.AutomaticSize.Y,
     CanvasSize = UDim2.new(),
-    ScrollingDirection = Enum.ScrollingDirection.Y,
+    ScrollingDirection = Enum.Direction.Y,
     Parent = win,
 })
-new("UIListLayout", {
-    SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0, 8),
-    Parent = content,
-})
-new("UIPadding", {
-    PaddingTop = UDim.new(0, 2), PaddingBottom = UDim.new(0, 10),
-    PaddingRight = UDim.new(0, 6), Parent = content,
-})
-new("Frame", {
-    Size = UDim2.new(0, 1, 1, -HEADER_H - 10),
-    Position = UDim2.new(0, SIDEBAR_W, 0, HEADER_H + 5),
-    BackgroundColor3 = Color3.fromRGB(38,40,52),
-    BorderSizePixel = 0, Parent = win,
-})
+new("UIListLayout", { SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0, 8), Parent = content })
+new("UIPadding", { PaddingTop = UDim.new(0, 4), PaddingBottom = UDim.new(0, 14), PaddingRight = UDim.new(0, 6), Parent = content })
 
-local function section(txt, order)
-    return new("TextLabel", {
-        Size = UDim2.new(1, 0, 0, 16), BackgroundTransparency = 1,
-        Text = txt, TextColor3 = C.dim, Font = Enum.Font.GothamBold,
-        TextSize = 9, TextXAlignment = Enum.TextXAlignment.Left,
-        LayoutOrder = order, Parent = content,
+local function section(parent, title, order)
+    local sec = new("Frame", {
+        Size = UDim2.new(1, 0, 0, 22),
+        BackgroundTransparency = 1,
+        LayoutOrder = order,
+        Parent = parent,
     })
+    new("TextLabel", {
+        Size = UDim2.new(1, 0, 1, 0),
+        BackgroundTransparency = 1,
+        Text = string.upper(title),
+        TextColor3 = C.dim,
+        Font = Enum.Font.GothamBold,
+        TextSize = 9,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        Parent = sec,
+    })
+    return sec
 end
 
+local function makeToggle(parent, label, desc, value, order, onChanged)
+    local card = new("Frame", {
+        Size = UDim2.new(1, 0, 0, desc and 44 or 36),
+        BackgroundColor3 = C.card,
+        BorderSizePixel = 0,
+        LayoutOrder = order,
+        Parent = parent,
+    })
+    round(card, 8)
+    stroke(card, C.border, 1)
+
+    new("TextLabel", {
+        Size = UDim2.new(1, -65, 0, desc and 18 or 36),
+        Position = UDim2.new(0, 12, 0, desc and 5 or 0),
+        BackgroundTransparency = 1,
+        Text = label,
+        TextColor3 = C.text,
+        Font = Enum.Font.GothamBold,
+        TextSize = 11,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        TextYAlignment = Enum.TextYAlignment.Center,
+        Parent = card,
+    })
+    if desc then
+        new("TextLabel", {
+            Size = UDim2.new(1, -65, 0, 15),
+            Position = UDim2.new(0, 12, 0, 22),
+            BackgroundTransparency = 1,
+            Text = desc,
+            TextColor3 = C.dim,
+            Font = Enum.Font.Gotham,
+            TextSize = 9,
+            TextXAlignment = Enum.TextXAlignment.Left,
+            Parent = card,
+        })
+    end
+
+    local state = (value == true)
+    local switch = new("TextButton", {
+        Size = UDim2.new(0, 42, 0, 20),
+        Position = UDim2.new(1, -52, 0.5, -10),
+        BackgroundColor3 = state and C.accent or Color3.fromRGB(30, 36, 50),
+        Text = "",
+        AutoButtonColor = false,
+        BorderSizePixel = 0,
+        Parent = card,
+    })
+    round(switch, 10)
+    local switchStroke = stroke(switch, state and C.accent2 or C.border, 1)
+
+    local circle = new("Frame", {
+        Size = UDim2.new(0, 14, 0, 14),
+        Position = state and UDim2.new(1, -17, 0.5, -7) or UDim2.new(0, 3, 0.5, -7),
+        BackgroundColor3 = Color3.fromRGB(255, 255, 255),
+        BorderSizePixel = 0,
+        Parent = switch,
+    })
+    round(circle, 7)
+
+    local function updateSwitch(s)
+        state = s
+        local targetColor = state and C.accent or Color3.fromRGB(30, 36, 50)
+        local targetPos = state and UDim2.new(1, -17, 0.5, -7) or UDim2.new(0, 3, 0.5, -7)
+        local tw = TweenInfo.new(0.18, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+        TweenService:Create(switch, tw, { BackgroundColor3 = targetColor }):Play()
+        TweenService:Create(circle, tw, { Position = targetPos }):Play()
+        if switchStroke then switchStroke.Color = state and C.accent2 or C.border end
+    end
+
+    switch.MouseButton1Click:Connect(function()
+        updateSwitch(not state)
+        if onChanged then pcall(onChanged, state) end
+    end)
+
+    return function(v)
+        if v ~= nil then updateSwitch(v) end
+        return state
+    end
+end
+
+local function makeField(parent, label, value, placeholder, order, onSubmitted)
+    local card = new("Frame", {
+        Size = UDim2.new(1, 0, 0, 46),
+        BackgroundColor3 = C.card,
+        BorderSizePixel = 0,
+        LayoutOrder = order,
+        Parent = parent,
+    })
+    round(card, 8)
+    stroke(card, C.border, 1)
+
+    new("TextLabel", {
+        Size = UDim2.new(1, -20, 0, 13),
+        Position = UDim2.new(0, 12, 0, 5),
+        BackgroundTransparency = 1,
+        Text = string.upper(label),
+        TextColor3 = C.dim,
+        Font = Enum.Font.GothamBold,
+        TextSize = 8,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        Parent = card,
+    })
+
+    local tb = new("TextBox", {
+        Size = UDim2.new(1, -24, 0, 20),
+        Position = UDim2.new(0, 12, 0, 20),
+        BackgroundColor3 = C.field,
+        Text = tostring(value or ""),
+        PlaceholderText = placeholder or "",
+        PlaceholderColor3 = Color3.fromRGB(90, 100, 120),
+        TextColor3 = C.text,
+        Font = Enum.Font.GothamMedium,
+        TextSize = 11,
+        ClearTextOnFocus = false,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        BorderSizePixel = 0,
+        Parent = card,
+    })
+    round(tb, 5)
+    new("UIPadding", { PaddingLeft = UDim.new(0, 6), PaddingRight = UDim.new(0, 6), Parent = tb })
+
+    tb.FocusLost:Connect(function()
+        if onSubmitted then pcall(onSubmitted, tb.Text) end
+        if applySettings then pcall(applySettings) end
+    end)
+    return tb
+end
+
+local function makeBtn(parent, text, icon, col, order, onClick)
+    local b = new("TextButton", {
+        Size = UDim2.new(1, 0, 0, 34),
+        BackgroundColor3 = col or C.card,
+        Text = "",
+        BorderSizePixel = 0,
+        AutoButtonColor = false,
+        LayoutOrder = order,
+        Parent = parent,
+    })
+    round(b, 8)
+    stroke(b, C.border, 1)
+
+    local row = new("Frame", {
+        Size = UDim2.new(1, 0, 1, 0),
+        BackgroundTransparency = 1,
+        Parent = b,
+    })
+    new("UIListLayout", {
+        FillDirection = Enum.FillDirection.Horizontal,
+        HorizontalAlignment = Enum.HorizontalAlignment.Center,
+        VerticalAlignment = Enum.VerticalAlignment.Center,
+        Padding = UDim.new(0, 6),
+        Parent = row,
+    })
+    if icon and icon ~= "" then
+        new("TextLabel", {
+            Size = UDim2.new(0, 16, 1, 0),
+            BackgroundTransparency = 1,
+            Text = icon,
+            TextColor3 = C.text,
+            Font = Enum.Font.GothamBold,
+            TextSize = 12,
+            Parent = row,
+        })
+    end
+    new("TextLabel", {
+        Size = UDim2.new(0, 0, 1, 0),
+        AutomaticSize = Enum.AutomaticSize.X,
+        BackgroundTransparency = 1,
+        Text = text,
+        TextColor3 = C.text,
+        Font = Enum.Font.GothamBold,
+        TextSize = 11,
+        Parent = row,
+    })
+
+    b.MouseEnter:Connect(function()
+        TweenService:Create(b, TweenInfo.new(0.12), { BackgroundColor3 = col and col:Lerp(Color3.new(1,1,1), 0.1) or C.cardHover }):Play()
+    end)
+    b.MouseLeave:Connect(function()
+        TweenService:Create(b, TweenInfo.new(0.12), { BackgroundColor3 = col or C.card }):Play()
+    end)
+    b.MouseButton1Click:Connect(function() if onClick then pcall(onClick) end end)
+    return b
+end
+
+-- ══════════════════════════════════════════════════════════════════════
+--  TAB 1: DASHBOARD (MAIN)
+-- ══════════════════════════════════════════════════════════════════════
 local PAGE_HOME = new("Frame", {
     Size = UDim2.new(1, 0, 0, 0),
     AutomaticSize = Enum.AutomaticSize.Y,
-    BackgroundTransparency = 1, Visible = true, Parent = content,
+    BackgroundTransparency = 1,
+    Visible = true,
+    Parent = content,
 })
-new("UIListLayout", {
-    SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0, 8),
+new("UIListLayout", { SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0, 8), Parent = PAGE_HOME })
+
+-- 1. Mode Cards
+section(PAGE_HOME, "Select Mode", 1)
+local modeRow = new("Frame", {
+    Size = UDim2.new(1, 0, 0, 78),
+    BackgroundTransparency = 1,
+    LayoutOrder = 2,
     Parent = PAGE_HOME,
 })
-
-local secModes = section("РЕЖИМ РАБОТЫ", 10)
-secModes.Parent = PAGE_HOME
+new("UIListLayout", { FillDirection = Enum.FillDirection.Horizontal, Padding = UDim.new(0, 8), Parent = modeRow })
 
 local MODE_META = {
-    searcher = { icon="🔍", name="Ищущий",  desc="Сканирует серверы и репортит находки" },
-    looter   = { icon="💰", name="Лутающий", desc="Задачи + улей + токены + Honey" },
-    solo     = { icon="🎮", name="Соло",     desc="Сам ищет, лутает, фармит и делает Honey" },
+    searcher = { icon="🔍", name="Searcher", desc="Fast hops & scans servers" },
+    looter   = { icon="💰", name="Looter",   desc="Claims hive & loots queue tasks" },
+    solo     = { icon="🎮", name="Solo",     desc="Autonomous farming & hopper" },
 }
 
-local modeRow = new("Frame", {
-    Size = UDim2.new(1, 0, 0, 120), BackgroundTransparency = 1,
-    LayoutOrder = 11, Parent = PAGE_HOME,
-})
-new("UIListLayout", {
-    FillDirection = Enum.FillDirection.Horizontal,
-    Padding = UDim.new(0, 8), Parent = modeRow,
-})
-
-local modeOrder = 10
+local mIdx = 1
 for _, key in ipairs({ "searcher", "looter", "solo" }) do
     local m = MODE_META[key]
     local b = new("TextButton", {
         Size = UDim2.new(1/3, -6, 1, 0),
-        BackgroundColor3 = C.card, Text = "", BorderSizePixel = 0,
-        AutoButtonColor = false, LayoutOrder = modeOrder, Parent = modeRow,
+        BackgroundColor3 = C.card,
+        Text = "",
+        BorderSizePixel = 0,
+        AutoButtonColor = false,
+        LayoutOrder = mIdx,
+        Parent = modeRow,
     })
-    modeOrder += 1
-    round(b, 12)
-    local modeStroke = new("UIStroke", {
-        Color = Color3.fromRGB(39,57,75), Thickness = 1,
-        Transparency = 0.12, Parent = b,
-    })
+    mIdx = mIdx + 1
+    round(b, 10)
+    local mStroke = stroke(b, C.border, 1)
+
     new("TextLabel", {
-        Size = UDim2.new(0, 40, 0, 34), Position = UDim2.new(0, 16, 0, 14),
-        BackgroundTransparency = 1, Text = m.icon,
-        Font = Enum.Font.GothamBold, TextSize = 23,
-        TextColor3 = C.text, Parent = b,
+        Size = UDim2.new(0, 24, 0, 24),
+        Position = UDim2.new(0, 12, 0, 8),
+        BackgroundTransparency = 1,
+        Text = m.icon,
+        Font = Enum.Font.GothamBold,
+        TextSize = 16,
+        Parent = b,
     })
     local tl = new("TextLabel", {
-        Size = UDim2.new(1, -32, 0, 24), Position = UDim2.new(0, 16, 0, 54),
-        BackgroundTransparency = 1, Text = m.name,
-        TextColor3 = C.text, Font = Enum.Font.GothamBold, TextSize = 16,
-        TextXAlignment = Enum.TextXAlignment.Left, Parent = b,
+        Size = UDim2.new(1, -44, 0, 20),
+        Position = UDim2.new(0, 40, 0, 10),
+        BackgroundTransparency = 1,
+        Text = m.name,
+        TextColor3 = C.text,
+        Font = Enum.Font.GothamBold,
+        TextSize = 13,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        Parent = b,
     })
     new("TextLabel", {
-        Size = UDim2.new(1, -32, 0, 42), Position = UDim2.new(0, 16, 0, 82),
-        BackgroundTransparency = 1, Text = m.desc, TextWrapped = true,
-        TextColor3 = C.dim, Font = Enum.Font.Gotham, TextSize = 10,
+        Size = UDim2.new(1, -24, 0, 32),
+        Position = UDim2.new(0, 12, 0, 36),
+        BackgroundTransparency = 1,
+        Text = m.desc,
+        TextWrapped = true,
+        TextColor3 = C.dim,
+        Font = Enum.Font.Gotham,
+        TextSize = 9,
         TextXAlignment = Enum.TextXAlignment.Left,
-        TextYAlignment = Enum.TextYAlignment.Top, Parent = b,
+        TextYAlignment = Enum.TextYAlignment.Top,
+        Parent = b,
     })
     local bar = new("Frame", {
-        Size = UDim2.new(1, -24, 0, 3), Position = UDim2.new(0, 12, 1, -8),
-        BackgroundColor3 = C.accent, BorderSizePixel = 0,
-        Visible = false, Parent = b,
+        Size = UDim2.new(1, -20, 0, 2),
+        Position = UDim2.new(0, 10, 1, -5),
+        BackgroundColor3 = C.accent,
+        BorderSizePixel = 0,
+        Visible = false,
+        Parent = b,
     })
-    round(bar, 2)
+    round(bar, 1)
 
     b.MouseEnter:Connect(function()
         if Hopper.Mode ~= Hopper.instances[key] then
-            TweenService:Create(b, TweenInfo.new(0.14), { BackgroundColor3 = C.cardHi }):Play()
+            TweenService:Create(b, TweenInfo.new(0.12), { BackgroundColor3 = C.cardHover }):Play()
         end
     end)
     b.MouseLeave:Connect(function()
         if Hopper.Mode ~= Hopper.instances[key] then
-            TweenService:Create(b, TweenInfo.new(0.14), { BackgroundColor3 = C.card }):Play()
+            TweenService:Create(b, TweenInfo.new(0.12), { BackgroundColor3 = C.card }):Play()
         end
     end)
     b.MouseButton1Click:Connect(function()
         if Hopper.Mode == Hopper.instances[key] then Hopper.SwitchMode("off")
         else Hopper.SwitchMode(key) end
     end)
-    modeButtons[key] = { btn=b, title=tl, bar=bar, outline=modeStroke }
+    modeButtons[key] = { btn=b, title=tl, bar=bar, outline=mStroke }
 end
 
-local secStatus = section("СТАТУС", 20)
-secStatus.Parent = PAGE_HOME
-
-local statusBox = new("Frame", {
-    Size = UDim2.new(1, 0, 0, 64), BackgroundColor3 = C.card,
-    BorderSizePixel = 0, LayoutOrder = 21, Parent = PAGE_HOME,
+-- 2. Status & Activity Cards
+section(PAGE_HOME, "Live Activity", 10)
+local statusRow = new("Frame", {
+    Size = UDim2.new(1, 0, 0, 52),
+    BackgroundTransparency = 1,
+    LayoutOrder = 11,
+    Parent = PAGE_HOME,
 })
-round(statusBox, 12)
-stroke(statusBox)
+new("UIListLayout", { FillDirection = Enum.FillDirection.Horizontal, Padding = UDim.new(0, 8), Parent = statusRow })
+
+local statusCard = new("Frame", {
+    Size = UDim2.new(0.55, -4, 1, 0),
+    BackgroundColor3 = C.card,
+    BorderSizePixel = 0,
+    Parent = statusRow,
+})
+round(statusCard, 8)
+stroke(statusCard, C.border, 1)
 new("TextLabel", {
-    Size = UDim2.new(0, 90, 0, 64), Position = UDim2.new(0, 16, 0, 0),
-    BackgroundTransparency = 1, Text = "СТАТУС",
-    TextColor3 = C.dim, Font = Enum.Font.GothamBold, TextSize = 9,
+    Size = UDim2.new(1, -20, 0, 12),
+    Position = UDim2.new(0, 10, 0, 6),
+    BackgroundTransparency = 1,
+    Text = "STATUS",
+    TextColor3 = C.dim,
+    Font = Enum.Font.GothamBold,
+    TextSize = 8,
     TextXAlignment = Enum.TextXAlignment.Left,
-    TextYAlignment = Enum.TextYAlignment.Center, Parent = statusBox,
+    Parent = statusCard,
 })
 local statusVal = new("TextLabel", {
-    Size = UDim2.new(1, -130, 0, 64), Position = UDim2.new(0, 110, 0, 0),
-    BackgroundTransparency = 1, Text = "-", TextWrapped = true,
-    TextColor3 = C.accent, Font = Enum.Font.GothamBold, TextSize = 12,
+    Size = UDim2.new(1, -20, 0, 26),
+    Position = UDim2.new(0, 10, 0, 20),
+    BackgroundTransparency = 1,
+    Text = "Ready to work",
+    TextWrapped = true,
+    TextColor3 = C.accent,
+    Font = Enum.Font.GothamBold,
+    TextSize = 11,
     TextXAlignment = Enum.TextXAlignment.Left,
-    TextYAlignment = Enum.TextYAlignment.Center, Parent = statusBox,
+    TextTruncate = Enum.TextTruncate.AtEnd,
+    Parent = statusCard,
 })
 
-local secLast = section("ПОСЛЕДНЯЯ ЗАДАЧА", 40)
-secLast.Parent = PAGE_HOME
-local lastBox = new("Frame", {
-    Size = UDim2.new(1, 0, 0, 66), BackgroundColor3 = C.card,
-    BorderSizePixel = 0, LayoutOrder = 41, Parent = PAGE_HOME,
+local lastCard = new("Frame", {
+    Size = UDim2.new(0.45, -4, 1, 0),
+    BackgroundColor3 = C.card,
+    BorderSizePixel = 0,
+    Parent = statusRow,
 })
-round(lastBox, 12)
-stroke(lastBox)
+round(lastCard, 8)
+stroke(lastCard, C.border, 1)
+new("TextLabel", {
+    Size = UDim2.new(1, -20, 0, 12),
+    Position = UDim2.new(0, 10, 0, 6),
+    BackgroundTransparency = 1,
+    Text = "LAST TARGET",
+    TextColor3 = C.dim,
+    Font = Enum.Font.GothamBold,
+    TextSize = 8,
+    TextXAlignment = Enum.TextXAlignment.Left,
+    Parent = lastCard,
+})
 local lastVal = new("TextLabel", {
-    Size = UDim2.new(1, -24, 1, 0), Position = UDim2.new(0, 12, 0, 0),
-    BackgroundTransparency = 1, Text = "—", TextWrapped = true,
-    TextColor3 = C.dim, Font = Enum.Font.Gotham, TextSize = 12,
+    Size = UDim2.new(1, -20, 0, 26),
+    Position = UDim2.new(0, 10, 0, 20),
+    BackgroundTransparency = 1,
+    Text = "None",
+    TextWrapped = true,
+    TextColor3 = C.text,
+    Font = Enum.Font.GothamMedium,
+    TextSize = 11,
     TextXAlignment = Enum.TextXAlignment.Left,
-    TextYAlignment = Enum.TextYAlignment.Center, Parent = lastBox,
+    TextTruncate = Enum.TextTruncate.AtEnd,
+    Parent = lastCard,
 })
 
-local function makeField(parent, label, value, placeholder, order, secret)
-    local box = new("Frame", {
-        Size = UDim2.new(1, 0, 0, 48), BackgroundColor3 = C.card,
-        BorderSizePixel = 0, LayoutOrder = order, Parent = parent,
-    })
-    round(box, 12)
-    stroke(box)
-    new("TextLabel", {
-        Size = UDim2.new(1, -20, 0, 13), Position = UDim2.new(0, 10, 0, 6),
-        BackgroundTransparency = 1, Text = label,
-        TextColor3 = C.dim, Font = Enum.Font.GothamBold, TextSize = 8,
-        TextXAlignment = Enum.TextXAlignment.Left, Parent = box,
-    })
-    local tb = new("TextBox", {
-        Size = UDim2.new(1, -20, 0, 22), Position = UDim2.new(0, 10, 0, 21),
-        BackgroundColor3 = C.field, Text = tostring(value or ""),
-        PlaceholderText = placeholder or "",
-        PlaceholderColor3 = Color3.fromRGB(85,88,102),
-        TextColor3 = C.text, Font = Enum.Font.Gotham, TextSize = 11,
-        ClearTextOnFocus = false, TextXAlignment = Enum.TextXAlignment.Left,
-        BorderSizePixel = 0, Parent = box,
-    })
-    round(tb, 6)
-    tb.FocusLost:Connect(function()
-        if applySettings then pcall(applySettings) end
-    end)
-    return tb
-end
+-- 3. Looter Idle Farming Field Selector
+section(PAGE_HOME, "Looter Idle Farming (When No Sprouts)", 20)
+local farmBox = new("Frame", {
+    Size = UDim2.new(1, 0, 0, 60),
+    BackgroundColor3 = C.card,
+    BorderSizePixel = 0,
+    LayoutOrder = 21,
+    Parent = PAGE_HOME,
+})
+round(farmBox, 10)
+stroke(farmBox, C.border, 1)
 
-local function makeToggle(parent, label, value, order, onChanged)
-    local box = new("Frame", {
-        Size = UDim2.new(1, 0, 0, 34), BackgroundColor3 = C.card,
-        BorderSizePixel = 0, LayoutOrder = order, Parent = parent,
-    })
-    round(box, 12)
-    stroke(box)
-    new("TextLabel", {
-        Size = UDim2.new(1, -70, 1, 0), Position = UDim2.new(0, 12, 0, 0),
-        BackgroundTransparency = 1, Text = label, TextColor3 = C.text,
-        Font = Enum.Font.Gotham, TextSize = 11,
-        TextXAlignment = Enum.TextXAlignment.Left,
-        TextYAlignment = Enum.TextYAlignment.Center, Parent = box,
-    })
-    local state = value and true or false
-    local TweenService = game:GetService("TweenService")
+new("TextLabel", {
+    Size = UDim2.new(1, -24, 0, 14),
+    Position = UDim2.new(0, 12, 0, 6),
+    BackgroundTransparency = 1,
+    Text = "FALLBACK FARM FIELD (LOOTER ONLY)",
+    TextColor3 = C.dim,
+    Font = Enum.Font.GothamBold,
+    TextSize = 8,
+    TextXAlignment = Enum.TextXAlignment.Left,
+    Parent = farmBox,
+})
 
-    -- Стильный анимированный переключатель (Cyber Switch) с гладким сдвигом таблетки
-    local switch = new("TextButton", {
-        Size = UDim2.new(0, 48, 0, 24),
-        Position = UDim2.new(1, -56, 0.5, -12),
-        BackgroundColor3 = state and Color3.fromRGB(0, 230, 150) or Color3.fromRGB(32, 38, 52),
-        Text = "", AutoButtonColor = false,
-        BorderSizePixel = 0, Parent = box,
-    })
-    round(switch, 12)
-    stroke(switch, state and Color3.fromRGB(0, 255, 180) or Color3.fromRGB(48, 56, 76), 1)
+local farmFieldBtn = new("TextButton", {
+    Size = UDim2.new(1, -24, 0, 28),
+    Position = UDim2.new(0, 12, 0, 24),
+    BackgroundColor3 = C.field,
+    Text = "",
+    BorderSizePixel = 0,
+    AutoButtonColor = false,
+    Parent = farmBox,
+})
+round(farmFieldBtn, 6)
+stroke(farmFieldBtn, C.border, 1)
 
-    local circle = new("Frame", {
-        Size = UDim2.new(0, 18, 0, 18),
-        Position = state and UDim2.new(1, -21, 0.5, -9) or UDim2.new(0, 3, 0.5, -9),
-        BackgroundColor3 = Color3.fromRGB(255, 255, 255),
-        BorderSizePixel = 0, Parent = switch,
-    })
-    round(circle, 9)
+new("TextLabel", {
+    Size = UDim2.new(0, 22, 1, 0),
+    Position = UDim2.new(0, 8, 0, 0),
+    BackgroundTransparency = 1,
+    Text = "📍",
+    Font = Enum.Font.GothamBold,
+    TextSize = 13,
+    Parent = farmFieldBtn,
+})
 
-    switch.MouseButton1Click:Connect(function()
-        state = not state
-        local targetColor = state and Color3.fromRGB(0, 230, 150) or Color3.fromRGB(32, 38, 52)
-        local targetPos = state and UDim2.new(1, -21, 0.5, -9) or UDim2.new(0, 3, 0.5, -9)
-        local twInfo = TweenInfo.new(0.2, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
-        pcall(function()
-            TweenService:Create(switch, twInfo, { BackgroundColor3 = targetColor }):Play()
-            TweenService:Create(circle, twInfo, { Position = targetPos }):Play()
-        end)
-        if onChanged then pcall(onChanged, state) end
-    end)
-    return function() return state end
-end
+farmFieldText = new("TextLabel", {
+    Size = UDim2.new(1, -130, 1, 0),
+    Position = UDim2.new(0, 32, 0, 0),
+    BackgroundTransparency = 1,
+    Text = tostring(CONFIG.FALLBACK_FARM_FIELD or "None"),
+    TextColor3 = C.text,
+    Font = Enum.Font.GothamBold,
+    TextSize = 11,
+    TextXAlignment = Enum.TextXAlignment.Left,
+    Parent = farmFieldBtn,
+})
 
-local function makeBtn(parent, txt, cb, col, order)
-    local b = new("TextButton", {
-        Size = UDim2.new(0.5, -4, 1, 0),
-        BackgroundColor3 = col or C.card, Text = txt,
-        TextColor3 = C.text, Font = Enum.Font.GothamBold, TextSize = 11,
-        BorderSizePixel = 0, LayoutOrder = order, Parent = parent,
-    })
-    round(b, 10)
-    stroke(b)
-    b.MouseButton1Click:Connect(cb)
-    return b
-end
+new("TextLabel", {
+    Size = UDim2.new(0, 110, 1, 0),
+    Position = UDim2.new(1, -118, 0, 0),
+    BackgroundTransparency = 1,
+    Text = "Change Field  ▼",
+    TextColor3 = C.accent,
+    Font = Enum.Font.GothamBold,
+    TextSize = 10,
+    TextXAlignment = Enum.TextXAlignment.Right,
+    Parent = farmFieldBtn,
+})
 
-section("ОСНОВНЫЕ ФУНКЦИИ", 1).Parent = PAGE_HOME
-makeToggle(PAGE_HOME, "Лутать ростки (Sprouts)", CONFIG.CHECK_SPROUTS, 2, function(v)
+-- 4. Quick Targets
+section(PAGE_HOME, "Quick Targets", 30)
+makeToggle(PAGE_HOME, "Loot Sprouts", "Automatically locate and harvest sprouts", CONFIG.CHECK_SPROUTS, 31, function(v)
     CONFIG.CHECK_SPROUTS = v; saveNow()
 end)
-makeToggle(PAGE_HOME, "Лутать грибы (Puffshrooms)", CONFIG.CHECK_PUFFSHROOMS, 3, function(v)
-    CONFIG.CHECK_PUFFSHROOMS = v; saveNow()
-end)
-makeToggle(PAGE_HOME, "Охота на Windy Bee (бой на поле)", CONFIG.CHECK_WINDY, 4, function(v)
-    CONFIG.CHECK_WINDY = v; saveNow()
-end)
-makeToggle(PAGE_HOME, "Лутать метеориты (Meteor Shower)", CONFIG.CHECK_METEORS, 5, function(v)
-    CONFIG.CHECK_METEORS = v; saveNow()
-end)
-makeToggle(PAGE_HOME, "Лутать Vicious Bee", CONFIG.CHECK_VICIOUS, 6, function(v)
+makeToggle(PAGE_HOME, "Hunt Vicious Bee", "Attack wild Vicious Bees on fields", CONFIG.CHECK_VICIOUS, 32, function(v)
     CONFIG.CHECK_VICIOUS = v; saveNow()
 end)
-makeToggle(PAGE_HOME, "Авто-плантаторы (Сбор и Посадка)", CONFIG.AUTO_HARVEST_PLANTERS, 7, function(v)
-    CONFIG.AUTO_HARVEST_PLANTERS = v; saveNow()
-end)
--- Автокопание работает пассивно
--- Bypass работает пассивно
-
-local homeInfo = new("TextLabel", {
-    Size = UDim2.new(1, 0, 0, 48), BackgroundColor3 = C.card,
-    Text = "Включи нужные цели и выбери режим. В Лутающем и Соло автоматически занимается улей, фармятся токены и делается Honey при полном рюкзаке.",
-    TextColor3 = C.dim, Font = Enum.Font.Gotham, TextSize = 11,
-    TextWrapped = true, TextXAlignment = Enum.TextXAlignment.Left,
-    TextYAlignment = Enum.TextYAlignment.Center, BorderSizePixel = 0,
-    LayoutOrder = 7, Parent = PAGE_HOME,
-})
-round(homeInfo, 12)
-new("UIPadding", { PaddingLeft = UDim.new(0, 12), PaddingRight = UDim.new(0, 12), Parent = homeInfo })
-
--- ══════════════════════════════════════════════════════════════════════
---  СПРУТЫ
--- ══════════════════════════════════════════════════════════════════════
-
--- ══════════════════════════════════════════════════════════════════════
---  ВКЛАДКА: 🌪️ WINDY BEE & METEORS
--- ══════════════════════════════════════════════════════════════════════
-local PAGE_WINDY = new("Frame", {
-    Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y,
-    BackgroundTransparency = 1, Visible = false, Parent = content,
-})
-new("UIListLayout", { SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0, 8), Parent = PAGE_WINDY })
-
-section("🌪️ WINDY BEE & METEOR SHOWER", 1).Parent = PAGE_WINDY
-makeToggle(PAGE_WINDY, "Атаковать дикую Windy Bee в облаке", CONFIG.CHECK_WINDY, 2, function(v)
-    CONFIG.CHECK_WINDY = v; saveNow()
-end)
-makeToggle(PAGE_WINDY, "Лутать метеоритный дождь (Meteors)", CONFIG.CHECK_METEORS, 3, function(v)
+makeToggle(PAGE_HOME, "Loot Meteor Shower", "Collect all falling mythic meteor tokens", CONFIG.CHECK_METEORS, 33, function(v)
     CONFIG.CHECK_METEORS = v; saveNow()
 end)
-makeToggle(PAGE_WINDY, "Автоматический сбор спелых плантаторов", CONFIG.AUTO_HARVEST_PLANTERS, 4, function(v)
+makeToggle(PAGE_HOME, "Hunt Windy Bee", "Fight wild Windy Bee in cloud", CONFIG.CHECK_WINDY, 34, function(v)
+    CONFIG.CHECK_WINDY = v; saveNow()
+end)
+makeToggle(PAGE_HOME, "Farm Puffshrooms", "Pop and collect puffshroom spores", CONFIG.CHECK_PUFFSHROOMS, 35, function(v)
+    CONFIG.CHECK_PUFFSHROOMS = v; saveNow()
+end)
+makeToggle(PAGE_HOME, "Auto Harvest Planters", "Harvest full planters & auto replant", CONFIG.AUTO_HARVEST_PLANTERS, 36, function(v)
     CONFIG.AUTO_HARVEST_PLANTERS = v; saveNow()
 end)
-local fWindyH = makeField(PAGE_WINDY, "ВЫСОТА ПАРЕНИЯ НАД WINDY BEE (studs, реком. 32)", tostring(CONFIG.WINDY_HOVER_HEIGHT or 32), "32", 5)
-fWindyH.FocusLost:Connect(function()
-    local n = tonumber(fWindyH.Text)
-    if n and n >= 15 and n <= 60 then
-        CONFIG.WINDY_HOVER_HEIGHT = n
-    else
-        CONFIG.WINDY_HOVER_HEIGHT = 32
-        fWindyH.Text = "32"
-    end
-    if saveNow then pcall(saveNow) end
-end)
 
 -- ══════════════════════════════════════════════════════════════════════
---  ВКЛАДКА: 📡 ВЕБХУКИ DISCORD & TELEGRAM
+--  TAB 2: SPROUTS
 -- ══════════════════════════════════════════════════════════════════════
-local PAGE_WEBHOOKS = new("Frame", {
-    Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y,
-    BackgroundTransparency = 1, Visible = false, Parent = content,
+local PAGE_SPROUTS = new("Frame", {
+    Size = UDim2.new(1, 0, 0, 0),
+    AutomaticSize = Enum.AutomaticSize.Y,
+    BackgroundTransparency = 1,
+    Visible = false,
+    Parent = content,
 })
-new("UIListLayout", { SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0, 8), Parent = PAGE_WEBHOOKS })
+new("UIListLayout", { SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0, 8), Parent = PAGE_SPROUTS })
 
-section("📡 УВЕДОМЛЕНИЯ В DISCORD & TELEGRAM", 1).Parent = PAGE_WEBHOOKS
-local fDisc = makeField(PAGE_WEBHOOKS, "DISCORD WEBHOOK URL", CONFIG.DISCORD_WEBHOOK_URL or "", "https://discord.com/api/webhooks/...", 2)
-local fTgToken = makeField(PAGE_WEBHOOKS, "TELEGRAM BOT TOKEN", CONFIG.TELEGRAM_BOT_TOKEN or "", "123456789:ABCdef...", 3)
-local fTgChat = makeField(PAGE_WEBHOOKS, "TELEGRAM CHAT ID", CONFIG.TELEGRAM_CHAT_ID or "", "123456789", 4)
-
-section("📊 ПЕРИОДИЧЕСКИЙ ОТЧЕТ О ЛУТЕ И РЕСУРСАХ", 5).Parent = PAGE_WEBHOOKS
-
-makeToggle(PAGE_WEBHOOKS, "Отправлять отчет о добытых ресурсах", CONFIG.PERIODIC_REPORT_ENABLED ~= false, 6, function(v)
-    CONFIG.PERIODIC_REPORT_ENABLED = v
-    saveNow()
+section(PAGE_SPROUTS, "Sprout Harvesting", 1)
+makeToggle(PAGE_SPROUTS, "Burst Loot Mode", "Prioritize rare tokens immediately when sprout pops", CONFIG.BURST_LOOT_ENABLED ~= false, 2, function(v)
+    CONFIG.BURST_LOOT_ENABLED = v; saveNow()
+end)
+local fBurstTime = makeField(PAGE_SPROUTS, "Burst Loot Duration (seconds)", CONFIG.BURST_LOOT_TIME or 7, "7", 3, function(val)
+    local n = tonumber(val)
+    if n and n >= 2 and n <= 30 then CONFIG.BURST_LOOT_TIME = n; saveNow() end
+end)
+makeToggle(PAGE_SPROUTS, "Ignore Treat Tokens", "Skip normal treats to focus on high value sprout loot", CONFIG.IGNORE_TREAT_TOKENS, 4, function(v)
+    CONFIG.IGNORE_TREAT_TOKENS = v; saveNow()
 end)
 
-local fRepInterval = makeField(PAGE_WEBHOOKS, "ИНТЕРВАЛ ОТЧЕТА (В МИНУТАХ)", CONFIG.PERIODIC_REPORT_INTERVAL or 15, "15", 7)
-fRepInterval.FocusLost:Connect(function()
-    local val = tonumber(string.gsub(tostring(fRepInterval.Text), ",", "."))
-    CONFIG.PERIODIC_REPORT_INTERVAL = (val and val >= 1 and val <= 1440) and math.floor(val) or 15
-    fRepInterval.Text = tostring(CONFIG.PERIODIC_REPORT_INTERVAL)
-    saveNow()
+section(PAGE_SPROUTS, "Allowed Sprout Rarities", 10)
+local sproutRarities = {
+    { key = "basic", label = "Basic Sprout" },
+    { key = "moon", label = "Moon Sprout" },
+    { key = "rare", label = "Rare Sprout" },
+    { key = "gummy", label = "Gummy Sprout" },
+    { key = "epic", label = "Epic Sprout" },
+    { key = "legendary", label = "Legendary Sprout" },
+    { key = "supreme", label = "Supreme Sprout" },
+}
+for rIdx, rInfo in ipairs(sproutRarities) do
+    local isAllowed = not CONFIG.ALLOWED_SPROUT_RARITIES or (CONFIG.ALLOWED_SPROUT_RARITIES[rInfo.key] ~= false)
+    makeToggle(PAGE_SPROUTS, rInfo.label, nil, isAllowed, 10 + rIdx, function(v)
+        CONFIG.ALLOWED_SPROUT_RARITIES = CONFIG.ALLOWED_SPROUT_RARITIES or {}
+        CONFIG.ALLOWED_SPROUT_RARITIES[rInfo.key] = v
+        saveNow()
+    end)
+end
+
+section(PAGE_SPROUTS, "Excavation & Tool", 20)
+makeToggle(PAGE_SPROUTS, "Auto Dig Tool", "Automatically swing collector tool on fields", CONFIG.ENABLE_AUTO_DIG ~= false, 21, function(v)
+    CONFIG.ENABLE_AUTO_DIG = v; saveNow()
+end)
+local fDigTool = makeField(PAGE_SPROUTS, "Dig Tool Keyword", CONFIG.DIG_TOOL_KEYWORD or "scooper", "scooper", 22, function(val)
+    if val and val ~= "" then CONFIG.DIG_TOOL_KEYWORD = val; saveNow() end
 end)
 
-makeBtn(PAGE_WEBHOOKS, "💾 Сохранить и проверить вебхуки", function()
-    CONFIG.DISCORD_WEBHOOK_URL = fDisc.Text
-    CONFIG.TELEGRAM_BOT_TOKEN = fTgToken.Text
-    CONFIG.TELEGRAM_CHAT_ID = fTgChat.Text
-    saveNow()
-    notifyAllWebhooks("Тестовое уведомление!", "Вебхуки BSS Hopper успешно подключены и работают!", "00f5a0")
-    log("Вебхуки", "Настройки сохранены! Отправлено тестовое уведомление.")
-end, C.accent2, 8)
-
-makeBtn(PAGE_WEBHOOKS, "📤 Отправить отчет о ресурсах прямо сейчас", function()
-    CONFIG.DISCORD_WEBHOOK_URL = fDisc.Text
-    CONFIG.TELEGRAM_BOT_TOKEN = fTgToken.Text
-    CONFIG.TELEGRAM_CHAT_ID = fTgChat.Text
-    saveNow()
-    pcall(sendPeriodicLootReport)
-    log("Вебхуки", "Отправлен внеочередной отчет о ресурсах!")
-end, Color3.fromRGB(36, 120, 80), 9)
-
 -- ══════════════════════════════════════════════════════════════════════
---  ВКЛАДКА: 🪴 ПЛАНТАТОРЫ (14 ТИПОВ: СБОР ПО % И ПОСАДКА НА ПОЛЕ)
+--  TAB 3: PLANTERS & MOBS
 -- ══════════════════════════════════════════════════════════════════════
-local PAGE_PLANTERS = new("Frame", {
-    Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y,
-    BackgroundTransparency = 1, Visible = false, Parent = content,
+local PAGE_PLANTERS_MOBS = new("Frame", {
+    Size = UDim2.new(1, 0, 0, 0),
+    AutomaticSize = Enum.AutomaticSize.Y,
+    BackgroundTransparency = 1,
+    Visible = false,
+    Parent = content,
 })
-new("UIListLayout", { SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0, 8), Parent = PAGE_PLANTERS })
+new("UIListLayout", { SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0, 8), Parent = PAGE_PLANTERS_MOBS })
 
-section("🪴 УПРАВЛЕНИЕ ПЛАНТАТОРАМИ (14 ТИПОВ)", 1).Parent = PAGE_PLANTERS
-makeToggle(PAGE_PLANTERS, "Включить авто-плантаторы (Сбор и Посадка)", CONFIG.AUTO_HARVEST_PLANTERS ~= false, 2, function(v)
+section(PAGE_PLANTERS_MOBS, "Planters", 1)
+makeToggle(PAGE_PLANTERS_MOBS, "Auto Harvest Planters", "Harvest ripe planters & auto replant seeds", CONFIG.AUTO_HARVEST_PLANTERS ~= false, 2, function(v)
     CONFIG.AUTO_HARVEST_PLANTERS = v; saveNow()
 end)
-makeToggle(PAGE_PLANTERS, "Показывать виджет 'Planter Timers' на экране", CONFIG.SHOW_PLANTER_HUD ~= false, 3, function(v)
+makeToggle(PAGE_PLANTERS_MOBS, "Show Planter Timers HUD", "Display floating planter timers on screen", CONFIG.SHOW_PLANTER_HUD ~= false, 3, function(v)
     CONFIG.SHOW_PLANTER_HUD = v
     if planterHudFrame then planterHudFrame.Visible = v end
     saveNow()
 end)
 
-section("📊 АКТИВНЫЕ ПЛАНТАТОРЫ НА КАРТЕ (ЖИВОЙ СТАТУС)", 4).Parent = PAGE_PLANTERS
-local livePlantersCard = new("Frame", {
-    Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y,
-    BackgroundColor3 = C.card, BorderSizePixel = 0, LayoutOrder = 5,
-    Parent = PAGE_PLANTERS,
-})
-round(livePlantersCard, 10)
-stroke(livePlantersCard)
-local livePlantersList = new("Frame", {
-    Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y,
-    BackgroundTransparency = 1, Parent = livePlantersCard,
-})
-new("UIListLayout", { SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0, 4), Parent = livePlantersList })
-new("UIPadding", { PaddingTop = UDim.new(0, 8), PaddingBottom = UDim.new(0, 8), PaddingLeft = UDim.new(0, 10), PaddingRight = UDim.new(0, 10), Parent = livePlantersList })
-
-local function updateLivePlantersGui(activeList)
-    if not livePlantersList then return end
-    livePlantersList:ClearAllChildren()
-    new("UIListLayout", { SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0, 4), Parent = livePlantersList })
-    new("UIPadding", { PaddingTop = UDim.new(0, 8), PaddingBottom = UDim.new(0, 8), PaddingLeft = UDim.new(0, 10), PaddingRight = UDim.new(0, 10), Parent = livePlantersList })
-
-    if not activeList or #activeList == 0 then
-        new("TextLabel", {
-            Size = UDim2.new(1, 0, 0, 20), BackgroundTransparency = 1,
-            Text = "Нет активных плантаторов на карте", TextColor3 = C.dim,
-            Font = Enum.Font.Gotham, TextSize = 11, TextXAlignment = Enum.TextXAlignment.Left,
-            Parent = livePlantersList,
-        })
-        return
-    end
-
-    for idx, info in ipairs(activeList) do
-        local isReady = info.ready or (info.percent >= 100) or string.find(string.lower(info.statusStr), "0s", 1, true)
-        local row = new("Frame", {
-            Size = UDim2.new(1, 0, 0, 24), BackgroundTransparency = 1,
-            LayoutOrder = idx, Parent = livePlantersList,
-        })
-        new("TextLabel", {
-            Size = UDim2.new(1, 0, 1, 0), BackgroundTransparency = 1,
-            Text = string.format("🪴 %s:  %s  ➔  %s", info.type, info.statusStr, info.field),
-            TextColor3 = isReady and Color3.fromRGB(80, 240, 120) or C.text,
-            Font = isReady and Enum.Font.GothamBold or Enum.Font.GothamMedium, TextSize = 11,
-            TextXAlignment = Enum.TextXAlignment.Left, Parent = row,
-        })
-    end
-end
-
-section("⚙️ НАСТРОЙКИ ПОСАДКИ И СБОРА (14 ПЛАНТАТОРОВ)", 6).Parent = PAGE_PLANTERS
-
-local planterInputFields = {}
-
-for pIdx, pName in ipairs(ALL_PLANTER_TYPES) do
-    if not CONFIG.PLANTERS_CONFIG then CONFIG.PLANTERS_CONFIG = {} end
-    if not CONFIG.PLANTERS_CONFIG[pName] then
-        CONFIG.PLANTERS_CONFIG[pName] = { enabled = false, field = "Sunflower Field", percent = 100 }
-    end
-    local cfg = CONFIG.PLANTERS_CONFIG[pName]
-
-    local pCard = new("Frame", {
-        Size = UDim2.new(1, 0, 0, 80), BackgroundColor3 = C.card,
-        BorderSizePixel = 0, LayoutOrder = 10 + pIdx, Parent = PAGE_PLANTERS,
-    })
-    round(pCard, 10)
-    stroke(pCard)
-
-    local pTopRow = new("Frame", {
-        Size = UDim2.new(1, 0, 0, 32), BackgroundTransparency = 1,
-        Parent = pCard,
-    })
-    new("TextLabel", {
-        Size = UDim2.new(1, -70, 1, 0), Position = UDim2.new(0, 12, 0, 0),
-        BackgroundTransparency = 1, Text = "🪴 " .. pName,
-        TextColor3 = C.accent, Font = Enum.Font.GothamBold, TextSize = 12,
-        TextXAlignment = Enum.TextXAlignment.Left, Parent = pTopRow,
-    })
-
-    local swBack = new("Frame", {
-        Size = UDim2.new(0, 44, 0, 22), Position = UDim2.new(1, -56, 0.5, -11),
-        BackgroundColor3 = cfg.enabled and C.accent or C.field, BorderSizePixel = 0,
-        Parent = pTopRow,
-    })
-    round(swBack, 11)
-    local swKnob = new("Frame", {
-        Size = UDim2.new(0, 18, 0, 18),
-        Position = cfg.enabled and UDim2.new(1, -20, 0.5, -9) or UDim2.new(0, 2, 0.5, -9),
-        BackgroundColor3 = Color3.fromRGB(255, 255, 255), BorderSizePixel = 0,
-        Parent = swBack,
-    })
-    round(swKnob, 9)
-    local swHit = new("TextButton", {
-        Size = UDim2.new(1, 0, 1, 0), BackgroundTransparency = 1, Text = "",
-        Parent = swBack,
-    })
-    swHit.MouseButton1Click:Connect(function()
-        cfg.enabled = not cfg.enabled
-        swBack.BackgroundColor3 = cfg.enabled and C.accent or C.field
-        swKnob.Position = cfg.enabled and UDim2.new(1, -20, 0.5, -9) or UDim2.new(0, 2, 0.5, -9)
-        saveNow()
-    end)
-
-    local pBottomRow = new("Frame", {
-        Size = UDim2.new(1, -24, 0, 38), Position = UDim2.new(0, 12, 0, 34),
-        BackgroundTransparency = 1, Parent = pCard,
-    })
-    new("UIListLayout", {
-        FillDirection = Enum.FillDirection.Horizontal,
-        Padding = UDim.new(0, 10), Parent = pBottomRow,
-    })
-
-    local fFieldBox = new("TextBox", {
-        Size = UDim2.new(0.65, -5, 1, 0), BackgroundColor3 = C.field,
-        Text = tostring(cfg.field or "Sunflower Field"),
-        TextColor3 = C.text, Font = Enum.Font.GothamMedium, TextSize = 11,
-        ClearTextOnFocus = false, BorderSizePixel = 0, Parent = pBottomRow,
-    })
-    round(fFieldBox, 6)
-    stroke(fFieldBox)
-    fFieldBox.FocusLost:Connect(function()
-        cfg.field = fFieldBox.Text
-        saveNow()
-    end)
-
-    local fPctBox = new("TextBox", {
-        Size = UDim2.new(0.35, -5, 1, 0), BackgroundColor3 = C.field,
-        Text = tostring(cfg.percent or 100),
-        PlaceholderText = "% сбора (1-100)",
-        TextColor3 = C.accent, Font = Enum.Font.GothamBold, TextSize = 11,
-        ClearTextOnFocus = false, BorderSizePixel = 0, Parent = pBottomRow,
-    })
-    round(fPctBox, 6)
-    stroke(fPctBox)
-    fPctBox.FocusLost:Connect(function()
-        local n = tonumber(fPctBox.Text)
-        if n then
-            cfg.percent = math.clamp(n, 1, 100)
-            fPctBox.Text = tostring(cfg.percent)
-        else
-            cfg.percent = 100
-            fPctBox.Text = "100"
-        end
-        saveNow()
-    end)
-
-    planterInputFields[pName] = { field = fFieldBox, pct = fPctBox, swBack = swBack, swKnob = swKnob }
-end
-
-makeBtn(PAGE_PLANTERS, "💾 Сохранить настройки плантаторов", function()
-    saveNow()
-    log("Плантаторы", "Настройки 14 плантаторов успешно сохранены!")
-end, C.accent2, 35)
-
-task.spawn(function()
-    while true do
-        if not alive() then return end
-        pcall(function()
-            local active = findMyActivePlanters()
-            refreshPlanterHud(active)
-            updateLivePlantersGui(active)
-        end)
-        task.wait(1.5)
-    end
+section(PAGE_PLANTERS_MOBS, "Bosses & Events", 10)
+makeToggle(PAGE_PLANTERS_MOBS, "Hunt Vicious Bee", "Defeat Vicious Bee whenever spawned", CONFIG.CHECK_VICIOUS ~= false, 11, function(v)
+    CONFIG.CHECK_VICIOUS = v; saveNow()
 end)
-
-local PAGE_SPROUTS = new("Frame", {
-    Size = UDim2.new(1, 0, 0, 0),
-    AutomaticSize = Enum.AutomaticSize.Y,
-    BackgroundTransparency = 1, Visible = false, Parent = content,
-})
-new("UIListLayout", {
-    SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0, 8),
-    Parent = PAGE_SPROUTS,
-})
-
-section("ВЫБОР РЕДКОСТЕЙ РОСТКОВ ДЛЯ ФАРМА (ВКЛ / ВЫКЛ)", 1).Parent = PAGE_SPROUTS
-
-local sproutRarityOrder = { "basic", "moon", "rare", "gummy", "epic", "legendary", "supreme" }
-local sproutRarityLabels = {
-    moon="Moon", basic="Common", rare="Rare", epic="Epic",
-    legendary="Legendary", gummy="Gummy", supreme="Supreme",
-}
-local sproutRarityColors = {
-    moon=Color3.fromRGB(105,190,255), basic=Color3.fromRGB(130,220,135),
-    rare=Color3.fromRGB(190,200,210), epic=Color3.fromRGB(255,195,70),
-    legendary=Color3.fromRGB(75,220,205), gummy=Color3.fromRGB(255,115,220),
-    supreme=Color3.fromRGB(60,255,140),
-}
-if not CONFIG.ALLOWED_SPROUT_RARITIES or type(CONFIG.ALLOWED_SPROUT_RARITIES) ~= "table" then
-    CONFIG.ALLOWED_SPROUT_RARITIES = {
-        basic = true, moon = true, rare = true, gummy = true, epic = true, legendary = true, supreme = true,
-    }
-end
-if CONFIG.ALLOWED_SPROUT_RARITIES.supreme == nil then
-    CONFIG.ALLOWED_SPROUT_RARITIES.supreme = true
-end
-
-local sproutRarityRow = new("Frame", {
-    Size = UDim2.new(1, 0, 0, 76), BackgroundTransparency = 1,
-    LayoutOrder = 2, Parent = PAGE_SPROUTS,
-})
-new("UIGridLayout", {
-    CellSize = UDim2.new(0.25, -5, 0, 30),
-    CellPadding = UDim2.new(0, 6, 0, 6),
-    FillDirectionMaxCells = 4,
-    SortOrder = Enum.SortOrder.LayoutOrder,
-    Parent = sproutRarityRow,
-})
-local sproutRarityButtons = {}
-local sproutFilterHint
-
-local function paintSproutRarity()
-    for _, rarityName in ipairs(sproutRarityOrder) do
-        local button = sproutRarityButtons[rarityName]
-        if button then
-            local isEnabled = CONFIG.ALLOWED_SPROUT_RARITIES[rarityName] ~= false
-            button.BackgroundColor3 = isEnabled and Color3.fromRGB(14, 48, 30) or Color3.fromRGB(12, 16, 22)
-            button.TextColor3 = isEnabled and sproutRarityColors[rarityName] or Color3.fromRGB(90, 100, 115)
-            local outline = button:FindFirstChildOfClass("UIStroke")
-            if outline then
-                outline.Color = isEnabled and sproutRarityColors[rarityName] or Color3.fromRGB(40, 50, 60)
-                outline.Thickness = isEnabled and 2 or 1
-                outline.Transparency = isEnabled and 0.1 or 0.6
-            end
-        end
-    end
-end
-
-for index, rarityName in ipairs(sproutRarityOrder) do
-    local button = new("TextButton", {
-        Size = UDim2.new(0.25, -5, 0, 30),
-        BackgroundColor3 = C.field,
-        Text = sproutRarityLabels[rarityName],
-        TextColor3 = sproutRarityColors[rarityName],
-        Font = Enum.Font.GothamBold, TextSize = 10,
-        AutoButtonColor = false, BorderSizePixel = 0,
-        LayoutOrder = index, Parent = sproutRarityRow,
-    })
-    round(button, 8)
-    stroke(button, sproutRarityColors[rarityName], 1)
-    sproutRarityButtons[rarityName] = button
-
-    button.MouseButton1Click:Connect(function()
-        if not CONFIG.ALLOWED_SPROUT_RARITIES then CONFIG.ALLOWED_SPROUT_RARITIES = {} end
-        local isCurrentlyOn = CONFIG.ALLOWED_SPROUT_RARITIES[rarityName] ~= false
-        CONFIG.ALLOWED_SPROUT_RARITIES[rarityName] = not isCurrentlyOn
-        paintSproutRarity()
-        if saveNow then pcall(saveNow) end
-
-        local enabledList = {}
-        for _, rName in ipairs(sproutRarityOrder) do
-            if CONFIG.ALLOWED_SPROUT_RARITIES[rName] ~= false then
-                table.insert(enabledList, sproutRarityLabels[rName])
-            end
-        end
-        if sproutFilterHint then
-            if #enabledList > 0 then
-                sproutFilterHint.Text = "Включено для сбора: " .. table.concat(enabledList, ", ")
-                sproutFilterHint.TextColor3 = C.accent
-            else
-                sproutFilterHint.Text = "⚠️ Внимание: ВСЕ ростки выключены! Бот не будет фармить ни один росток."
-                sproutFilterHint.TextColor3 = C.warn
-            end
-        end
-    end)
-end
-paintSproutRarity()
-
-local initialEnabled = {}
-for _, rName in ipairs(sproutRarityOrder) do
-    if CONFIG.ALLOWED_SPROUT_RARITIES[rName] ~= false then
-        table.insert(initialEnabled, sproutRarityLabels[rName])
-    end
-end
-
-sproutFilterHint = new("TextLabel", {
-    Size = UDim2.new(1, 0, 0, 20), BackgroundTransparency = 1,
-    Text = (#initialEnabled > 0) and ("Включено для сбора: " .. table.concat(initialEnabled, ", ")) or "⚠️ Все ростки выключены",
-    TextColor3 = (#initialEnabled > 0) and C.accent or C.warn,
-    Font = Enum.Font.Gotham, TextSize = 10,
-    TextWrapped = true, TextXAlignment = Enum.TextXAlignment.Left,
-    LayoutOrder = 3, Parent = PAGE_SPROUTS,
-})
-
-do
-    section("⚡ BURST-СБОР (ПРИ ВЗРЫВЕ РОСТКА)", 10).Parent = PAGE_SPROUTS
-
-    makeToggle(PAGE_SPROUTS, "⚡ Включить Burst-сбор редкого лута", CONFIG.BURST_LOOT_ENABLED ~= false, 11, function(v)
-        CONFIG.BURST_LOOT_ENABLED = v
-        saveNow()
-    end)
-
-    local fBurstTime = makeField(PAGE_SPROUTS, "ДЛИТЕЛЬНОСТЬ BURST-СБОРА (СЕК)", CONFIG.BURST_LOOT_TIME or 7, "7", 12)
-    fBurstTime.FocusLost:Connect(function()
-        local n = tonumber(string.gsub(tostring(fBurstTime.Text), ",", "."))
-        CONFIG.BURST_LOOT_TIME = (n and n > 0) and n or 7
-        saveNow()
-    end)
-
-    section("🌐 ФИЛЬТР СЕРВЕРОВ (LOW PLAYER COUNT & BLACKLIST)", 20).Parent = PAGE_SPROUTS
-
-    makeToggle(PAGE_SPROUTS, "👥 Искать серверы с малым числом игроков", CONFIG.PREFER_LOW_PLAYERS ~= false, 21, function(v)
-        CONFIG.PREFER_LOW_PLAYERS = v
-        saveNow()
-    end)
-
-    local fMaxP = makeField(PAGE_SPROUTS, "МАКС. ИГРОКОВ НА СЕРВЕРЕ (1-6)", CONFIG.MAX_PLAYERS or 5, "5", 22)
-    fMaxP.FocusLost:Connect(function()
-        local n = tonumber(fMaxP.Text)
-        CONFIG.MAX_PLAYERS = (n and n >= 1 and n <= 10) and n or 5
-        saveNow()
-    end)
-
-    section("🎯 ПРИОРИТЕТЫ ТОКЕНОВ СО СПРУТОВ", 30).Parent = PAGE_SPROUTS
-
-    new("TextLabel", {
-        Size = UDim2.new(1, 0, 0, 28), BackgroundTransparency = 1,
-        Text = "Нажимайте на кнопку приоритета [P1 / P2 / P3 / ВЫКЛ] для каждого предмета.\nP1 = Топ лут (Burst), P2 = Средний, P3 = Низкий, ВЫКЛ = Пропуск. Автосохранение.",
-        TextColor3 = C.dim, Font = Enum.Font.Gotham, TextSize = 9,
-        TextWrapped = true, TextXAlignment = Enum.TextXAlignment.Left,
-        LayoutOrder = 31, Parent = PAGE_SPROUTS,
-    })
-
-    local tokensContainer = new("Frame", {
-        Size = UDim2.new(1, 0, 0, 0),
-        AutomaticSize = Enum.AutomaticSize.Y,
-        BackgroundTransparency = 1,
-        LayoutOrder = 32,
-        Parent = PAGE_SPROUTS,
-    })
-    new("UIListLayout", {
-        SortOrder = Enum.SortOrder.LayoutOrder,
-        Padding = UDim.new(0, 4),
-        Parent = tokensContainer,
-    })
-
-    local prioLabels = {
-        [1] = "[ P1: Топ ]",
-        [2] = "[ P2: Средн ]",
-        [3] = "[ P3: Низк ]",
-        [0] = "[ ВЫКЛ ]",
-    }
-    local prioColors = {
-        [1] = Color3.fromRGB(255, 215, 0),   -- Gold
-        [2] = Color3.fromRGB(105, 190, 255), -- Cyan
-        [3] = Color3.fromRGB(175, 180, 195), -- Dim
-        [0] = Color3.fromRGB(255, 85, 85),   -- Red
-    }
-    local prioBgColors = {
-        [1] = Color3.fromRGB(48, 42, 24),
-        [2] = Color3.fromRGB(24, 38, 52),
-        [3] = Color3.fromRGB(28, 30, 40),
-        [0] = Color3.fromRGB(45, 20, 25),
-    }
-
-    CONFIG.TOKEN_PRIORITIES = CONFIG.TOKEN_PRIORITIES or {}
-
-    for idx, item in ipairs(TOKEN_REGISTRY) do
-        local curPrio = CONFIG.TOKEN_PRIORITIES[item.id]
-        if curPrio == nil then curPrio = item.defaultPrio end
-
-        local row = new("Frame", {
-            Size = UDim2.new(1, 0, 0, 28),
-            BackgroundColor3 = C.card,
-            BorderSizePixel = 0,
-            LayoutOrder = idx,
-            Parent = tokensContainer,
-        })
-        round(row, 6)
-
-        new("TextLabel", {
-            Size = UDim2.new(1, -95, 1, 0),
-            Position = UDim2.new(0, 8, 0, 0),
-            BackgroundTransparency = 1,
-            Text = item.icon .. "  " .. item.name,
-            TextColor3 = C.text,
-            Font = Enum.Font.GothamSemibold,
-            TextSize = 10,
-            TextXAlignment = Enum.TextXAlignment.Left,
-            TextYAlignment = Enum.TextYAlignment.Center,
-            TextTruncate = Enum.TextTruncate.AtEnd,
-            Parent = row,
-        })
-
-        local btn = new("TextButton", {
-            Size = UDim2.new(0, 80, 0, 20),
-            Position = UDim2.new(1, -85, 0.5, -10),
-            BackgroundColor3 = prioBgColors[curPrio] or C.field,
-            Text = prioLabels[curPrio] or "[ P" .. tostring(curPrio) .. " ]",
-            TextColor3 = prioColors[curPrio] or C.text,
-            Font = Enum.Font.GothamBold,
-            TextSize = 9,
-            BorderSizePixel = 0,
-            AutoButtonColor = false,
-            Parent = row,
-        })
-        round(btn, 4)
-        stroke(btn, prioColors[curPrio] or C.dim, 1)
-
-        btn.MouseButton1Click:Connect(function()
-            local nowP = CONFIG.TOKEN_PRIORITIES[item.id]
-            if nowP == nil then nowP = item.defaultPrio end
-            local nextP
-            if nowP == 1 then nextP = 2
-            elseif nowP == 2 then nextP = 3
-            elseif nowP == 3 then nextP = 0
-            else nextP = 1 end
-
-            CONFIG.TOKEN_PRIORITIES[item.id] = nextP
-            btn.Text = prioLabels[nextP] or "[ P" .. tostring(nextP) .. " ]"
-            btn.TextColor3 = prioColors[nextP] or C.text
-            btn.BackgroundColor3 = prioBgColors[nextP] or C.field
-            local st = btn:FindFirstChildOfClass("UIStroke")
-            if st then st.Color = prioColors[nextP] or C.dim end
-            saveNow()
-        end)
-    end
-end
-
--- ══════════════════════════════════════════════════════════════════════
---  НАСТРОЙКИ
--- ══════════════════════════════════════════════════════════════════════
-local pageSettings = new("Frame", {
-    Size = UDim2.new(1, 0, 0, 0),
-    AutomaticSize = Enum.AutomaticSize.Y,
-    BackgroundTransparency = 1, Visible = false, Parent = content,
-})
-new("UIListLayout", {
-    SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0, 8),
-    Parent = pageSettings,
-})
-
-section("АККАУНТ И БОТ", 1).Parent = pageSettings
-local fTag = makeField(pageSettings, "ТЕГ АККАУНТА", CONFIG.SELF_TAG, "searcher1", 10)
-local fUrl = makeField(pageSettings, "URL БОТА", CONFIG.API_URL, "https://...", 11)
-local fKey = makeField(pageSettings, "API KEY", CONFIG.API_KEY, "ключ", 12, true)
-local fViciousChannel = makeField(pageSettings, "DISCORD CHANNEL ID — VICIOUS", CONFIG.VICIOUS_CHANNEL_ID, "ID канала", 13, true)
-
-local acctRow = new("Frame", {
-    Size = UDim2.new(1, 0, 0, 160), BackgroundTransparency = 1,
-    LayoutOrder = 14, Parent = pageSettings,
-})
-new("UIListLayout", { FillDirection = Enum.FillDirection.Horizontal,
-    Padding = UDim.new(0, 8), Parent = acctRow })
-local colA = new("Frame", { Size = UDim2.new(0.5, -4, 1, 0), BackgroundTransparency = 1, Parent = acctRow })
-local colB = new("Frame", { Size = UDim2.new(0.5, -4, 1, 0), BackgroundTransparency = 1, Parent = acctRow })
-new("UIListLayout", { SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0, 8), Parent = colA })
-new("UIListLayout", { SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0, 8), Parent = colB })
-
-fTag.Parent = colA
-fUrl.Parent = colB
-fKey.Parent = colA
-fViciousChannel.Parent = colB
-
-section("ТАЙМИНГИ", 20).Parent = pageSettings
-local fHop = makeField(pageSettings, "ЗАДЕРЖКА ХОПА (сек)", CONFIG.HOP_DELAY, "1.5", 21)
-local fPoll = makeField(pageSettings, "ОПРОС БОТА (сек)", CONFIG.POLL_INTERVAL, "3", 22)
-local fWait = makeField(pageSettings, "ЖДАТЬ СЛОМАННОГО СПРУТА (сек)", CONFIG.BROKEN_WAIT, "20", 23)
-local fConn = makeField(pageSettings, "ТАЙМАУТ ПОДКЛЮЧЕНИЯ (сек)", CONFIG.CONNECT_TIMEOUT, "20", 24)
-local fPlace = makeField(pageSettings, "PLACE ID", CONFIG.PLACE_ID, "1537690962", 25)
-
-section("СКОРОСТЬ", 30).Parent = pageSettings
-local fWalk = makeField(pageSettings, "МНОЖИТЕЛЬ БЕГА (x от 16)", CONFIG.WALK_SPEED_MULT, "2.4", 31)
-local fFly = makeField(pageSettings, "СКОРОСТЬ ПОЛЁТА (studs/s)", CONFIG.FLY_SPEED, "100", 32)
-
-section("ИНСТРУМЕНТЫ И УЛЕЙ", 40).Parent = pageSettings
-local fSprinkler = makeField(pageSettings, "SPRINKLER KEYWORD", CONFIG.SPRINKLER_KEYWORD, "sprinkler", 41)
-local fSprinklerCount = makeField(pageSettings, "КОЛИЧЕСТВО ПОЛИВАЛОК (1–4)", CONFIG.SPRINKLER_COUNT, "3", 42)
-local getSprinkler = makeToggle(pageSettings, "Автоматически ставить поливалки", CONFIG.ENABLE_AUTO_SPRINKLER, 43, function(v)
-    CONFIG.ENABLE_AUTO_SPRINKLER = v; if saveNow then pcall(saveNow) end
+makeToggle(PAGE_PLANTERS_MOBS, "Loot Meteor Shower", "Collect falling meteor tokens on target fields", CONFIG.CHECK_METEORS ~= false, 12, function(v)
+    CONFIG.CHECK_METEORS = v; saveNow()
 end)
-local fRegion = makeField(pageSettings, "ЗОНА ФАРМА (center / left / right)", CONFIG.FARM_REGION, "center", 44)
-local fDigTool = makeField(pageSettings, "DIG TOOL KEYWORD", CONFIG.DIG_TOOL_KEYWORD, "scooper", 45)
-local fSlotKeyword = makeField(pageSettings, "EMPTY SLOT KEYWORD", CONFIG.EMPTY_SLOT_KEYWORD, "claim hive", 46)
-local fHoneyKeyword = makeField(pageSettings, "MY HIVE KEYWORD", CONFIG.MY_HIVE_KEYWORD, "make honey", 47)
-
-section("ОПЦИИ", 50).Parent = pageSettings
-local getDebug = makeToggle(pageSettings, "Диагностика спрута в консоли",
-    CONFIG.DEBUG_SPROUT, 52, function(v) CONFIG.DEBUG_SPROUT = v; if saveNow then pcall(saveNow) end end)
-local getAuto = makeToggle(pageSettings, "Автозапуск после перезахода",
-    CONFIG.AUTO_START, 53, function(v) CONFIG.AUTO_START = v; if saveNow then pcall(saveNow) end end)
-local getAntiLag = makeToggle(pageSettings, "ANTI-LAG: снизить графику", CONFIG.ANTI_LAG, 54, function(v)
-    applyAntiLag(v); if saveNow then pcall(saveNow) end
+makeToggle(PAGE_PLANTERS_MOBS, "Hunt Windy Bee in Cloud", "Fly up and battle wild Windy Bee", CONFIG.CHECK_WINDY ~= false, 13, function(v)
+    CONFIG.CHECK_WINDY = v; saveNow()
 end)
-local getSuperOpt = makeToggle(pageSettings, "⚡ УЛЬТРА-ОПТИМИЗАЦИЯ (FPS Boost & ОЗУ)", CONFIG.SUPER_OPTIMIZE, 55, function(v)
-    CONFIG.SUPER_OPTIMIZE = v
-    applySuperOptimization(v)
-    if saveNow then pcall(saveNow) end
+local fWindyH = makeField(PAGE_PLANTERS_MOBS, "Windy Bee Hover Height (studs)", CONFIG.WINDY_HOVER_HEIGHT or 32, "32", 14, function(val)
+    local n = tonumber(val)
+    if n and n >= 15 and n <= 60 then CONFIG.WINDY_HOVER_HEIGHT = n; saveNow() end
 end)
-local getAvoidFriends = makeToggle(pageSettings, "🛡️ АНТИ-ПАЛЕВО: избегать друзей", CONFIG.AVOID_FRIENDS, 56, function(v)
-    CONFIG.AVOID_FRIENDS = v
-    if saveNow then pcall(saveNow) end
-end)
-local get3dRender = makeToggle(pageSettings, "🛑 ОТКЛЮЧИТЬ 3D РЕНДЕРИНГ (Защита от крашей)", CONFIG.DISABLE_3D_RENDERING == true, 57, function(v)
-    CONFIG.DISABLE_3D_RENDERING = v
-    apply3dRendering(v)
-    if saveNow then pcall(saveNow) end
-end)
-
-applySettings = function()
-    local function num(v, def)
-        if v == nil then return def end
-        local str = string.gsub(tostring(v), ",", ".")
-        local n = tonumber(str)
-        return (n and n > 0) and n or def
-    end
-    CONFIG.SELF_TAG = (fTag.Text ~= "" and fTag.Text) or CONFIG.SELF_TAG
-    CONFIG.API_URL = (fUrl.Text ~= "" and fUrl.Text) or CONFIG.API_URL
-    if fKey.Text ~= "" then CONFIG.API_KEY = fKey.Text end
-    CONFIG.VICIOUS_CHANNEL_ID = (fViciousChannel.Text ~= "" and fViciousChannel.Text) or CONFIG.VICIOUS_CHANNEL_ID
-    CONFIG.HOP_DELAY = num(fHop.Text, CONFIG.HOP_DELAY or 1.5)
-    CONFIG.POLL_INTERVAL = num(fPoll.Text, CONFIG.POLL_INTERVAL or 3)
-    CONFIG.BROKEN_WAIT = num(fWait.Text, CONFIG.BROKEN_WAIT or 20)
-    CONFIG.CONNECT_TIMEOUT = num(fConn.Text, CONFIG.CONNECT_TIMEOUT or 20)
-    CONFIG.PLACE_ID = (fPlace.Text ~= "" and fPlace.Text) or CONFIG.PLACE_ID
-    CONFIG.WALK_SPEED_MULT = num(fWalk.Text, CONFIG.WALK_SPEED_MULT or 2.4)
-    CONFIG.FLY_SPEED = math.clamp(num(fFly.Text, CONFIG.FLY_SPEED or 100), 50, 150)
-    CONFIG.SPRINKLER_KEYWORD = (fSprinkler.Text ~= "" and fSprinkler.Text) or CONFIG.SPRINKLER_KEYWORD
-    CONFIG.SPRINKLER_COUNT = math.clamp(math.floor(num(fSprinklerCount.Text, CONFIG.SPRINKLER_COUNT or 3)), 1, 4)
-    if getSprinkler then CONFIG.ENABLE_AUTO_SPRINKLER = getSprinkler() end
-    local region = string.lower((fRegion.Text ~= "" and fRegion.Text) or CONFIG.FARM_REGION or "center")
-    CONFIG.FARM_REGION = (region == "left" or region == "right") and region or "center"
-    CONFIG.DIG_TOOL_KEYWORD = (fDigTool.Text ~= "" and fDigTool.Text) or CONFIG.DIG_TOOL_KEYWORD
-    CONFIG.EMPTY_SLOT_KEYWORD = (fSlotKeyword.Text ~= "" and fSlotKeyword.Text) or CONFIG.EMPTY_SLOT_KEYWORD
-    CONFIG.MY_HIVE_KEYWORD = (fHoneyKeyword.Text ~= "" and fHoneyKeyword.Text) or CONFIG.MY_HIVE_KEYWORD
-    if getDebug then CONFIG.DEBUG_SPROUT = getDebug() end
-    if getAuto then CONFIG.AUTO_START = getAuto() end
-    if getAntiLag then
-        CONFIG.ANTI_LAG = getAntiLag()
-        applyAntiLag(CONFIG.ANTI_LAG)
-    end
-    if getSuperOpt then
-        CONFIG.SUPER_OPTIMIZE = getSuperOpt()
-        applySuperOptimization(CONFIG.SUPER_OPTIMIZE)
-    end
-    if get3dRender then
-        CONFIG.DISABLE_3D_RENDERING = get3dRender()
-        apply3dRendering(CONFIG.DISABLE_3D_RENDERING)
-    end
-    if getAvoidFriends then
-        CONFIG.AVOID_FRIENDS = getAvoidFriends()
-    end
-    applyWalkSpeed()
-    if saveNow then pcall(saveNow) end
-end
-
-local btnRow = new("Frame", {
-    Size = UDim2.new(1, 0, 0, 34), BackgroundTransparency = 1,
-    LayoutOrder = 60, Parent = pageSettings,
-})
-new("UIListLayout", { FillDirection = Enum.FillDirection.Horizontal,
-    Padding = UDim.new(0, 8), Parent = btnRow })
-
-makeBtn(btnRow, "💾 Сохранить", function()
-    applySettings()
-    if saveNow() then
-        statusVal.Text = "Настройки сохранены"
-        statusVal.TextColor3 = C.accent
-    else
-        statusVal.Text = "Не удалось сохранить"
-        statusVal.TextColor3 = C.warn
-    end
-end, C.accent2)
-
-makeBtn(btnRow, "↺ Сбросить", function()
-    pcall(function()
-        if type(delfile) == "function" then delfile(SAVE_FILE) end
-    end)
-    statusVal.Text = "Файл настроек удалён"
-    statusVal.TextColor3 = C.warn
-end, Color3.fromRGB(80,40,40))
-
--- ══════════════════════════════════════════════════════════════════════
---  VICIOUS BEE
--- ══════════════════════════════════════════════════════════════════════
-local PAGE_VICIOUS = new("Frame", {
-    Size = UDim2.new(1, 0, 0, 0),
-    AutomaticSize = Enum.AutomaticSize.Y,
-    BackgroundTransparency = 1, Visible = false, Parent = content,
-})
-new("UIListLayout", {
-    SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0, 8),
-    Parent = PAGE_VICIOUS,
-})
-section("ПОИСК VICIOUS BEE", 1).Parent = PAGE_VICIOUS
-local vicRangeInfo = new("TextLabel", {
-    Size = UDim2.new(1, 0, 0, 34), BackgroundTransparency = 1,
-    Text = "Диапазон полей для Vicious: 1 Clover, 2 Spider, 3 Cactus, 4 Mountain Top, 5 Pepper Patch. Сохрани диапазон в настройках ниже.",
-    TextColor3 = C.dim, Font = Enum.Font.Gotham, TextSize = 10,
-    TextWrapped = true, TextXAlignment = Enum.TextXAlignment.Left,
-    LayoutOrder = 2, Parent = PAGE_VICIOUS,
-})
--- Компактный выбор диапазона звёздами вместо огромной кнопки и текстовых полей.
-local VICIOUS_FIELD_NAMES = { "Clover", "Spider", "Cactus", "Mountain Top", "Pepper Patch" }
-local vicFrom = math.clamp(math.floor(tonumber(CONFIG.VICIOUS_FIELD_FROM) or 1), 1, 5)
-local vicTo = math.clamp(math.floor(tonumber(CONFIG.VICIOUS_FIELD_TO) or 5), 1, 5)
-if vicFrom > vicTo then vicFrom, vicTo = vicTo, vicFrom end
-CONFIG.VICIOUS_FIELD_FROM, CONFIG.VICIOUS_FIELD_TO = vicFrom, vicTo
-
-local function makeStarRangeRow(titleText, order, selectedValue, callback)
-    local wrap = new("Frame", {
-        Size = UDim2.new(1, 0, 0, 56), BackgroundTransparency = 1,
-        LayoutOrder = order, Parent = PAGE_VICIOUS,
-    })
-    new("TextLabel", {
-        Size = UDim2.new(1, 0, 0, 16), BackgroundTransparency = 1,
-        Text = titleText, TextColor3 = C.dim, Font = Enum.Font.Gotham,
-        TextSize = 10, TextXAlignment = Enum.TextXAlignment.Left,
-        Parent = wrap,
-    })
-    local row = new("Frame", {
-        Position = UDim2.new(0, 0, 0, 19), Size = UDim2.new(1, 0, 0, 34),
-        BackgroundTransparency = 1, Parent = wrap,
-    })
-    new("UIListLayout", {
-        FillDirection = Enum.FillDirection.Horizontal,
-        Padding = UDim.new(0, 6), SortOrder = Enum.SortOrder.LayoutOrder,
-        Parent = row,
-    })
-    local buttons = {}
-    local function paint(value)
-        for i, button in ipairs(buttons) do
-            local active = i == value
-            button.BackgroundColor3 = active and C.accent2 or C.field
-            button.TextColor3 = active and Color3.fromRGB(255,255,255) or C.text
-            local outline = button:FindFirstChildOfClass("UIStroke")
-            if outline then outline.Thickness = active and 2 or 1 end
-        end
-    end
-    for i = 1, 5 do
-        local b = new("TextButton", {
-            Size = UDim2.new(0.2, -5, 1, 0), BackgroundColor3 = C.field,
-            Text = string.rep("★", i), TextColor3 = C.text,
-            Font = Enum.Font.GothamBold, TextSize = 10, AutoButtonColor = false,
-            BorderSizePixel = 0, LayoutOrder = i, Parent = row,
-        })
-        round(b, 8); stroke(b, C.cardHi, 1)
-        buttons[i] = b
-        b.MouseButton1Click:Connect(function()
-            paint(i)
-            callback(i)
-        end)
-    end
-    paint(selectedValue)
-    return paint
-end
-
-local vicRangeSummary = new("TextLabel", {
-    Size = UDim2.new(1, 0, 0, 24), BackgroundTransparency = 1,
-    Text = "Диапазон: 1–5 звёзд", TextColor3 = C.dim,
-    Font = Enum.Font.Gotham, TextSize = 10, TextXAlignment = Enum.TextXAlignment.Left,
-    LayoutOrder = 5, Parent = PAGE_VICIOUS,
-})
-local function saveViciousRange()
-    if vicFrom > vicTo then vicFrom, vicTo = vicTo, vicFrom end
-    CONFIG.VICIOUS_FIELD_FROM, CONFIG.VICIOUS_FIELD_TO = vicFrom, vicTo
-    freshVicious = nil
-    saveNow()
-    vicRangeSummary.Text = "Диапазон: " .. vicFrom .. "–" .. vicTo .. " звёзд (" .. VICIOUS_FIELD_NAMES[vicFrom] .. " — " .. VICIOUS_FIELD_NAMES[vicTo] .. ")"
-end
-makeStarRangeRow("ОТ ЗВЕЗДЫ", 3, vicFrom, function(value)
-    vicFrom = value
-    saveViciousRange()
-end)
-makeStarRangeRow("ДО ЗВЕЗДЫ", 4, vicTo, function(value)
-    vicTo = value
-    saveViciousRange()
-end)
-saveViciousRange()
-local vicInfo = new("TextLabel", {
-    Size = UDim2.new(1, 0, 0, 58), BackgroundColor3 = C.card,
-    Text = "🐝  Дикий шип торчит из земли ночью. Даёт Стинжеры.",
-    TextColor3 = C.dim, Font = Enum.Font.Gotham, TextSize = 11,
-    TextWrapped = true, TextXAlignment = Enum.TextXAlignment.Left,
-    TextYAlignment = Enum.TextYAlignment.Center,
-    BorderSizePixel = 0, LayoutOrder = 2, Parent = PAGE_VICIOUS,
-})
-round(vicInfo, 12)
-stroke(vicInfo)
-new("UIPadding", { PaddingLeft = UDim.new(0, 12), PaddingRight = UDim.new(0, 12), Parent = vicInfo })
-
-section("НАЙДЕНО", 10).Parent = PAGE_VICIOUS
-local vicStats = new("Frame", {
-    Size = UDim2.new(1, 0, 0, 50), BackgroundColor3 = C.card,
-    BorderSizePixel = 0, LayoutOrder = 11, Parent = PAGE_VICIOUS,
-})
-round(vicStats, 12)
-stroke(vicStats)
-local vicMetric = new("TextLabel", {
-    Size = UDim2.new(1, -24, 1, 0), Position = UDim2.new(0, 12, 0, 0),
-    BackgroundTransparency = 1, Text = "Vicious ещё не найдено",
-    TextColor3 = C.dim, Font = Enum.Font.GothamBold, TextSize = 12,
-    TextXAlignment = Enum.TextXAlignment.Left,
-    TextYAlignment = Enum.TextYAlignment.Center, Parent = vicStats,
-})
-
--- ══════════════════════════════════════════════════════════════════════
---  PUFFSHROOMS
--- ══════════════════════════════════════════════════════════════════════
-local PAGE_PUFF = new("Frame", {
-    Size = UDim2.new(1, 0, 0, 0),
-    AutomaticSize = Enum.AutomaticSize.Y,
-    BackgroundTransparency = 1, Visible = false, Parent = content,
-})
-new("UIListLayout", {
-    SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0, 8),
-    Parent = PAGE_PUFF,
-})
-section("ПОИСК PUFFSHROOMS", 1).Parent = PAGE_PUFF
-makeToggle(PAGE_PUFF, "Искать Puffshrooms", CONFIG.CHECK_PUFFSHROOMS, 3, function(v)
+makeToggle(PAGE_PLANTERS_MOBS, "Farm Puffshrooms", "Pop puffshrooms and gather rare spores", CONFIG.CHECK_PUFFSHROOMS ~= false, 15, function(v)
     CONFIG.CHECK_PUFFSHROOMS = v; saveNow()
 end)
 
-section("МИНИМАЛЬНАЯ РЕДКОСТЬ PUFFSHROOM", 4).Parent = PAGE_PUFF
-local puffRarityOrder = { "common","rare","epic","legendary","mythic" }
-local puffRarityLabels = { common="Common", rare="Rare", epic="Epic", legendary="Legendary", mythic="Mythic" }
-local puffRarityColors = {
-    common=Color3.fromRGB(130,220,135), rare=Color3.fromRGB(90,180,255),
-    epic=Color3.fromRGB(180,115,255), legendary=Color3.fromRGB(255,190,75),
-    mythic=Color3.fromRGB(255,95,180),
-}
-local puffRarityRow = new("Frame", {
-    Size = UDim2.new(1, 0, 0, 36), BackgroundTransparency = 1,
-    LayoutOrder = 5, Parent = PAGE_PUFF,
-})
-new("UIListLayout", {
-    FillDirection = Enum.FillDirection.Horizontal,
-    Padding = UDim.new(0, 6), Parent = puffRarityRow,
-})
-local puffRarityButtons = {}
-local function paintPuffRarity()
-    for _, rarityName in ipairs(puffRarityOrder) do
-        local button = puffRarityButtons[rarityName]
-        local selected = CONFIG.PUFF_MIN_RARITY == rarityName
-        button.BackgroundColor3 = selected and C.cardHi or C.field
-        button.TextColor3 = puffRarityColors[rarityName]
-        local outline = button:FindFirstChildOfClass("UIStroke")
-        if outline then outline.Thickness = selected and 2 or 1 end
-    end
-end
-for index, rarityName in ipairs(puffRarityOrder) do
-    local button = new("TextButton", {
-        Size = UDim2.new(0.2, -5, 1, 0),
-        BackgroundColor3 = C.field, Text = puffRarityLabels[rarityName],
-        TextColor3 = puffRarityColors[rarityName], Font = Enum.Font.GothamBold,
-        TextSize = 10, AutoButtonColor = false, BorderSizePixel = 0,
-        LayoutOrder = index, Parent = puffRarityRow,
-    })
-    round(button, 8)
-    stroke(button, puffRarityColors[rarityName], 1)
-    puffRarityButtons[rarityName] = button
-    button.MouseButton1Click:Connect(function()
-        CONFIG.PUFF_MIN_RARITY = rarityName
-        paintPuffRarity(); saveNow()
-    end)
-end
-if not PUFF_RARITY_PRIORITY[CONFIG.PUFF_MIN_RARITY] then CONFIG.PUFF_MIN_RARITY = "common" end
-paintPuffRarity()
-
-section("ДИАПАЗОН УРОВНЕЙ ГРИБОВ ДЛЯ ФАРМА", 6).Parent = PAGE_PUFF
-local puffLevelRow = new("Frame", {
-    Size = UDim2.new(1, 0, 0, 48), BackgroundTransparency = 1,
-    LayoutOrder = 7, Parent = PAGE_PUFF,
-})
-new("UIListLayout", {
-    FillDirection = Enum.FillDirection.Horizontal,
-    Padding = UDim.new(0, 10), Parent = puffLevelRow,
-})
-local fPuffMin = makeField(puffLevelRow, "ОТ УРОВНЯ (MIN)", CONFIG.PUFF_MIN_LEVEL or 1, "1", 1)
-fPuffMin.Parent.Size = UDim2.new(0.5, -5, 1, 0)
-fPuffMin.FocusLost:Connect(function()
-    CONFIG.PUFF_MIN_LEVEL = tonumber(fPuffMin.Text) or 1
-    saveNow()
-end)
-local fPuffMax = makeField(puffLevelRow, "ДО УРОВНЯ (MAX)", CONFIG.PUFF_MAX_LEVEL or 20, "20", 2)
-fPuffMax.Parent.Size = UDim2.new(0.5, -5, 1, 0)
-fPuffMax.FocusLost:Connect(function()
-    CONFIG.PUFF_MAX_LEVEL = tonumber(fPuffMax.Text) or 20
-    saveNow()
-end)
-
-section("⚡ ВЫБОР БУСТОВ ДЛЯ EPIC+ ГРИБОВ", 8).Parent = PAGE_PUFF
-makeToggle(PAGE_PUFF, "Использовать бусты при спавне Epic/Legendary/Mythic", CONFIG.PUFF_AUTO_BOOST_EPIC ~= false, 9, function(v)
-    CONFIG.PUFF_AUTO_BOOST_EPIC = v; saveNow()
-end)
-
-local boostDisplayNames = {
-    ["Glitter"] = "✨ Glitter",
-    ["Red Extract"] = "🔴 Red Extract",
-    ["Blue Extract"] = "🔵 Blue Extract",
-    ["Oil"] = "🛢️ Oil",
-    ["Enzymes"] = "🧪 Enzymes",
-    ["Glue"] = "🍯 Glue",
-    ["Tropical Drink"] = "🍹 Tropical Drink",
-    ["Purple Potion"] = "🟣 Purple Potion",
-    ["Super Smoothie"] = "🥤 Super Smoothie",
-}
-
-for bIndex, bName in ipairs(BOOST_ITEM_NAMES) do
-    local isChecked = (CONFIG.PUFF_SELECTED_BOOSTS and CONFIG.PUFF_SELECTED_BOOSTS[bName] ~= false)
-    makeToggle(PAGE_PUFF, boostDisplayNames[bName] or bName, isChecked, 10 + bIndex, function(v)
-        if not CONFIG.PUFF_SELECTED_BOOSTS then CONFIG.PUFF_SELECTED_BOOSTS = {} end
-        CONFIG.PUFF_SELECTED_BOOSTS[bName] = v
-        saveNow()
-    end)
-end
-
 -- ══════════════════════════════════════════════════════════════════════
---  ПЕРЕКЛЮЧЕНИЕ РАЗДЕЛОВ
+--  TAB 4: SETTINGS & WEBHOOKS
 -- ══════════════════════════════════════════════════════════════════════
--- ══════════════════════════════════════════════════════════════════════
---  ВКЛАДКА КОНФИГУРАЦИЙ (PAGE_CONFIGS)
--- ══════════════════════════════════════════════════════════════════════
-local PAGE_CONFIGS = new("Frame", {
+local PAGE_SETTINGS = new("Frame", {
     Size = UDim2.new(1, 0, 0, 0),
     AutomaticSize = Enum.AutomaticSize.Y,
-    BackgroundTransparency = 1, Visible = false, Parent = content,
-})
-new("UIListLayout", {
-    SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0, 8),
-    Parent = PAGE_CONFIGS,
-})
-
--- Баннер текущего состояния
-local cfgHeaderBox = new("Frame", {
-    Size = UDim2.new(1, 0, 0, 56), BackgroundColor3 = C.card,
-    BorderSizePixel = 0, LayoutOrder = 1, Parent = PAGE_CONFIGS,
-})
-round(cfgHeaderBox, 12)
-stroke(cfgHeaderBox)
-new("TextLabel", {
-    Size = UDim2.new(0, 36, 1, 0), Position = UDim2.new(0, 12, 0, 0),
-    BackgroundTransparency = 1, Text = "📁", Font = Enum.Font.GothamBold,
-    TextSize = 22, TextColor3 = C.accent, Parent = cfgHeaderBox,
-})
-local cfgHeaderTitle = new("TextLabel", {
-    Size = UDim2.new(1, -60, 0, 22), Position = UDim2.new(0, 52, 0, 8),
-    BackgroundTransparency = 1, Text = "Менеджер конфигураций и авто-профилей",
-    TextColor3 = C.text, Font = Enum.Font.GothamBold, TextSize = 13,
-    TextXAlignment = Enum.TextXAlignment.Left, Parent = cfgHeaderBox,
-})
-local cfgHeaderSub = new("TextLabel", {
-    Size = UDim2.new(1, -60, 0, 18), Position = UDim2.new(0, 52, 0, 30),
     BackgroundTransparency = 1,
-    Text = "Аккаунт: " .. tostring(player.Name) .. "  |  Активный конфиг: " .. tostring(currentActiveConfig or "default"),
-    TextColor3 = C.dim, Font = Enum.Font.Gotham, TextSize = 11,
-    TextXAlignment = Enum.TextXAlignment.Left, Parent = cfgHeaderBox,
+    Visible = false,
+    Parent = content,
 })
+new("UIListLayout", { SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0, 8), Parent = PAGE_SETTINGS })
 
--- Раздел 1: Сохранение и загрузка конфигов
-section("СОХРАНЕНИЕ / ЗАГРУЗКА КОНФИГА", 10).Parent = PAGE_CONFIGS
+section(PAGE_SETTINGS, "Webhooks & Notifications", 1)
+local fDisc = makeField(PAGE_SETTINGS, "Discord Webhook URL", CONFIG.DISCORD_WEBHOOK_URL or "", "https://discord.com/api/webhooks/...", 2, function(v)
+    CONFIG.DISCORD_WEBHOOK_URL = v; saveNow()
+end)
+local fTgToken = makeField(PAGE_SETTINGS, "Telegram Bot Token", CONFIG.TELEGRAM_BOT_TOKEN or "", "123456789:ABCdef...", 3, function(v)
+    CONFIG.TELEGRAM_BOT_TOKEN = v; saveNow()
+end)
+local fTgChat = makeField(PAGE_SETTINGS, "Telegram Chat ID", CONFIG.TELEGRAM_CHAT_ID or "", "123456789", 4, function(v)
+    CONFIG.TELEGRAM_CHAT_ID = v; saveNow()
+end)
 
-local fCfgName = makeField(PAGE_CONFIGS, "ИМЯ КОНФИГА", currentActiveConfig or "gg", "например: gg или solo_farm", 11)
+makeBtn(PAGE_SETTINGS, "Send Test Webhook Notification", "📡", C.card, 5, function()
+    notifyAllWebhooks("Test Notification", "BSS Hopper Webhook is working correctly!", "00f5a0")
+end)
 
+makeToggle(PAGE_SETTINGS, "Periodic Loot Reports", "Send hourly resource summary reports", CONFIG.PERIODIC_REPORT_ENABLED ~= false, 6, function(v)
+    CONFIG.PERIODIC_REPORT_ENABLED = v; saveNow()
+end)
+local fRepInterval = makeField(PAGE_SETTINGS, "Report Interval (minutes)", CONFIG.PERIODIC_REPORT_INTERVAL or 15, "15", 7, function(val)
+    local n = tonumber(val)
+    if n and n >= 1 and n <= 120 then CONFIG.PERIODIC_REPORT_INTERVAL = n; saveNow() end
+end)
+
+section(PAGE_SETTINGS, "Performance & Safety", 10)
+makeToggle(PAGE_SETTINGS, "Anti-Lag (Reduce token visuals)", "Optimizes memory and reduces client lag", CONFIG.ANTI_LAG ~= false, 11, function(v)
+    CONFIG.ANTI_LAG = v; saveNow()
+end)
+makeToggle(PAGE_SETTINGS, "Super Optimizer (Boost FPS)", "Drastically reduces CPU & GPU load", CONFIG.SUPER_OPTIMIZE == true, 12, function(v)
+    CONFIG.SUPER_OPTIMIZE = v; saveNow()
+end)
+makeToggle(PAGE_SETTINGS, "Avoid Friends (Anti-Detection)", "Leaves server immediately if a friend is spotted", CONFIG.AVOID_FRIENDS ~= false, 13, function(v)
+    CONFIG.AVOID_FRIENDS = v; saveNow()
+end)
+makeToggle(PAGE_SETTINGS, "Prefer Low Player Count Servers", "Targets emptier servers with fewer competitors", CONFIG.PREFER_LOW_PLAYERS ~= false, 14, function(v)
+    CONFIG.PREFER_LOW_PLAYERS = v; saveNow()
+end)
+local fMaxP = makeField(PAGE_SETTINGS, "Max Server Players (1-6)", CONFIG.MAX_PLAYERS or 5, "5", 15, function(val)
+    local n = tonumber(val)
+    if n and n >= 1 and n <= 6 then CONFIG.MAX_PLAYERS = n; saveNow() end
+end)
+
+section(PAGE_SETTINGS, "Config Profiles", 20)
+local fCfgName = makeField(PAGE_SETTINGS, "Profile Name", currentActiveConfig or "default", "default", 21)
 local cfgBtnRow = new("Frame", {
-    Size = UDim2.new(1, 0, 0, 36), BackgroundTransparency = 1,
-    LayoutOrder = 12, Parent = PAGE_CONFIGS,
+    Size = UDim2.new(1, 0, 0, 34),
+    BackgroundTransparency = 1,
+    LayoutOrder = 22,
+    Parent = PAGE_SETTINGS,
 })
-new("UIListLayout", {
-    FillDirection = Enum.FillDirection.Horizontal,
-    Padding = UDim.new(0, 8), Parent = cfgBtnRow,
-})
+new("UIListLayout", { FillDirection = Enum.FillDirection.Horizontal, Padding = UDim.new(0, 8), Parent = cfgBtnRow })
 
-local cfgStatusLabel = new("TextLabel", {
-    Size = UDim2.new(1, 0, 0, 24), BackgroundTransparency = 1,
-    Text = "Готов к работе с конфигурациями", TextColor3 = C.dim,
-    Font = Enum.Font.Gotham, TextSize = 11, TextXAlignment = Enum.TextXAlignment.Left,
-    LayoutOrder = 13, Parent = PAGE_CONFIGS,
+local saveCfgBtn = new("TextButton", {
+    Size = UDim2.new(0.5, -4, 1, 0),
+    BackgroundColor3 = C.accent2,
+    Text = "Save Profile",
+    TextColor3 = C.text,
+    Font = Enum.Font.GothamBold,
+    TextSize = 11,
+    BorderSizePixel = 0,
+    Parent = cfgBtnRow,
 })
-
-local cfgListContainer = new("Frame", {
-    Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y,
-    BackgroundTransparency = 1, LayoutOrder = 15, Parent = PAGE_CONFIGS,
-})
-new("UIListLayout", {
-    FillDirection = Enum.FillDirection.Horizontal,
-    Padding = UDim.new(0, 6), Parent = cfgListContainer,
-})
-
-local function refreshConfigButtons()
-    for _, child in ipairs(cfgListContainer:GetChildren()) do
-        if child:IsA("TextButton") then child:Destroy() end
+round(saveCfgBtn, 8)
+saveCfgBtn.MouseButton1Click:Connect(function()
+    local name = fCfgName.Text
+    if name and name ~= "" then
+        saveConfigByName(name)
+        statusVal.Text = "Saved profile: " .. name
     end
-    local list = getSavedConfigList()
-    for _, cfg in ipairs(list) do
-        local b = new("TextButton", {
-            Size = UDim2.new(0, math.max(65, #cfg * 9 + 20), 0, 28),
-            BackgroundColor3 = (cfg == currentActiveConfig) and C.cardHi or C.field,
-            Text = "📁 " .. cfg, TextColor3 = (cfg == currentActiveConfig) and C.accent or C.text,
-            Font = Enum.Font.GothamBold, TextSize = 11,
-            BorderSizePixel = 0, Parent = cfgListContainer,
-        })
-        round(b, 6)
-        stroke(b, (cfg == currentActiveConfig) and C.accent2 or Color3.fromRGB(48,62,72))
-        b.MouseButton1Click:Connect(function()
-            fCfgName.Text = cfg
-            cfgStatusLabel.Text = "Выбран конфиг: " .. cfg .. ". Нажмите 'Загрузить' или 'Сохранить'."
-            cfgStatusLabel.TextColor3 = C.text
-        end)
+end)
+
+local loadCfgBtn = new("TextButton", {
+    Size = UDim2.new(0.5, -4, 1, 0),
+    BackgroundColor3 = C.card,
+    Text = "Load Profile",
+    TextColor3 = C.text,
+    Font = Enum.Font.GothamBold,
+    TextSize = 11,
+    BorderSizePixel = 0,
+    Parent = cfgBtnRow,
+})
+round(loadCfgBtn, 8)
+stroke(loadCfgBtn, C.border, 1)
+loadCfgBtn.MouseButton1Click:Connect(function()
+    local name = fCfgName.Text
+    if name and name ~= "" then
+        local ok, msg = loadConfigByName(name)
+        statusVal.Text = ok and ("Loaded: " .. name) or ("Error: " .. tostring(msg))
     end
-    cfgHeaderSub.Text = "Аккаунт: " .. tostring(player.Name) .. "  |  Активный конфиг: " .. tostring(currentActiveConfig or "default")
-end
+end)
 
-makeBtn(cfgBtnRow, "💾 Сохранить", function()
-    local name = (fCfgName.Text ~= "" and fCfgName.Text) or "default"
-    applySettings()
-    local ok, msg = saveNamedConfig(name)
-    cfgStatusLabel.Text = msg
-    cfgStatusLabel.TextColor3 = ok and C.accent or C.danger
-    refreshConfigButtons()
-end, C.accent2)
-
-makeBtn(cfgBtnRow, "📂 Загрузить", function()
-    local name = (fCfgName.Text ~= "" and fCfgName.Text) or "default"
-    local ok, msg = loadNamedConfig(name)
-    cfgStatusLabel.Text = msg
-    cfgStatusLabel.TextColor3 = ok and C.accent or C.danger
-    refreshConfigButtons()
-end, Color3.fromRGB(45, 110, 200))
-
-makeBtn(cfgBtnRow, "🗑️ Удалить", function()
-    local name = (fCfgName.Text ~= "" and fCfgName.Text) or ""
-    local ok, msg = deleteNamedConfig(name)
-    cfgStatusLabel.Text = msg
-    cfgStatusLabel.TextColor3 = ok and C.warn or C.danger
-    refreshConfigButtons()
-end, Color3.fromRGB(120, 45, 45))
-
-section("СОХРАНЕННЫЕ КОНФИГИ (КЛИК ДЛЯ ВЫБОРА)", 14).Parent = PAGE_CONFIGS
-refreshConfigButtons()
-
--- Раздел 2: Привязка ника к конфигу (Авто-инжект по нику)
-section("ПРИВЯЗКА К НИКУ (АВТО-ИНЖЕКТ КОНФИГА)", 20).Parent = PAGE_CONFIGS
-
-local nickInfoLabel = new("TextLabel", {
-    Size = UDim2.new(1, 0, 0, 36), BackgroundColor3 = C.card,
-    Text = "  Укажите ник игрока и конфиг (например 'gg'). При входе с этого аккаунта бот автоматически активирует именно этот конфиг!",
-    TextColor3 = C.dim, Font = Enum.Font.Gotham, TextSize = 10,
-    TextWrapped = true, TextXAlignment = Enum.TextXAlignment.Left,
-    BorderSizePixel = 0, LayoutOrder = 21, Parent = PAGE_CONFIGS,
+-- ══════════════════════════════════════════════════════════════════════
+--  FIELD PICKER MODAL OVERLAY (GUI OVER MAIN)
+-- ══════════════════════════════════════════════════════════════════════
+local pickerOverlay = new("TextButton", {
+    Name = "FieldPickerOverlay",
+    Size = UDim2.new(1, 0, 1, 0),
+    Position = UDim2.new(0, 0, 0, 0),
+    BackgroundColor3 = Color3.fromRGB(5, 7, 12),
+    BackgroundTransparency = 0.45,
+    BorderSizePixel = 0,
+    AutoButtonColor = false,
+    Text = "",
+    Visible = false,
+    ZIndex = 100,
+    Parent = win,
 })
-round(nickInfoLabel, 8)
-stroke(nickInfoLabel)
+round(pickerOverlay, 12)
 
-local bindRow = new("Frame", {
-    Size = UDim2.new(1, 0, 0, 60), BackgroundTransparency = 1,
-    LayoutOrder = 22, Parent = PAGE_CONFIGS,
+local pickerCard = new("Frame", {
+    Name = "PickerModal",
+    Size = UDim2.new(0, 480, 0, 380),
+    Position = UDim2.new(0.5, -240, 0.5, -190),
+    BackgroundColor3 = C.panel,
+    BorderSizePixel = 0,
+    ZIndex = 101,
+    Parent = pickerOverlay,
 })
-new("UIListLayout", {
-    FillDirection = Enum.FillDirection.Horizontal,
-    Padding = UDim.new(0, 8), Parent = bindRow,
+round(pickerCard, 12)
+stroke(pickerCard, C.borderActive, 1.5)
+
+local pickerHead = new("Frame", {
+    Size = UDim2.new(1, 0, 0, 48),
+    BackgroundTransparency = 1,
+    ZIndex = 102,
+    Parent = pickerCard,
+})
+new("TextLabel", {
+    Size = UDim2.new(1, -50, 0, 20),
+    Position = UDim2.new(0, 16, 0, 8),
+    BackgroundTransparency = 1,
+    Text = "SELECT IDLE FARM FIELD",
+    TextColor3 = C.text,
+    Font = Enum.Font.GothamBold,
+    TextSize = 13,
+    TextXAlignment = Enum.TextXAlignment.Left,
+    ZIndex = 103,
+    Parent = pickerHead,
+})
+new("TextLabel", {
+    Size = UDim2.new(1, -50, 0, 14),
+    Position = UDim2.new(0, 16, 0, 28),
+    BackgroundTransparency = 1,
+    Text = "Looter will farm here whenever searchers have no sprout tasks",
+    TextColor3 = C.dim,
+    Font = Enum.Font.Gotham,
+    TextSize = 10,
+    TextXAlignment = Enum.TextXAlignment.Left,
+    ZIndex = 103,
+    Parent = pickerHead,
+})
+local pickerCloseBtn = new("TextButton", {
+    Size = UDim2.new(0, 26, 0, 26),
+    Position = UDim2.new(1, -36, 0, 11),
+    BackgroundColor3 = C.card,
+    Text = "✕",
+    TextColor3 = C.dim,
+    Font = Enum.Font.GothamBold,
+    TextSize = 11,
+    BorderSizePixel = 0,
+    ZIndex = 103,
+    Parent = pickerHead,
+})
+round(pickerCloseBtn, 6)
+
+local pickerList = new("ScrollingFrame", {
+    Size = UDim2.new(1, -24, 1, -58),
+    Position = UDim2.new(0, 12, 0, 50),
+    BackgroundTransparency = 1,
+    BorderSizePixel = 0,
+    ScrollBarThickness = 4,
+    ScrollBarImageColor3 = C.accent,
+    CanvasSize = UDim2.new(0, 0, 0, 0),
+    AutomaticCanvasSize = Enum.AutomaticSize.Y,
+    ZIndex = 102,
+    Parent = pickerCard,
+})
+new("UIGridLayout", {
+    CellSize = UDim2.new(0.5, -6, 0, 36),
+    CellPadding = UDim2.new(0, 8, 0, 8),
+    SortOrder = Enum.SortOrder.LayoutOrder,
+    Parent = pickerList,
 })
 
-local colNick = new("Frame", { Size = UDim2.new(0.5, -4, 1, 0), BackgroundTransparency = 1, Parent = bindRow })
-local colCfg = new("Frame", { Size = UDim2.new(0.5, -4, 1, 0), BackgroundTransparency = 1, Parent = bindRow })
+local ALL_PICKER_FIELDS = {
+    { name = "None", icon = "🚫", label = "None (Wait at spawn)" },
+    { name = "Sunflower Field", icon = "🌻" },
+    { name = "Dandelion Field", icon = "🌼" },
+    { name = "Mushroom Field", icon = "🍄" },
+    { name = "Blue Flower Field", icon = "🌸" },
+    { name = "Clover Field", icon = "🍀" },
+    { name = "Strawberry Field", icon = "🍓" },
+    { name = "Spider Field", icon = "🕷️" },
+    { name = "Bamboo Field", icon = "🎋" },
+    { name = "Pineapple Patch", icon = "🍍" },
+    { name = "Stump Field", icon = "🪵" },
+    { name = "Cactus Field", icon = "🌵" },
+    { name = "Pumpkin Patch", icon = "🎃" },
+    { name = "Pine Tree Forest", icon = "🌲" },
+    { name = "Rose Field", icon = "🌹" },
+    { name = "Mountain Top Field", icon = "🏔️" },
+    { name = "Coconut Field", icon = "🥥" },
+    { name = "Pepper Patch", icon = "🌶️" },
+}
 
-local fBindNick = makeField(colNick, "НИКНЕЙМ АККАУНТА", player.Name, "Имя аккаунта")
-local fBindCfg = makeField(colCfg, "ИМЯ КОНФИГА", currentActiveConfig or "gg", "например: gg")
-
-local bindBtnRow = new("Frame", {
-    Size = UDim2.new(1, 0, 0, 34), BackgroundTransparency = 1,
-    LayoutOrder = 23, Parent = PAGE_CONFIGS,
-})
-new("UIListLayout", { FillDirection = Enum.FillDirection.Horizontal, Padding = UDim.new(0, 8), Parent = bindBtnRow })
-
-local bindsContainer = new("Frame", {
-    Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y,
-    BackgroundTransparency = 1, LayoutOrder = 25, Parent = PAGE_CONFIGS,
-})
-new("UIListLayout", {
-    SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0, 4),
-    Parent = bindsContainer,
-})
-
-local function refreshBindsList()
-    for _, child in ipairs(bindsContainer:GetChildren()) do
-        if child:IsA("Frame") then child:Destroy() end
-    end
-    local binds = loadNickBinds()
-    local count = 0
-    for nick, cfg in pairs(binds) do
-        count += 1
-        local item = new("Frame", {
-            Size = UDim2.new(1, 0, 0, 32), BackgroundColor3 = C.card,
-            BorderSizePixel = 0, Parent = bindsContainer,
-        })
-        round(item, 6)
-        stroke(item)
-        new("TextLabel", {
-            Size = UDim2.new(1, -70, 1, 0), Position = UDim2.new(0, 10, 0, 0),
-            BackgroundTransparency = 1,
-            Text = string.format("👤 %s  ➔  📁 %s", nick, cfg),
-            TextColor3 = (string.lower(nick) == string.lower(player.Name)) and C.accent or C.text,
-            Font = Enum.Font.GothamMedium, TextSize = 11,
-            TextXAlignment = Enum.TextXAlignment.Left, Parent = item,
-        })
-        local unbindBtn = new("TextButton", {
-            Size = UDim2.new(0, 56, 0, 22), Position = UDim2.new(1, -62, 0.5, -11),
-            BackgroundColor3 = Color3.fromRGB(100, 40, 40), Text = "Отвязать",
-            TextColor3 = C.text, Font = Enum.Font.GothamBold, TextSize = 9,
-            BorderSizePixel = 0, Parent = item,
-        })
-        round(unbindBtn, 4)
-        unbindBtn.MouseButton1Click:Connect(function()
-            unbindNick(nick)
-            refreshBindsList()
-        end)
-    end
-    if count == 0 then
-        local empty = new("Frame", {
-            Size = UDim2.new(1, 0, 0, 26), BackgroundTransparency = 1,
-            Parent = bindsContainer,
-        })
-        new("TextLabel", {
-            Size = UDim2.new(1, 0, 1, 0), BackgroundTransparency = 1,
-            Text = "Нет активных привязок к никам", TextColor3 = C.dim,
-            Font = Enum.Font.Gotham, TextSize = 10, Parent = empty,
-        })
-    end
-end
-
-makeBtn(bindBtnRow, "🔗 Привязать ник к конфигу", function()
-    local n = fBindNick.Text
-    local c = fBindCfg.Text
-    local ok, msg = bindNickToConfig(n, c)
-    cfgStatusLabel.Text = msg
-    cfgStatusLabel.TextColor3 = ok and C.accent or C.danger
-    refreshBindsList()
-end, C.accent2)
-
-section("АКТИВНЫЕ ПРИВЯЗКИ НИКОВ", 24).Parent = PAGE_CONFIGS
-refreshBindsList()
-
-syncGuiWithConfig = function()
-    pcall(function()
-        if fTag and CONFIG.SELF_TAG ~= nil then fTag.Text = tostring(CONFIG.SELF_TAG) end
-        if fUrl and CONFIG.API_URL ~= nil then fUrl.Text = tostring(CONFIG.API_URL) end
-        if fKey and CONFIG.API_KEY ~= nil then fKey.Text = tostring(CONFIG.API_KEY) end
-        if fViciousChannel and CONFIG.VICIOUS_CHANNEL_ID ~= nil then fViciousChannel.Text = tostring(CONFIG.VICIOUS_CHANNEL_ID) end
-        if fHop and CONFIG.HOP_DELAY ~= nil then fHop.Text = tostring(CONFIG.HOP_DELAY) end
-        if fPoll and CONFIG.POLL_INTERVAL ~= nil then fPoll.Text = tostring(CONFIG.POLL_INTERVAL) end
-        if fWait and CONFIG.BROKEN_WAIT ~= nil then fWait.Text = tostring(CONFIG.BROKEN_WAIT) end
-        if fConn and CONFIG.CONNECT_TIMEOUT ~= nil then fConn.Text = tostring(CONFIG.CONNECT_TIMEOUT) end
-        if fPlace and CONFIG.PLACE_ID ~= nil then fPlace.Text = tostring(CONFIG.PLACE_ID) end
-        if fWalk and CONFIG.WALK_SPEED_MULT ~= nil then fWalk.Text = tostring(CONFIG.WALK_SPEED_MULT) end
-        if fFly and CONFIG.FLY_SPEED ~= nil then fFly.Text = tostring(CONFIG.FLY_SPEED) end
-        if fSprinkler and CONFIG.SPRINKLER_KEYWORD ~= nil then fSprinkler.Text = tostring(CONFIG.SPRINKLER_KEYWORD) end
-        if fSprinklerCount and CONFIG.SPRINKLER_COUNT ~= nil then fSprinklerCount.Text = tostring(CONFIG.SPRINKLER_COUNT) end
-        if fRegion and CONFIG.FARM_REGION ~= nil then fRegion.Text = tostring(CONFIG.FARM_REGION) end
-        if fDigTool and CONFIG.DIG_TOOL_KEYWORD ~= nil then fDigTool.Text = tostring(CONFIG.DIG_TOOL_KEYWORD) end
-        if fSlotKeyword and CONFIG.EMPTY_SLOT_KEYWORD ~= nil then fSlotKeyword.Text = tostring(CONFIG.EMPTY_SLOT_KEYWORD) end
-        if fHoneyKeyword and CONFIG.MY_HIVE_KEYWORD ~= nil then fHoneyKeyword.Text = tostring(CONFIG.MY_HIVE_KEYWORD) end
-        if fCfgName then fCfgName.Text = tostring(currentActiveConfig or "default") end
-        if paintSproutRarity then paintSproutRarity() end
-        if paintPuffRarity then paintPuffRarity() end
-        if saveViciousRange then saveViciousRange() end
-        if applyWalkSpeed then applyWalkSpeed() end
-        if applyAntiLag then applyAntiLag(CONFIG.ANTI_LAG) end
-        if applySuperOptimization then applySuperOptimization(CONFIG.SUPER_OPTIMIZE) end
-        if apply3dRendering then apply3dRendering(CONFIG.DISABLE_3D_RENDERING) end
-        if fDisc and CONFIG.DISCORD_WEBHOOK_URL ~= nil then fDisc.Text = tostring(CONFIG.DISCORD_WEBHOOK_URL) end
-        if fTgToken and CONFIG.TELEGRAM_BOT_TOKEN ~= nil then fTgToken.Text = tostring(CONFIG.TELEGRAM_BOT_TOKEN) end
-        if fTgChat and CONFIG.TELEGRAM_CHAT_ID ~= nil then fTgChat.Text = tostring(CONFIG.TELEGRAM_CHAT_ID) end
-        if fPuffMin and CONFIG.PUFF_MIN_LEVEL ~= nil then fPuffMin.Text = tostring(CONFIG.PUFF_MIN_LEVEL) end
-        if fPuffMax and CONFIG.PUFF_MAX_LEVEL ~= nil then fPuffMax.Text = tostring(CONFIG.PUFF_MAX_LEVEL) end
-        if planterInputFields and CONFIG.PLANTERS_CONFIG then
-            for pName, pInputs in pairs(planterInputFields) do
-                local pCfg = CONFIG.PLANTERS_CONFIG[pName]
-                if pCfg then
-                    if pInputs.field then pInputs.field.Text = tostring(pCfg.field or "Sunflower Field") end
-                    if pInputs.pct then pInputs.pct.Text = tostring(pCfg.percent or 100) end
-                    if pInputs.swBack and pInputs.swKnob then
-                        pInputs.swBack.BackgroundColor3 = pCfg.enabled and C.accent or C.field
-                        pInputs.swKnob.Position = pCfg.enabled and UDim2.new(1, -20, 0.5, -9) or UDim2.new(0, 2, 0.5, -9)
-                    end
-                end
-            end
+local fieldCardButtons = {}
+updateFieldPickerUI = function()
+    local cur = CONFIG.FALLBACK_FARM_FIELD or "None"
+    farmFieldText.Text = (cur == "None") and "None (Wait at spawn)" or cur
+    for _, item in ipairs(ALL_PICKER_FIELDS) do
+        local btnInfo = fieldCardButtons[item.name]
+        if btnInfo then
+            local isSel = (item.name == cur)
+            btnInfo.btn.BackgroundColor3 = isSel and C.cardHi or C.card
+            btnInfo.stroke.Color = isSel and C.accent or C.border
+            btnInfo.check.Visible = isSel
+            btnInfo.nameLabel.TextColor3 = isSel and C.accent or C.text
         end
-        if refreshConfigButtons then refreshConfigButtons() end
-        if refreshBindsList then refreshBindsList() end
-    end)
+    end
 end
 
+for idx, fData in ipairs(ALL_PICKER_FIELDS) do
+    local fBtn = new("TextButton", {
+        BackgroundColor3 = C.card,
+        Text = "",
+        BorderSizePixel = 0,
+        AutoButtonColor = false,
+        LayoutOrder = idx,
+        ZIndex = 103,
+        Parent = pickerList,
+    })
+    round(fBtn, 8)
+    local fStroke = stroke(fBtn, C.border, 1)
+
+    new("TextLabel", {
+        Size = UDim2.new(0, 22, 1, 0),
+        Position = UDim2.new(0, 8, 0, 0),
+        BackgroundTransparency = 1,
+        Text = fData.icon,
+        Font = Enum.Font.GothamBold,
+        TextSize = 13,
+        ZIndex = 104,
+        Parent = fBtn,
+    })
+    local fLbl = new("TextLabel", {
+        Size = UDim2.new(1, -54, 1, 0),
+        Position = UDim2.new(0, 32, 0, 0),
+        BackgroundTransparency = 1,
+        Text = fData.label or fData.name,
+        TextColor3 = C.text,
+        Font = Enum.Font.GothamBold,
+        TextSize = 10,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        TextTruncate = Enum.TextTruncate.AtEnd,
+        ZIndex = 104,
+        Parent = fBtn,
+    })
+    local fChk = new("TextLabel", {
+        Size = UDim2.new(0, 18, 1, 0),
+        Position = UDim2.new(1, -22, 0, 0),
+        BackgroundTransparency = 1,
+        Text = "✓",
+        TextColor3 = C.accent,
+        Font = Enum.Font.GothamBold,
+        TextSize = 12,
+        Visible = false,
+        ZIndex = 104,
+        Parent = fBtn,
+    })
+
+    fBtn.MouseButton1Click:Connect(function()
+        CONFIG.FALLBACK_FARM_FIELD = fData.name
+        saveNow()
+        updateFieldPickerUI()
+        pickerOverlay.Visible = false
+    end)
+
+    fieldCardButtons[fData.name] = { btn = fBtn, stroke = fStroke, nameLabel = fLbl, check = fChk }
+end
+
+local function openFieldPicker()
+    updateFieldPickerUI()
+    pickerOverlay.Visible = true
+end
+farmFieldBtn.MouseButton1Click:Connect(openFieldPicker)
+pickerCloseBtn.MouseButton1Click:Connect(function() pickerOverlay.Visible = false end)
+pickerOverlay.MouseButton1Click:Connect(function() pickerOverlay.Visible = false end)
+
+-- ══════════════════════════════════════════════════════════════════════
+--  TAB NAVIGATION LOGIC
+-- ══════════════════════════════════════════════════════════════════════
 local pages = {
     main = PAGE_HOME,
     sprouts = PAGE_SPROUTS,
-    settings = pageSettings,
-    configs = PAGE_CONFIGS,
-    vicious = PAGE_VICIOUS,
-    puffshrooms = PAGE_PUFF,
-    windy_meteors = PAGE_WINDY,
-    webhooks = PAGE_WEBHOOKS,
-    planters = PAGE_PLANTERS,
+    planters_mobs = PAGE_PLANTERS_MOBS,
+    settings = PAGE_SETTINGS,
 }
-
-local settingsOpen = false
 
 showPage = function(which)
     if not pages[which] then which = "main" end
     for key, pg in pairs(pages) do pg.Visible = (key == which) end
-    settingsOpen = (which == "settings")
     for key, t in pairs(tabButtons) do
         local on = (key == which)
         t.bar.Visible = on
-        t.btn.BackgroundColor3 = on and C.cardHi or C.panel
+        t.btn.BackgroundColor3 = on and C.cardHover or C.sidebar
         t.icon.TextColor3 = on and C.accent or C.dim
         t.label.TextColor3 = on and C.text or C.dim
     end
@@ -9920,37 +9463,32 @@ showPage = function(which)
 end
 
 for key, t in pairs(tabButtons) do
-    if not t.locked then
-        t.btn.MouseButton1Click:Connect(function()
-            if not isOpen then setWindow(true) end
-            showPage(key)
-        end)
-    end
+    t.btn.MouseButton1Click:Connect(function()
+        if not isOpen then setWindow(true) end
+        showPage(key)
+    end)
 end
 
-gearBtn.MouseButton1Click:Connect(function()
-    if not isOpen then setWindow(true) end
-    showPage("settings")
-end)
-
+-- ══════════════════════════════════════════════════════════════════════
+--  INPUTS & WINDOW CONTROLS
+-- ══════════════════════════════════════════════════════════════════════
 snake.MouseButton1Click:Connect(function() Hopper.Toggle() end)
 
 local function openMenu()
     if not isOpen then setWindow(true) end
     showPage("main")
 end
-
 snake.MouseButton2Click:Connect(openMenu)
 
 UserInputService.InputBegan:Connect(function(input, processed)
     if processed then return end
-    if input.UserInputType ~= Enum.UserInputType.MouseButton2 then return end
-    local ok, center = pcall(function()
-        return snake.AbsolutePosition + snake.AbsoluteSize/2
-    end)
-    if not ok or not center then return end
-    local radius = math.max(snake.AbsoluteSize.X, snake.AbsoluteSize.Y)/2 + 8
-    if (Vector2.new(input.Position.X, input.Position.Y) - center).Magnitude <= radius then openMenu() end
+    if input.UserInputType == Enum.UserInputType.MouseButton2 then
+        local ok, center = pcall(function() return snake.AbsolutePosition + snake.AbsoluteSize/2 end)
+        if ok and center then
+            local radius = math.max(snake.AbsoluteSize.X, snake.AbsoluteSize.Y)/2 + 8
+            if (Vector2.new(input.Position.X, input.Position.Y) - center).Magnitude <= radius then openMenu() end
+        end
+    end
 end)
 
 UserInputService.InputBegan:Connect(function(inp, gpe)
@@ -9965,13 +9503,13 @@ closeBtn.MouseButton1Click:Connect(function() setWindow(false) end)
 setWindow = function(show)
     isOpen = show
     TweenService:Create(win,
-        TweenInfo.new(0.3, Enum.EasingStyle.Quart,
+        TweenInfo.new(0.25, Enum.EasingStyle.Quart,
             show and Enum.EasingDirection.Out or Enum.EasingDirection.In),
         { Size = UDim2.new(0, WIN_W, 0, show and WIN_H or HEADER_H) }):Play()
     sidebar.Visible = show
     content.Visible = show
-    hint.Text = show and "ЛКМ — вкл/выкл   •   ПКМ/F — меню"
-        or "Нажми на заголовок чтобы развернуть"
+    hint.Text = show and "LMB: Toggle Bot  •  RMB / F: Menu  •  P: Pause"
+        or "Click floating icon to expand menu"
     uiState.winOpen = show
     saveNow()
 end
@@ -10026,6 +9564,24 @@ do
     end)
 end
 
+-- ══════════════════════════════════════════════════════════════════════
+--  SYNC GUI WITH CONFIG & REFRESH
+-- ══════════════════════════════════════════════════════════════════════
+syncGuiWithConfig = function()
+    pcall(function()
+        if fDigTool and CONFIG.DIG_TOOL_KEYWORD ~= nil then fDigTool.Text = tostring(CONFIG.DIG_TOOL_KEYWORD) end
+        if fBurstTime and CONFIG.BURST_LOOT_TIME ~= nil then fBurstTime.Text = tostring(CONFIG.BURST_LOOT_TIME) end
+        if fWindyH and CONFIG.WINDY_HOVER_HEIGHT ~= nil then fWindyH.Text = tostring(CONFIG.WINDY_HOVER_HEIGHT) end
+        if fDisc and CONFIG.DISCORD_WEBHOOK_URL ~= nil then fDisc.Text = tostring(CONFIG.DISCORD_WEBHOOK_URL) end
+        if fTgToken and CONFIG.TELEGRAM_BOT_TOKEN ~= nil then fTgToken.Text = tostring(CONFIG.TELEGRAM_BOT_TOKEN) end
+        if fTgChat and CONFIG.TELEGRAM_CHAT_ID ~= nil then fTgChat.Text = tostring(CONFIG.TELEGRAM_CHAT_ID) end
+        if fRepInterval and CONFIG.PERIODIC_REPORT_INTERVAL ~= nil then fRepInterval.Text = tostring(CONFIG.PERIODIC_REPORT_INTERVAL) end
+        if fMaxP and CONFIG.MAX_PLAYERS ~= nil then fMaxP.Text = tostring(CONFIG.MAX_PLAYERS) end
+        if fCfgName then fCfgName.Text = tostring(currentActiveConfig or "default") end
+        if updateFieldPickerUI then updateFieldPickerUI() end
+    end)
+end
+
 refresh = function()
     for k, v in pairs(modeButtons) do
         local on = (k == lastMode and Hopper.Mode ~= nil)
@@ -10033,38 +9589,24 @@ refresh = function()
         v.btn.BackgroundColor3 = on and C.cardHi or C.card
         v.title.TextColor3 = on and C.accent or C.text
         if v.outline then
-            v.outline.Color = on and C.accent2 or Color3.fromRGB(55,72,79)
+            v.outline.Color = on and C.accent or C.border
             v.outline.Thickness = on and 1.5 or 1
-            v.outline.Transparency = on and 0.05 or 0.22
+            v.outline.Transparency = on and 0.05 or 0.2
         end
     end
 
     dot.BackgroundColor3 = Hopper.Mode and C.accent or C.danger
     if readyPill then
-        local pillLabel = readyPill:FindFirstChildWhichIsA("TextLabel")
-        if pillLabel then
-            local text = Hopper.Mode and "Система активна" or "Система готова"
-            if _G.BSS_BYPASS_ACTIVE and text == "Система готова" then
-                text = "Bypass активен"
-            end
-            pillLabel.Text = text
-            pillLabel.TextColor3 = Hopper.Mode and C.accent or C.dim
-        end
-    end
-
-    local meta = MODE_META[lastMode]
-    if Hopper.Mode and meta then
-        subTitle.Text = meta.icon .. "  " .. meta.name .. " — " .. meta.desc
-        subTitle.TextColor3 = C.accent
-    else
-        subTitle.Text = "Выключено — ЛКМ по змейке чтобы включить"
-        subTitle.TextColor3 = C.dim
+        local isActive = (Hopper.Mode ~= nil)
+        pillLabel.Text = isActive and "ACTIVE" or "IDLE"
+        pillLabel.TextColor3 = isActive and C.accent or C.dim
+        pillDot.BackgroundColor3 = isActive and C.accent or C.danger
     end
 
     if not Hopper.Mode then
-        statusVal.Text = "Остановлено"
+        statusVal.Text = "Stopped"
         statusVal.TextColor3 = C.dim
-        lastVal.Text = "—"
+        lastVal.Text = "None"
         lastVal.TextColor3 = C.dim
         return
     end
@@ -10072,37 +9614,17 @@ refresh = function()
     local s = Hopper.Mode:GetStats()
     local st = s.currentStatus or ""
 
-    if vicMetric then
-        local vf = s.viciousFound or 0
-        if vf > 0 then
-            local lv = s.lastVicious
-            vicMetric.Text = string.format("Найдено Vicious: %d   •   последнее: %s (%s)",
-                vf, tostring(lv and lv.fieldName or "?"),
-                tostring(lv and lv.kind or "?"))
-            vicMetric.TextColor3 = C.accent
-        else
-            vicMetric.Text = "Vicious ещё не найдено"
-            vicMetric.TextColor3 = C.dim
-        end
-    end
-
-    if settingsOpen then return end
-
     statusVal.Text = st
-    statusVal.TextColor3 = (string.find(st,"Ошибка",1,true)
-        or string.find(st,"не дошёл",1,true)) and C.danger or C.accent
+    statusVal.TextColor3 = (string.find(st,"Error",1,true) or string.find(st,"failed",1,true)) and C.danger or C.accent
 
     if s.lastTask then
-        lastVal.Text = string.format("%s   •   %s   •   %ds назад",
-            tostring(s.lastTask.fieldName or "?"),
-            tostring(s.lastTask.jobId or ""):sub(1, 14),
-            s.lastTask.age or 0)
+        lastVal.Text = string.format("%s • %ds ago", tostring(s.lastTask.fieldName or "?"), s.lastTask.age or 0)
         lastVal.TextColor3 = C.warn
     elseif s.lastSprout then
-        lastVal.Text = tostring(s.lastSprout.fieldName or "спрут")
+        lastVal.Text = tostring(s.lastSprout.fieldName or "Sprout")
         lastVal.TextColor3 = C.accent
     else
-        lastVal.Text = "Пока нет данных"
+        lastVal.Text = "Searching..."
         lastVal.TextColor3 = C.dim
     end
 end
@@ -10120,6 +9642,7 @@ task.spawn(function()
     end
 end)
 end)
+
 
 if not guiOk then showFatal(guiErr) end
 
