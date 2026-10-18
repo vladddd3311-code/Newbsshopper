@@ -9096,11 +9096,115 @@ for rIdx, rInfo in ipairs(sproutRarities) do
     end)
 end
 
-section(PAGE_SPROUTS, "Excavation & Tool", 20)
-makeToggle(PAGE_SPROUTS, "Auto Dig Tool", "Automatically swing collector tool on fields", CONFIG.ENABLE_AUTO_DIG ~= false, 21, function(v)
+section(PAGE_SPROUTS, "Sprout Token Priorities", 20)
+new("TextLabel", {
+    Size = UDim2.new(1, 0, 0, 26),
+    BackgroundTransparency = 1,
+    Text = "Cycle priority: [ P1: Top ] -> [ P2: Mid ] -> [ P3: Low ] -> [ OFF ].\nP1 = Top loot (burst collected), P2 = Medium, P3 = Low, OFF = Ignored.",
+    TextColor3 = C.dim,
+    Font = Enum.Font.Gotham,
+    TextSize = 9,
+    TextWrapped = true,
+    TextXAlignment = Enum.TextXAlignment.Left,
+    LayoutOrder = 21,
+    Parent = PAGE_SPROUTS,
+})
+
+local tokensContainer = new("Frame", {
+    Size = UDim2.new(1, 0, 0, 0),
+    AutomaticSize = Enum.AutomaticSize.Y,
+    BackgroundTransparency = 1,
+    LayoutOrder = 22,
+    Parent = PAGE_SPROUTS,
+})
+new("UIListLayout", {
+    SortOrder = Enum.SortOrder.LayoutOrder,
+    Padding = UDim.new(0, 4),
+    Parent = tokensContainer,
+})
+
+local prioLabels = {
+    [1] = "[ P1: Top ]",
+    [2] = "[ P2: Mid ]",
+    [3] = "[ P3: Low ]",
+    [0] = "[ OFF ]",
+}
+local prioColors = {
+    [1] = Color3.fromRGB(255, 215, 0),
+    [2] = Color3.fromRGB(105, 190, 255),
+    [3] = Color3.fromRGB(175, 180, 195),
+    [0] = Color3.fromRGB(255, 85, 85),
+}
+local prioBgColors = {
+    [1] = Color3.fromRGB(48, 42, 24),
+    [2] = Color3.fromRGB(24, 38, 52),
+    [3] = Color3.fromRGB(28, 30, 40),
+    [0] = Color3.fromRGB(45, 20, 25),
+}
+
+CONFIG.TOKEN_PRIORITIES = CONFIG.TOKEN_PRIORITIES or {}
+
+for idx, item in ipairs(TOKEN_REGISTRY) do
+    local curPrio = CONFIG.TOKEN_PRIORITIES[item.id]
+    if curPrio == nil then curPrio = item.defaultPrio end
+
+    local row = new("Frame", {
+        Size = UDim2.new(1, 0, 0, 30),
+        BackgroundColor3 = C.card,
+        BorderSizePixel = 0,
+        LayoutOrder = idx,
+        Parent = tokensContainer,
+    })
+    round(row, 6)
+    stroke(row, C.border, 1)
+
+    new("TextLabel", {
+        Size = UDim2.new(1, -95, 1, 0),
+        Position = UDim2.new(0, 10, 0, 0),
+        BackgroundTransparency = 1,
+        Text = (item.icon or "✨") .. "  " .. item.name,
+        TextColor3 = C.text,
+        Font = Enum.Font.GothamMedium,
+        TextSize = 10,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        TextYAlignment = Enum.TextYAlignment.Center,
+        TextTruncate = Enum.TextTruncate.AtEnd,
+        Parent = row,
+    })
+
+    local pBtn = new("TextButton", {
+        Size = UDim2.new(0, 80, 0, 20),
+        Position = UDim2.new(1, -88, 0.5, -10),
+        BackgroundColor3 = prioBgColors[curPrio] or C.field,
+        Text = prioLabels[curPrio] or ("[ P" .. tostring(curPrio) .. " ]"),
+        TextColor3 = prioColors[curPrio] or C.text,
+        Font = Enum.Font.GothamBold,
+        TextSize = 9,
+        BorderSizePixel = 0,
+        AutoButtonColor = false,
+        Parent = row,
+    })
+    round(pBtn, 4)
+    local pBtnStroke = stroke(pBtn, prioColors[curPrio] or C.dim, 1)
+
+    pBtn.MouseButton1Click:Connect(function()
+        local nowP = CONFIG.TOKEN_PRIORITIES[item.id]
+        if nowP == nil then nowP = item.defaultPrio end
+        local nextP = (nowP == 1 and 2) or (nowP == 2 and 3) or (nowP == 3 and 0) or 1
+        CONFIG.TOKEN_PRIORITIES[item.id] = nextP
+        saveNow()
+        pBtn.Text = prioLabels[nextP] or ("[ P" .. tostring(nextP) .. " ]")
+        pBtn.TextColor3 = prioColors[nextP] or C.text
+        pBtn.BackgroundColor3 = prioBgColors[nextP] or C.field
+        pBtnStroke.Color = prioColors[nextP] or C.dim
+    end)
+end
+
+section(PAGE_SPROUTS, "Excavation & Tool", 40)
+makeToggle(PAGE_SPROUTS, "Auto Dig Tool", "Automatically swing collector tool on fields", CONFIG.ENABLE_AUTO_DIG ~= false, 41, function(v)
     CONFIG.ENABLE_AUTO_DIG = v; saveNow()
 end)
-local fDigTool = makeField(PAGE_SPROUTS, "Dig Tool Keyword", CONFIG.DIG_TOOL_KEYWORD or "scooper", "scooper", 22, function(val)
+local fDigTool = makeField(PAGE_SPROUTS, "Dig Tool Keyword", CONFIG.DIG_TOOL_KEYWORD or "scooper", "scooper", 42, function(val)
     if val and val ~= "" then CONFIG.DIG_TOOL_KEYWORD = val; saveNow() end
 end)
 
@@ -9130,17 +9234,144 @@ section(PAGE_PLANTERS_MOBS, "Bosses & Events", 10)
 makeToggle(PAGE_PLANTERS_MOBS, "Hunt Vicious Bee", "Defeat Vicious Bee whenever spawned", CONFIG.CHECK_VICIOUS ~= false, 11, function(v)
     CONFIG.CHECK_VICIOUS = v; saveNow()
 end)
-makeToggle(PAGE_PLANTERS_MOBS, "Loot Meteor Shower", "Collect falling meteor tokens on target fields", CONFIG.CHECK_METEORS ~= false, 12, function(v)
+
+local VICIOUS_FIELD_NAMES = { "Clover", "Spider", "Cactus", "Mountain Top", "Pepper Patch" }
+local vicFrom = math.clamp(math.floor(tonumber(CONFIG.VICIOUS_FIELD_FROM) or 1), 1, 5)
+local vicTo = math.clamp(math.floor(tonumber(CONFIG.VICIOUS_FIELD_TO) or 5), 1, 5)
+if vicFrom > vicTo then vicFrom, vicTo = vicTo, vicFrom end
+CONFIG.VICIOUS_FIELD_FROM, CONFIG.VICIOUS_FIELD_TO = vicFrom, vicTo
+
+local vicCard = new("Frame", {
+    Size = UDim2.new(1, 0, 0, 142),
+    BackgroundColor3 = C.card,
+    BorderSizePixel = 0,
+    LayoutOrder = 12,
+    Parent = PAGE_PLANTERS_MOBS,
+})
+round(vicCard, 8)
+stroke(vicCard, C.border, 1)
+
+new("TextLabel", {
+    Size = UDim2.new(1, -20, 0, 16),
+    Position = UDim2.new(0, 12, 0, 8),
+    BackgroundTransparency = 1,
+    Text = "VICIOUS BEE FIELD RANGE",
+    TextColor3 = C.dim,
+    Font = Enum.Font.GothamBold,
+    TextSize = 9,
+    TextXAlignment = Enum.TextXAlignment.Left,
+    Parent = vicCard,
+})
+
+local vicSummary = new("TextLabel", {
+    Size = UDim2.new(1, -20, 0, 16),
+    Position = UDim2.new(0, 12, 0, 24),
+    BackgroundTransparency = 1,
+    Text = "Allowed: " .. vicFrom .. "★ - " .. vicTo .. "★ (" .. VICIOUS_FIELD_NAMES[vicFrom] .. " to " .. VICIOUS_FIELD_NAMES[vicTo] .. ")",
+    TextColor3 = C.accent,
+    Font = Enum.Font.GothamBold,
+    TextSize = 10,
+    TextXAlignment = Enum.TextXAlignment.Left,
+    Parent = vicCard,
+})
+
+local function updateVicSummary()
+    vicSummary.Text = "Allowed: " .. vicFrom .. "★ - " .. vicTo .. "★ (" .. VICIOUS_FIELD_NAMES[vicFrom] .. " to " .. VICIOUS_FIELD_NAMES[vicTo] .. ")"
+end
+
+local function makeVicStarSelector(parentLabel, yPos, curVal, onSelect)
+    new("TextLabel", {
+        Size = UDim2.new(0, 100, 0, 24),
+        Position = UDim2.new(0, 12, 0, yPos),
+        BackgroundTransparency = 1,
+        Text = parentLabel,
+        TextColor3 = C.text,
+        Font = Enum.Font.GothamMedium,
+        TextSize = 10,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        Parent = vicCard,
+    })
+    local starBtns = {}
+    for i = 1, 5 do
+        local isSel = (i == curVal)
+        local sb = new("TextButton", {
+            Size = UDim2.new(0, 44, 0, 24),
+            Position = UDim2.new(0, 115 + (i - 1) * 48, 0, yPos),
+            BackgroundColor3 = isSel and C.accent or C.field,
+            Text = string.rep("★", i),
+            TextColor3 = isSel and Color3.fromRGB(20, 25, 35) or C.dim,
+            Font = Enum.Font.GothamBold,
+            TextSize = 9,
+            BorderSizePixel = 0,
+            AutoButtonColor = false,
+            Parent = vicCard,
+        })
+        round(sb, 5)
+        local sbStroke = stroke(sb, isSel and C.accent or C.border, 1)
+        sb.MouseButton1Click:Connect(function()
+            for sIdx, bData in ipairs(starBtns) do
+                local active = (sIdx == i)
+                bData.btn.BackgroundColor3 = active and C.accent or C.field
+                bData.btn.TextColor3 = active and Color3.fromRGB(20, 25, 35) or C.dim
+                bData.stroke.Color = active and C.accent or C.border
+            end
+            onSelect(i)
+        end)
+        starBtns[i] = { btn = sb, stroke = sbStroke }
+    end
+end
+
+makeVicStarSelector("Min Field (From):", 46, vicFrom, function(val)
+    vicFrom = val
+    if vicFrom > vicTo then vicTo = vicFrom end
+    CONFIG.VICIOUS_FIELD_FROM = vicFrom
+    CONFIG.VICIOUS_FIELD_TO = vicTo
+    saveNow()
+    updateVicSummary()
+end)
+
+makeVicStarSelector("Max Field (To):", 76, vicTo, function(val)
+    vicTo = val
+    if vicTo < vicFrom then vicFrom = vicTo end
+    CONFIG.VICIOUS_FIELD_FROM = vicFrom
+    CONFIG.VICIOUS_FIELD_TO = vicTo
+    saveNow()
+    updateVicSummary()
+end)
+
+new("TextLabel", {
+    Size = UDim2.new(1, -20, 0, 20),
+    Position = UDim2.new(0, 12, 0, 110),
+    BackgroundTransparency = 1,
+    Text = "1★ Clover  |  2★ Spider  |  3★ Cactus  |  4★ Mountain Top  |  5★ Pepper",
+    TextColor3 = C.dim,
+    Font = Enum.Font.Gotham,
+    TextSize = 9,
+    TextXAlignment = Enum.TextXAlignment.Left,
+    Parent = vicCard,
+})
+
+local fVicH = makeField(PAGE_PLANTERS_MOBS, "Vicious Bee Hover Height (studs)", CONFIG.VICIOUS_HOVER_HEIGHT or 6, "6", 13, function(val)
+    local n = tonumber(val)
+    if n and n >= 3 and n <= 15 then CONFIG.VICIOUS_HOVER_HEIGHT = n; saveNow() end
+end)
+
+local fVicChannel = makeField(PAGE_PLANTERS_MOBS, "Discord Channel ID (Vicious Alerts)", CONFIG.VICIOUS_CHANNEL_ID or "", "Channel ID", 14, function(val)
+    CONFIG.VICIOUS_CHANNEL_ID = val
+    saveNow()
+end)
+
+makeToggle(PAGE_PLANTERS_MOBS, "Loot Meteor Shower", "Collect falling meteor tokens on target fields", CONFIG.CHECK_METEORS ~= false, 15, function(v)
     CONFIG.CHECK_METEORS = v; saveNow()
 end)
-makeToggle(PAGE_PLANTERS_MOBS, "Hunt Windy Bee in Cloud", "Fly up and battle wild Windy Bee", CONFIG.CHECK_WINDY ~= false, 13, function(v)
+makeToggle(PAGE_PLANTERS_MOBS, "Hunt Windy Bee in Cloud", "Fly up and battle wild Windy Bee", CONFIG.CHECK_WINDY ~= false, 16, function(v)
     CONFIG.CHECK_WINDY = v; saveNow()
 end)
-local fWindyH = makeField(PAGE_PLANTERS_MOBS, "Windy Bee Hover Height (studs)", CONFIG.WINDY_HOVER_HEIGHT or 32, "32", 14, function(val)
+local fWindyH = makeField(PAGE_PLANTERS_MOBS, "Windy Bee Hover Height (studs)", CONFIG.WINDY_HOVER_HEIGHT or 32, "32", 17, function(val)
     local n = tonumber(val)
     if n and n >= 15 and n <= 60 then CONFIG.WINDY_HOVER_HEIGHT = n; saveNow() end
 end)
-makeToggle(PAGE_PLANTERS_MOBS, "Farm Puffshrooms", "Pop puffshrooms and gather rare spores", CONFIG.CHECK_PUFFSHROOMS ~= false, 15, function(v)
+makeToggle(PAGE_PLANTERS_MOBS, "Farm Puffshrooms", "Pop puffshrooms and gather rare spores", CONFIG.CHECK_PUFFSHROOMS ~= false, 18, function(v)
     CONFIG.CHECK_PUFFSHROOMS = v; saveNow()
 end)
 
@@ -9464,7 +9695,7 @@ showPage = function(which)
         t.label.TextColor3 = on and C.text or C.dim
     end
     content.CanvasPosition = Vector2.new(0, 0)
-    refresh()
+    if refresh then pcall(refresh) end
 end
 
 for key, t in pairs(tabButtons) do
