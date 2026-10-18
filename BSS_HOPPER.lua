@@ -2114,10 +2114,21 @@ function findActiveMeteors()
         local m = h:FindFirstChild("Meteors") or h:FindFirstChild("MeteorShower")
         if m and #m:GetChildren() > 0 then return m end
     end
+    local pFolder = Workspace:FindFirstChild("Particles")
+    if pFolder then
+        for _, c in ipairs(pFolder:GetChildren()) do
+            local cn = string.lower(c.Name)
+            if string.find(cn, "warning", 1, true) or string.find(cn, "disk", 1, true) or string.find(cn, "meteor", 1, true) then
+                return c
+            end
+        end
+    end
     for _, child in ipairs(Workspace:GetChildren()) do
         local cn = string.lower(child.Name)
-        if string.find(cn, "meteor", 1, true) or string.find(cn, "impact", 1, true) then
-            return child
+        if (string.find(cn, "meteor", 1, true) or string.find(cn, "impact", 1, true)) and not string.find(cn, "meteorshoweritem", 1, true) then
+            if #child:GetChildren() > 0 or child:IsA("BasePart") then
+                return child
+            end
         end
     end
     return nil
@@ -2142,94 +2153,123 @@ function findMeteorFields()
     local seen = {}
     local function checkPos(pos)
         if not pos then return end
-        local fName = getFieldForPos(pos, 40)
+        local zones = Workspace:FindFirstChild("FlowerZones")
+        if zones then
+            for _, zone in ipairs(zones:GetChildren()) do
+                if zone:IsA("BasePart") then
+                    local lp = zone.CFrame:PointToObjectSpace(pos)
+                    local half = zone.Size * 0.5
+                    if math.abs(lp.X) <= half.X + 25 and math.abs(lp.Z) <= half.Z + 25 then
+                        local fName = zone.Name
+                        if fName and not seen[fName] then
+                            seen[fName] = true
+                            table.insert(fieldsFound, fName)
+                        end
+                        return
+                    end
+                end
+            end
+        end
+        local fName = getFieldForPos(pos, 50)
         if fName and not seen[fName] then
             seen[fName] = true
             table.insert(fieldsFound, fName)
         end
     end
 
-    local mFolder = Workspace:FindFirstChild("Meteors") or (Workspace:FindFirstChild("Happenings") and Workspace.Happenings:FindFirstChild("Meteors"))
+    local mFolder = Workspace:FindFirstChild("Meteors") or (Workspace:FindFirstChild("Happenings") and (Workspace.Happenings:FindFirstChild("Meteors") or Workspace.Happenings:FindFirstChild("MeteorShower")))
     if mFolder then
         for _, m in ipairs(mFolder:GetChildren()) do
             checkPos(worldPos(m))
         end
     end
+    local pFolder = Workspace:FindFirstChild("Particles")
+    if pFolder then
+        for _, d in ipairs(pFolder:GetChildren()) do
+            local cn = string.lower(d.Name)
+            if string.find(cn, "warning", 1, true) or string.find(cn, "disk", 1, true) or string.find(cn, "meteor", 1, true) then
+                checkPos(worldPos(d))
+            end
+        end
+    end
     for _, child in ipairs(Workspace:GetChildren()) do
         local cn = string.lower(child.Name)
-        if string.find(cn, "meteor", 1, true) or string.find(cn, "impact", 1, true) then
+        if (string.find(cn, "meteor", 1, true) or string.find(cn, "impact", 1, true)) and not string.find(cn, "meteorshoweritem", 1, true) then
             checkPos(worldPos(child))
+            for _, gc in ipairs(child:GetChildren()) do
+                checkPos(worldPos(gc))
+            end
         end
     end
     return fieldsFound
 end
 
 function lootMeteorShower(meteors)
-    log("Meteor", "☄️ Обнаружен Meteor Shower (3 раунда на 3 полях)! Начинаю целевой сбор...")
-    notifyAllWebhooks("Метеоритный дождь!", "На сервере идет Meteor Shower (3 раунда на 3 полях)! Бот облетает поля и собирает все награды.", "ffaa00")
+    log("Meteor", "☄️ Обнаружен Meteor Shower! Начинаю целевой сбор метеоритов...")
+    notifyAllWebhooks("Метеоритный дождь!", "На сервере идет Meteor Shower! Бот облетает поля и собирает все метеоритные награды.", "ffaa00")
     local showerStart = os.clock()
     local roundsDone = 0
 
-    while alive() and (os.clock() - showerStart < 140) and (roundsDone < 3) do
+    while alive() and (os.clock() - showerStart < 150) do
         local activeFields = findMeteorFields()
         if #activeFields == 0 then
-            task.wait(2.5)
-            activeFields = findMeteorFields()
-            if #activeFields == 0 then
+            if not findActiveMeteors() and (os.clock() - showerStart > 15) then
                 break
             end
+            task.wait(1.5)
+            activeFields = findMeteorFields()
         end
 
-        roundsDone = roundsDone + 1
-        log("Meteor", string.format("☄️ Раунд %d/3! Метеоры падают на полях: %s", roundsDone, table.concat(activeFields, ", ")))
+        if #activeFields > 0 then
+            roundsDone = roundsDone + 1
+            log("Meteor", string.format("☄️ Метеоры на полях: %s (раунд %d)", table.concat(activeFields, ", "), roundsDone))
 
-        for idx, fName in ipairs(activeFields) do
-            if idx > 3 then break end
-            local zPart = getFieldPart(fName)
-            local root = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
-            if zPart and root and alive() then
-                local safeGround = getGroundPos(zPart.Position)
-                log("Meteor", string.format("⚡ [Fast to Shower Tween 400] Перелет на поле [%d/3]: %s...", idx, fName))
+            for idx, fName in ipairs(activeFields) do
+                if not alive() then break end
+                local zPart = getFieldPart(fName)
+                local root = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
+                if zPart and root and alive() then
+                    local safeGround = getGroundPos(zPart.Position)
+                    log("Meteor", string.format("⚡ Перелет на метеоритное поле: %s...", fName))
+                    moveRootToPosition(root, safeGround, 25)
 
-                -- Атлас БСС метод: сверхбыстрый линейный твин со скоростью 400 прямо к полю
-                local dist = (safeGround - root.Position).Magnitude
-                local twTime = math.max(0.025, dist / 400)
-                local tw = TweenService:Create(root, TweenInfo.new(twTime, Enum.EasingStyle.Linear, Enum.EasingDirection.Out), {
-                    CFrame = CFrame.new(safeGround) * root.CFrame.Rotation
-                })
-                tw:Play()
-                tw.Completed:Wait()
-
-                -- Поиск точек падения метеоров (WarningDisk в Particles)
-                local fieldTarget = zPart.Position
-                local pFolder = Workspace:FindFirstChild("Particles")
-                if pFolder then
-                    for _, disk in ipairs(pFolder:GetChildren()) do
-                        if disk.Name == "WarningDisk" and disk:IsA("BasePart") then
-                            local dPos = disk.Position
-                            if (dPos - fieldTarget).Magnitude < 45 then
-                                local targetG = Vector3.new(dPos.X, safeGround.Y, dPos.Z)
-                                local dDist = (targetG - root.Position).Magnitude
-                                local dTw = TweenService:Create(root, TweenInfo.new(math.max(0.025, dDist / 400), Enum.EasingStyle.Linear, Enum.EasingDirection.Out), {
-                                    CFrame = CFrame.new(targetG) * root.CFrame.Rotation
-                                })
-                                dTw:Play()
-                                dTw.Completed:Wait()
+                    -- Собираем падающие осколки и токены
+                    local t0 = os.clock()
+                    while alive() and (os.clock() - t0 < 12) do
+                        local pFolder = Workspace:FindFirstChild("Particles")
+                        if pFolder then
+                            for _, disk in ipairs(pFolder:GetChildren()) do
+                                local dn = string.lower(disk.Name)
+                                if (string.find(dn, "warning", 1, true) or string.find(dn, "disk", 1, true) or string.find(dn, "meteor", 1, true)) then
+                                    local dPos = worldPos(disk)
+                                    if dPos then
+                                        local d2 = (Vector3.new(dPos.X, 0, dPos.Z) - Vector3.new(safeGround.X, 0, safeGround.Z)).Magnitude
+                                        if d2 < 70 then
+                                            local targetG = Vector3.new(dPos.X, safeGround.Y, dPos.Z)
+                                            moveRootToPosition(root, targetG, 4)
+                                            task.wait(0.1)
+                                        end
+                                    end
+                                end
                             end
                         end
+                        collectTokensFor(2.5, function() return not alive() end, safeGround)
                     end
                 end
-
-                collectTokensFor(7, function() return not alive() end, safeGround)
             end
+        else
+            collectTokensFor(5, function() return not alive() end)
         end
 
-        task.wait(1.5)
+        task.wait(1)
+        if not findActiveMeteors() and (os.clock() - showerStart > 25) then
+            break
+        end
     end
 
-    log("Meteor", "Все 3 раунда метеоритного дождя завершены! Финальный сбор токенов 10 секунд...")
-    collectTokensFor(10, function() return not alive() end)
-    notifyAllWebhooks("Метеориты собраны!", "Все 3 раунда метеоритного дождя успешно залутаны!", "00f5a0")
+    log("Meteor", "Метеоритный дождь завершен! Финальный сбор токенов 12 секунд...")
+    collectTokensFor(12, function() return not alive() end)
+    notifyAllWebhooks("Метеориты собраны!", "Метеоритный дождь успешно залутан!", "00f5a0")
     return true
 end
 
@@ -3834,15 +3874,16 @@ function pruneFailures()
     end
 end
 
--- Черный список последних посещенных серверов (Blacklist до 1000 серверов)
-local VISITED_SERVERS_FILE = "bss_recent_servers.json"
+-- Черный список последних посещенных серверов (Blacklist до 1000 серверов, изолирован для каждого аккаунта)
+local visitedGlobalKey = "BSS_VISITED_" .. tostring(player and player.UserId or "local")
+local VISITED_SERVERS_FILE = "bss_visited_" .. tostring(player and player.UserId or "local") .. ".json"
 local recentVisitedServers = {}
 local visitedServersSet = {}
 
 function loadRecentVisited()
     pcall(function()
-        if _G.BSS_VISITED_SERVERS and type(_G.BSS_VISITED_SERVERS) == "table" then
-            recentVisitedServers = _G.BSS_VISITED_SERVERS
+        if _G[visitedGlobalKey] and type(_G[visitedGlobalKey]) == "table" then
+            recentVisitedServers = _G[visitedGlobalKey]
         elseif HAS_FS and isfile and isfile(VISITED_SERVERS_FILE) then
             local raw = readfile(VISITED_SERVERS_FILE)
             local decoded = HttpService:JSONDecode(raw)
@@ -3870,7 +3911,7 @@ function addVisitedServer(jobId)
         local removed = table.remove(recentVisitedServers)
         if removed then visitedServersSet[normalizeJobId(removed)] = nil end
     end
-    _G.BSS_VISITED_SERVERS = recentVisitedServers
+    _G[visitedGlobalKey] = recentVisitedServers
     pcall(function()
         if HAS_FS and writefile then
             writefile(VISITED_SERVERS_FILE, HttpService:JSONEncode(recentVisitedServers))
@@ -3978,7 +4019,7 @@ function resetRejoinTries() if rejoinTries > 0 then rejoinTries = 0 end end
 function markTeleport(j) pendingTarget = j; pendingAt = os.clock(); resetRejoinTries() end
 function clearTeleport() pendingTarget = nil; pendingAt = 0 end
 
-function hopTo(jobId, placeId)
+function hopTo(jobId, placeId, isTaskHop)
     -- Защита от блокировки прыжка: если рюкзак пуст, флаг конвертации сбрасывается
     if isConvertingHoney then
         local bp = getBackpackPollen()
@@ -3992,8 +4033,12 @@ function hopTo(jobId, placeId)
 
     local normTarget = normalizeJobId(jobId)
     local normCurrent = normalizeJobId(game.JobId)
-    if not jobId or jobId == "" or normTarget == "" or normTarget == normCurrent or isVisitedServer(jobId) then
-        log("Телепорт", string.format("СТРОГИЙ ЗАПРЕТ: Сервер %s уже посещался или является текущим! Отмена телепорта.", tostring(jobId):sub(1, 12)))
+    if not jobId or jobId == "" or normTarget == "" or normTarget == normCurrent then
+        log("Телепорт", "Отмена: попытка прыжка на текущий же сервер!")
+        return false
+    end
+    if not isTaskHop and isVisitedServer(jobId) then
+        log("Телепорт", string.format("СТРОГИЙ ЗАПРЕТ: Сервер %s уже посещался! Отмена телепорта.", tostring(jobId):sub(1, 12)))
         return false
     end
     lastAttemptId += 1
@@ -4015,6 +4060,7 @@ function hopTo(jobId, placeId)
         if CONFIG.ENABLE_BYPASS then bypassRecover("teleport_fail") end
         return false
     end
+    addVisitedServer(jobId)
     return true
 end
 
@@ -6999,9 +7045,8 @@ local function isTaskVisited(jobId)
     if not jobId or jobId == "" then return true end
     local norm = normalizeJobId(jobId)
     if norm == "" or norm == normalizeJobId(game.JobId) then return true end
-    if isVisitedServer(jobId) then return true end
     if failedServers[jobId] and (os.clock() - failedServers[jobId] < 30) then return true end
-    if localVisitedTasks[norm] then return true end
+    if localVisitedTasks[norm] and (os.clock() - localVisitedTasks[norm] < 300) then return true end
     return false
 end
 
@@ -7024,6 +7069,10 @@ local function isSproutLootProtected()
         if elapsed < 15 then
             return true, string.format("долутывание ростка (осталось %dс)", math.ceil(15 - elapsed))
         end
+    end
+    -- 3. На сервере идет метеоритный дождь
+    if (CONFIG.CHECK_METEORS ~= false) and findActiveMeteors() then
+        return true, "на сервере идет метеоритный дождь"
     end
     return false, nil
 end
@@ -7331,7 +7380,8 @@ function Looter:Start()
             task.wait(0.1)
         end
 
-        local vicious = (not sprout and CONFIG.CHECK_VICIOUS) and findVicious() or nil
+        local meteors = (not sprout and CONFIG.CHECK_METEORS ~= false) and findActiveMeteors() or nil
+        local vicious = (not sprout and not meteors and CONFIG.CHECK_VICIOUS) and findVicious() or nil
 
         -- ЕСЛИ РОСТОК ЕСТЬ — ЗАБЫВАЕТ ПРО ОЧЕРЕДЬ И ИДЕТ ЕГО ЛУТАТЬ!
         if sprout then
@@ -7369,6 +7419,24 @@ function Looter:Start()
                     return not alive() or (os.clock() - lastSproutBrokenTime >= 15)
                 end, lastSproutHarvestAnchor)
                 task.wait(0.1)
+            end
+        elseif meteors then
+            s.currentStatus = "☄️ Метеоритный дождь на сервере — лутаю!"
+            log("Лутающий", "Метеоритный дождь обнаружен на сервере при входе! Блокирую очередь и лутаю.")
+            if not hasOwnHive() then
+                s.currentStatus = "Метеоры есть! Занимаю свой улей..."
+                local claimOk, claimed = pcall(ensureHiveClaimed)
+                if claimOk and claimed then s.hivesClaimed += 1 end
+            end
+            if isBackpackFull() then
+                s.currentStatus = "Рюкзак полон — конвертирую в своем улье..."
+                pcall(makeHoney)
+            end
+            s.currentStatus = "Лечу собирать метеоры!"
+            pcall(function() lootMeteorShower(meteors) end)
+            if isBackpackFull() then
+                s.currentStatus = "Рюкзак полный — делаю Honey"
+                pcall(makeHoney)
             end
         elseif vicious then
             if not hasOwnHive() then pcall(ensureHiveClaimed) end
@@ -7434,6 +7502,20 @@ function Looter:Start()
                     end
                 end
 
+                -- 3.5 Если на сервере метеоритный дождь — лутаем его!
+                if CONFIG.CHECK_METEORS ~= false then
+                    local activeMeteors = findActiveMeteors()
+                    if activeMeteors then
+                        stopAutoDig()
+                        tokenCollectorBusy = false
+                        s.currentStatus = "☄️ Метеоритный дождь на сервере — лутаю!"
+                        if not hasOwnHive() then pcall(ensureHiveClaimed) end
+                        pcall(function() lootMeteorShower(activeMeteors) end)
+                        if isBackpackFull() then pcall(makeHoney) end
+                        return
+                    end
+                end
+
                 -- 4. Если рюкзак полон — разгружаем в мед на улье
                 while isBackpackFull() and alive() do
                     stopAutoDig()
@@ -7469,11 +7551,18 @@ function Looter:Start()
                 end
 
                 if taskData and taskData.jobId then
-                    -- Дополнительная финальная проверка: вдруг росток только что появился прямо сейчас
+                    -- Дополнительная финальная проверка: вдруг росток или метеор появились прямо сейчас
                     local localSproutCheck = CONFIG.CHECK_SPROUTS and findAnySprout() or nil
                     if localSproutCheck then
                         self:returnTask(taskData, "farming_local_sprout")
                         pcall(function() self:harvest(localSproutCheck) end)
+                        return
+                    end
+
+                    local localMeteorCheck = (CONFIG.CHECK_METEORS ~= false) and findActiveMeteors() or nil
+                    if localMeteorCheck then
+                        self:returnTask(taskData, "farming_local_meteor")
+                        pcall(function() lootMeteorShower(localMeteorCheck) end)
                         return
                     end
 
@@ -7548,12 +7637,12 @@ function Looter:Start()
                     s.currentStatus = "Переход на сервер задачи (" .. tostring(taskData.level or "росток") .. ")..."
                     s.teleports += 1
                     log("Лутающий", string.format("Переход на сервер задачи %s [%s]...", tostring(taskData.jobId), tostring(taskData.level or "?")))
-                    markTaskVisited(taskData.jobId)
-                    if not hopTo(taskData.jobId, taskData.placeId) then
+                    if not hopTo(taskData.jobId, taskData.placeId, true) then
                         self:returnTask(taskData, "teleport failed")
                         task.wait(tonumber(CONFIG.POLL_INTERVAL) or 3)
                         return
                     end
+                    markTaskVisited(taskData.jobId)
                     task.wait(25)
                     self:returnTask(taskData, "timeout")
                     return
