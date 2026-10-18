@@ -8460,6 +8460,7 @@ round(closeBtn, 6)
 --  SIDEBAR NAVIGATION
 -- ══════════════════════════════════════════════════════════════════════
 local sidebar = new("Frame", {
+    Name = "Sidebar",
     Size = UDim2.new(0, SIDEBAR_W, 1, -HEADER_H),
     Position = UDim2.new(0, 0, 0, HEADER_H),
     BackgroundColor3 = C.sidebar,
@@ -8467,11 +8468,12 @@ local sidebar = new("Frame", {
     Parent = win,
 })
 new("Frame", {
-    Size = UDim2.new(0, 1, 1, 0),
-    Position = UDim2.new(1, -1, 0, 0),
+    Name = "SidebarDivider",
+    Size = UDim2.new(0, 1, 1, -HEADER_H),
+    Position = UDim2.new(0, SIDEBAR_W, 0, HEADER_H),
     BackgroundColor3 = C.border,
     BorderSizePixel = 0,
-    Parent = sidebar,
+    Parent = win,
 })
 new("UIListLayout", {
     SortOrder = Enum.SortOrder.LayoutOrder,
@@ -8508,6 +8510,7 @@ local function makeTab(icon, label, key)
         BorderSizePixel = 0,
         AutoButtonColor = false,
         LayoutOrder = tabOrder,
+        Active = true,
         Parent = sidebar,
     })
     tabOrder = tabOrder + 1
@@ -8531,6 +8534,7 @@ local function makeTab(icon, label, key)
         Font = Enum.Font.GothamBold,
         TextSize = 13,
         TextColor3 = C.dim,
+        Active = false,
         Parent = b,
     })
     local lbl = new("TextLabel", {
@@ -8542,6 +8546,7 @@ local function makeTab(icon, label, key)
         Font = Enum.Font.GothamBold,
         TextSize = 11,
         TextXAlignment = Enum.TextXAlignment.Left,
+        Active = false,
         Parent = b,
     })
     tabButtons[key] = { btn=b, bar=bar, icon=ico, label=lbl }
@@ -9468,6 +9473,7 @@ for key, t in pairs(tabButtons) do
         showPage(key)
     end)
 end
+showPage("main")
 
 -- ══════════════════════════════════════════════════════════════════════
 --  INPUTS & WINDOW CONTROLS
