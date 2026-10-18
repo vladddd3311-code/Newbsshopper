@@ -7481,6 +7481,8 @@ function Looter:Start()
         end
 
         local taskAttempts = {}
+        local looterLastSprinklerField = nil
+        local looterLastSprinklerTime = 0
 
         -- А ПОСЛЕ ВСПОМИНАЕТ ПРО ОЧЕРЕДЬ:
         while true do
@@ -7693,6 +7695,18 @@ function Looter:Start()
                                     moveRootToPosition(root, safeGround, 10)
                                 end
                             end
+
+                            -- Автоматическая установка поливалок на поле
+                            if (CONFIG.ENABLE_AUTO_SPRINKLER ~= false) and ((looterLastSprinklerField ~= fallbackField) or (os.clock() - looterLastSprinklerTime > 300)) then
+                                s.currentStatus = string.format("Placing sprinklers on %s...", tostring(fallbackField))
+                                if useSprinklerBuilder then
+                                    pcall(useSprinklerBuilder, safeGround)
+                                end
+                                ensureHarvestToolEquipped()
+                                looterLastSprinklerField = fallbackField
+                                looterLastSprinklerTime = os.clock()
+                            end
+
                             startAutoDig()
                             collectTokensFor(1.8, function()
                                 if not alive() then return true end
@@ -8443,18 +8457,45 @@ local discordBtn = new("TextButton", {
 round(discordBtn, 6)
 discordBtn.MouseButton1Click:Connect(function() openUrl(DISCORD_URL) end)
 
+local menuToggleBtn = new("TextButton", {
+    Size = UDim2.new(0, 110, 0, 28),
+    Position = UDim2.new(1, -190, 0.5, -14),
+    BackgroundColor3 = C.cardHi,
+    Text = "OPEN MENU ▼",
+    TextColor3 = C.accent,
+    Font = Enum.Font.GothamBold,
+    TextSize = 10,
+    BorderSizePixel = 0,
+    Visible = not isOpen,
+    Parent = head,
+})
+round(menuToggleBtn, 6)
+stroke(menuToggleBtn, C.accent, 1)
+menuToggleBtn.MouseButton1Click:Connect(function()
+    if setWindow then setWindow(true) end
+end)
+
 local closeBtn = new("TextButton", {
     Size = UDim2.new(0, 30, 0, 30),
     Position = UDim2.new(1, -38, 0.5, -15),
     BackgroundColor3 = C.card,
-    Text = "✕",
-    TextColor3 = C.dim,
+    Text = isOpen and "✕" or "▼",
+    TextColor3 = isOpen and C.dim or C.accent,
     Font = Enum.Font.GothamBold,
     TextSize = 12,
     BorderSizePixel = 0,
     Parent = head,
 })
 round(closeBtn, 6)
+closeBtn.MouseButton1Click:Connect(function()
+    if setWindow then setWindow(not isOpen) end
+end)
+
+head.InputBegan:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 and not isOpen then
+        if setWindow then setWindow(true) end
+    end
+end)
 
 -- ══════════════════════════════════════════════════════════════════════
 --  SIDEBAR NAVIGATION
@@ -8556,6 +8597,7 @@ end
 makeTab("⌂", "Dashboard", "main")
 makeTab("🌱", "Sprouts", "sprouts")
 makeTab("🪴", "Planters & Mobs", "planters_mobs")
+makeTab("📁", "Configs", "configs")
 makeTab("⚙", "Settings", "settings")
 
 -- ══════════════════════════════════════════════════════════════════════
@@ -9428,54 +9470,371 @@ local fMaxP = makeField(PAGE_SETTINGS, "Max Server Players (1-6)", CONFIG.MAX_PL
     if n and n >= 1 and n <= 6 then CONFIG.MAX_PLAYERS = n; saveNow() end
 end)
 
-section(PAGE_SETTINGS, "Config Profiles", 20)
-local fCfgName = makeField(PAGE_SETTINGS, "Profile Name", currentActiveConfig or "default", "default", 21)
+section(PAGE_SETTINGS, "Searcher & Server Connection", 20)
+local fTag = makeField(PAGE_SETTINGS, "Account Tag (Searcher ID)", CONFIG.SELF_TAG or "searcher1", "searcher1", 21, function(v)
+    CONFIG.SELF_TAG = v; saveNow()
+end)
+local fUrl = makeField(PAGE_SETTINGS, "Searcher Server API URL", CONFIG.API_URL or "", "http://...", 22, function(v)
+    CONFIG.API_URL = v; saveNow()
+end)
+local fKey = makeField(PAGE_SETTINGS, "Searcher Server API Key", CONFIG.API_KEY or "", "api key", 23, function(v)
+    CONFIG.API_KEY = v; saveNow()
+end)
+local fHop = makeField(PAGE_SETTINGS, "Server Hop Delay (seconds)", CONFIG.HOP_DELAY or 1.5, "1.5", 24, function(v)
+    local n = tonumber(v)
+    if n and n >= 0.5 and n <= 10 then CONFIG.HOP_DELAY = n; saveNow() end
+end)
+local fPoll = makeField(PAGE_SETTINGS, "Queue Poll Interval (seconds)", CONFIG.POLL_INTERVAL or 3, "3", 25, function(v)
+    local n = tonumber(v)
+    if n and n >= 1 and n <= 15 then CONFIG.POLL_INTERVAL = n; saveNow() end
+end)
+local fWait = makeField(PAGE_SETTINGS, "Broken Sprout Loot Wait (seconds)", CONFIG.BROKEN_WAIT or 20, "20", 26, function(v)
+    local n = tonumber(v)
+    if n and n >= 10 and n <= 60 then CONFIG.BROKEN_WAIT = n; saveNow() end
+end)
+local fConn = makeField(PAGE_SETTINGS, "Connection Timeout (seconds)", CONFIG.CONNECT_TIMEOUT or 20, "20", 27, function(v)
+    local n = tonumber(v)
+    if n and n >= 5 and n <= 60 then CONFIG.CONNECT_TIMEOUT = n; saveNow() end
+end)
+
+section(PAGE_SETTINGS, "Tools & Prompts", 30)
+local fSprinkler = makeField(PAGE_SETTINGS, "Sprinkler Tool Keyword", CONFIG.SPRINKLER_KEYWORD or "sprinkler", "sprinkler", 31, function(v)
+    if v and v ~= "" then CONFIG.SPRINKLER_KEYWORD = v; saveNow() end
+end)
+local fSprinklerCount = makeField(PAGE_SETTINGS, "Sprinklers to Place (1-4)", CONFIG.SPRINKLER_COUNT or 3, "3", 32, function(v)
+    local n = tonumber(v)
+    if n and n >= 1 and n <= 4 then CONFIG.SPRINKLER_COUNT = n; saveNow() end
+end)
+local fSlotKeyword = makeField(PAGE_SETTINGS, "Claim Hive Prompt Keyword", CONFIG.EMPTY_SLOT_KEYWORD or "claim hive", "claim hive", 33, function(v)
+    if v and v ~= "" then CONFIG.EMPTY_SLOT_KEYWORD = v; saveNow() end
+end)
+local fHoneyKeyword = makeField(PAGE_SETTINGS, "Make Honey Prompt Keyword", CONFIG.MY_HIVE_KEYWORD or "make honey", "make honey", 34, function(v)
+    if v and v ~= "" then CONFIG.MY_HIVE_KEYWORD = v; saveNow() end
+end)
+
+section(PAGE_SETTINGS, "Movement & Flight", 40)
+local fWalk = makeField(PAGE_SETTINGS, "Walkspeed Multiplier", CONFIG.WALK_SPEED_MULT or 1, "1", 41, function(v)
+    local n = tonumber(v)
+    if n and n >= 0.5 and n <= 3 then CONFIG.WALK_SPEED_MULT = n; saveNow() end
+end)
+local fFly = makeField(PAGE_SETTINGS, "Flight / Tween Speed", CONFIG.FLY_SPEED or 55, "55", 42, function(v)
+    local n = tonumber(v)
+    if n and n >= 20 and n <= 120 then CONFIG.FLY_SPEED = n; saveNow() end
+end)
+
+-- ══════════════════════════════════════════════════════════════════════
+--  TAB 5: CONFIGS & PROFILES
+-- ══════════════════════════════════════════════════════════════════════
+local PAGE_CONFIGS = new("Frame", {
+    Size = UDim2.new(1, 0, 0, 0),
+    AutomaticSize = Enum.AutomaticSize.Y,
+    BackgroundTransparency = 1,
+    Visible = false,
+    Parent = content,
+})
+new("UIListLayout", { SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0, 8), Parent = PAGE_CONFIGS })
+
+-- Header banner
+local cfgHeaderBox = new("Frame", {
+    Size = UDim2.new(1, 0, 0, 56),
+    BackgroundColor3 = C.card,
+    BorderSizePixel = 0,
+    LayoutOrder = 1,
+    Parent = PAGE_CONFIGS,
+})
+round(cfgHeaderBox, 10)
+stroke(cfgHeaderBox, C.border, 1)
+
+new("TextLabel", {
+    Size = UDim2.new(0, 36, 1, 0),
+    Position = UDim2.new(0, 12, 0, 0),
+    BackgroundTransparency = 1,
+    Text = "📁",
+    Font = Enum.Font.GothamBold,
+    TextSize = 22,
+    TextColor3 = C.accent,
+    Parent = cfgHeaderBox,
+})
+new("TextLabel", {
+    Size = UDim2.new(1, -60, 0, 22),
+    Position = UDim2.new(0, 52, 0, 8),
+    BackgroundTransparency = 1,
+    Text = "Profile Manager & Username Auto-Binds",
+    TextColor3 = C.text,
+    Font = Enum.Font.GothamBold,
+    TextSize = 13,
+    TextXAlignment = Enum.TextXAlignment.Left,
+    Parent = cfgHeaderBox,
+})
+local cfgHeaderSub = new("TextLabel", {
+    Size = UDim2.new(1, -60, 0, 18),
+    Position = UDim2.new(0, 52, 0, 30),
+    BackgroundTransparency = 1,
+    Text = "Account: " .. tostring(player.Name) .. "  |  Active Profile: " .. tostring(currentActiveConfig or "default"),
+    TextColor3 = C.dim,
+    Font = Enum.Font.Gotham,
+    TextSize = 10,
+    TextXAlignment = Enum.TextXAlignment.Left,
+    Parent = cfgHeaderBox,
+})
+
+-- Actions
+section(PAGE_CONFIGS, "Profile Actions", 10)
+local fCfgName = makeField(PAGE_CONFIGS, "Profile Name", currentActiveConfig or "default", "e.g. default or solo_macro", 11)
+
 local cfgBtnRow = new("Frame", {
     Size = UDim2.new(1, 0, 0, 34),
     BackgroundTransparency = 1,
-    LayoutOrder = 22,
-    Parent = PAGE_SETTINGS,
+    LayoutOrder = 12,
+    Parent = PAGE_CONFIGS,
 })
 new("UIListLayout", { FillDirection = Enum.FillDirection.Horizontal, Padding = UDim.new(0, 8), Parent = cfgBtnRow })
 
+local cfgStatusLabel = new("TextLabel", {
+    Size = UDim2.new(1, 0, 0, 22),
+    BackgroundTransparency = 1,
+    Text = "Ready to manage configurations",
+    TextColor3 = C.dim,
+    Font = Enum.Font.Gotham,
+    TextSize = 10,
+    TextXAlignment = Enum.TextXAlignment.Left,
+    LayoutOrder = 13,
+    Parent = PAGE_CONFIGS,
+})
+
+section(PAGE_CONFIGS, "Saved Profiles", 14)
+local cfgListContainer = new("Frame", {
+    Size = UDim2.new(1, 0, 0, 0),
+    AutomaticSize = Enum.AutomaticSize.Y,
+    BackgroundTransparency = 1,
+    LayoutOrder = 15,
+    Parent = PAGE_CONFIGS,
+})
+new("UIListLayout", {
+    FillDirection = Enum.FillDirection.Horizontal,
+    Padding = UDim.new(0, 6),
+    SortOrder = Enum.SortOrder.LayoutOrder,
+    Parent = cfgListContainer,
+})
+
+local refreshConfigButtons
+refreshConfigButtons = function()
+    for _, child in ipairs(cfgListContainer:GetChildren()) do
+        if child:IsA("TextButton") then child:Destroy() end
+    end
+    local list = getSavedConfigList()
+    for _, cfg in ipairs(list) do
+        local isCur = (cfg == currentActiveConfig)
+        local b = new("TextButton", {
+            Size = UDim2.new(0, math.max(70, #cfg * 8 + 24), 0, 28),
+            BackgroundColor3 = isCur and C.cardHi or C.field,
+            Text = "📁 " .. cfg,
+            TextColor3 = isCur and C.accent or C.text,
+            Font = Enum.Font.GothamBold,
+            TextSize = 10,
+            BorderSizePixel = 0,
+            Parent = cfgListContainer,
+        })
+        round(b, 6)
+        stroke(b, isCur and C.accent or C.border, 1)
+        b.MouseButton1Click:Connect(function()
+            fCfgName.Text = cfg
+            local ok, msg = loadNamedConfig(cfg)
+            cfgStatusLabel.Text = msg or ("Loaded: " .. cfg)
+            cfgStatusLabel.TextColor3 = ok and C.accent or C.danger
+            refreshConfigButtons()
+        end)
+    end
+    cfgHeaderSub.Text = "Account: " .. tostring(player.Name) .. "  |  Active Profile: " .. tostring(currentActiveConfig or "default")
+end
+
 local saveCfgBtn = new("TextButton", {
-    Size = UDim2.new(0.5, -4, 1, 0),
+    Size = UDim2.new(0.33, -5, 1, 0),
     BackgroundColor3 = C.accent2,
-    Text = "Save Profile",
+    Text = "💾 Save Profile",
     TextColor3 = C.text,
     Font = Enum.Font.GothamBold,
-    TextSize = 11,
+    TextSize = 10,
     BorderSizePixel = 0,
+    LayoutOrder = 1,
     Parent = cfgBtnRow,
 })
-round(saveCfgBtn, 8)
+round(saveCfgBtn, 6)
 saveCfgBtn.MouseButton1Click:Connect(function()
-    local name = fCfgName.Text
-    if name and name ~= "" then
-        saveConfigByName(name)
-        statusVal.Text = "Saved profile: " .. name
-    end
+    local name = (fCfgName.Text ~= "" and fCfgName.Text) or "default"
+    local ok, msg = saveNamedConfig(name)
+    cfgStatusLabel.Text = msg
+    cfgStatusLabel.TextColor3 = ok and C.accent or C.danger
+    refreshConfigButtons()
 end)
 
 local loadCfgBtn = new("TextButton", {
-    Size = UDim2.new(0.5, -4, 1, 0),
+    Size = UDim2.new(0.33, -5, 1, 0),
     BackgroundColor3 = C.card,
-    Text = "Load Profile",
+    Text = "📂 Load Profile",
     TextColor3 = C.text,
     Font = Enum.Font.GothamBold,
-    TextSize = 11,
+    TextSize = 10,
     BorderSizePixel = 0,
+    LayoutOrder = 2,
     Parent = cfgBtnRow,
 })
-round(loadCfgBtn, 8)
+round(loadCfgBtn, 6)
 stroke(loadCfgBtn, C.border, 1)
 loadCfgBtn.MouseButton1Click:Connect(function()
+    local name = (fCfgName.Text ~= "" and fCfgName.Text) or "default"
+    local ok, msg = loadNamedConfig(name)
+    cfgStatusLabel.Text = msg
+    cfgStatusLabel.TextColor3 = ok and C.accent or C.danger
+    refreshConfigButtons()
+end)
+
+local delCfgBtn = new("TextButton", {
+    Size = UDim2.new(0.33, -5, 1, 0),
+    BackgroundColor3 = Color3.fromRGB(80, 25, 30),
+    Text = "🗑️ Delete Profile",
+    TextColor3 = Color3.fromRGB(255, 150, 150),
+    Font = Enum.Font.GothamBold,
+    TextSize = 10,
+    BorderSizePixel = 0,
+    LayoutOrder = 3,
+    Parent = cfgBtnRow,
+})
+round(delCfgBtn, 6)
+delCfgBtn.MouseButton1Click:Connect(function()
     local name = fCfgName.Text
-    if name and name ~= "" then
-        local ok, msg = loadConfigByName(name)
-        statusVal.Text = ok and ("Loaded: " .. name) or ("Error: " .. tostring(msg))
+    if name and name ~= "" and name ~= "default" then
+        local ok, msg = deleteNamedConfig(name)
+        cfgStatusLabel.Text = msg
+        cfgStatusLabel.TextColor3 = ok and C.accent or C.danger
+        refreshConfigButtons()
+    else
+        cfgStatusLabel.Text = "Cannot delete default profile!"
+        cfgStatusLabel.TextColor3 = C.warn
     end
 end)
+
+-- Nickname Binds
+section(PAGE_CONFIGS, "Auto-Load Profile by Username", 20)
+new("TextLabel", {
+    Size = UDim2.new(1, 0, 0, 24),
+    BackgroundTransparency = 1,
+    Text = "Automatically loads a profile whenever an account with this username runs BSS Hopper.",
+    TextColor3 = C.dim,
+    Font = Enum.Font.Gotham,
+    TextSize = 9,
+    TextWrapped = true,
+    TextXAlignment = Enum.TextXAlignment.Left,
+    LayoutOrder = 21,
+    Parent = PAGE_CONFIGS,
+})
+
+local bindRow = new("Frame", {
+    Size = UDim2.new(1, 0, 0, 48),
+    BackgroundTransparency = 1,
+    LayoutOrder = 22,
+    Parent = PAGE_CONFIGS,
+})
+new("UIListLayout", { FillDirection = Enum.FillDirection.Horizontal, Padding = UDim.new(0, 8), Parent = bindRow })
+
+local colNick = new("Frame", { Size = UDim2.new(0.5, -4, 1, 0), BackgroundTransparency = 1, Parent = bindRow })
+local colCfg = new("Frame", { Size = UDim2.new(0.5, -4, 1, 0), BackgroundTransparency = 1, Parent = bindRow })
+local fBindNick = makeField(colNick, "Roblox Username", player.Name, "Account Name", 1)
+local fBindCfg = makeField(colCfg, "Profile Name", currentActiveConfig or "default", "e.g. default", 1)
+
+makeBtn(PAGE_CONFIGS, "Bind Username to Profile", "🔗", C.accent2, 23, function()
+    local n = fBindNick.Text
+    local c = fBindCfg.Text
+    local ok, msg = bindNickToConfig(n, c)
+    cfgStatusLabel.Text = msg
+    cfgStatusLabel.TextColor3 = ok and C.accent or C.danger
+    if refreshBindsList then refreshBindsList() end
+end)
+
+section(PAGE_CONFIGS, "Active Username Binds", 24)
+local bindsContainer = new("Frame", {
+    Size = UDim2.new(1, 0, 0, 0),
+    AutomaticSize = Enum.AutomaticSize.Y,
+    BackgroundTransparency = 1,
+    LayoutOrder = 25,
+    Parent = PAGE_CONFIGS,
+})
+new("UIListLayout", {
+    SortOrder = Enum.SortOrder.LayoutOrder,
+    Padding = UDim.new(0, 4),
+    Parent = bindsContainer,
+})
+
+local refreshBindsList
+refreshBindsList = function()
+    for _, child in ipairs(bindsContainer:GetChildren()) do
+        if child:IsA("Frame") then child:Destroy() end
+    end
+    local binds = loadNickBinds()
+    local count = 0
+    for nick, cfg in pairs(binds) do
+        count += 1
+        local item = new("Frame", {
+            Size = UDim2.new(1, 0, 0, 32),
+            BackgroundColor3 = C.card,
+            BorderSizePixel = 0,
+            LayoutOrder = count,
+            Parent = bindsContainer,
+        })
+        round(item, 6)
+        stroke(item, C.border, 1)
+
+        local isMyNick = (string.lower(nick) == string.lower(player.Name))
+        new("TextLabel", {
+            Size = UDim2.new(1, -75, 1, 0),
+            Position = UDim2.new(0, 10, 0, 0),
+            BackgroundTransparency = 1,
+            Text = string.format("👤 %s  ➔  📁 %s", nick, cfg),
+            TextColor3 = isMyNick and C.accent or C.text,
+            Font = Enum.Font.GothamMedium,
+            TextSize = 10,
+            TextXAlignment = Enum.TextXAlignment.Left,
+            Parent = item,
+        })
+        local unbindBtn = new("TextButton", {
+            Size = UDim2.new(0, 60, 0, 20),
+            Position = UDim2.new(1, -66, 0.5, -10),
+            BackgroundColor3 = Color3.fromRGB(80, 25, 30),
+            Text = "Unbind",
+            TextColor3 = Color3.fromRGB(255, 160, 160),
+            Font = Enum.Font.GothamBold,
+            TextSize = 9,
+            BorderSizePixel = 0,
+            Parent = item,
+        })
+        round(unbindBtn, 4)
+        unbindBtn.MouseButton1Click:Connect(function()
+            unbindNick(nick)
+            refreshBindsList()
+        end)
+    end
+    if count == 0 then
+        local empty = new("Frame", {
+            Size = UDim2.new(1, 0, 0, 24),
+            BackgroundTransparency = 1,
+            LayoutOrder = 1,
+            Parent = bindsContainer,
+        })
+        new("TextLabel", {
+            Size = UDim2.new(1, 0, 1, 0),
+            BackgroundTransparency = 1,
+            Text = "No active username binds configured",
+            TextColor3 = C.dim,
+            Font = Enum.Font.Gotham,
+            TextSize = 10,
+            TextXAlignment = Enum.TextXAlignment.Left,
+            Parent = empty,
+        })
+    end
+end
+
+refreshConfigButtons()
+refreshBindsList()
 
 -- ══════════════════════════════════════════════════════════════════════
 --  FIELD PICKER MODAL OVERLAY (GUI OVER MAIN)
@@ -9681,6 +10040,7 @@ local pages = {
     main = PAGE_HOME,
     sprouts = PAGE_SPROUTS,
     planters_mobs = PAGE_PLANTERS_MOBS,
+    configs = PAGE_CONFIGS,
     settings = PAGE_SETTINGS,
 }
 
@@ -9735,8 +10095,6 @@ UserInputService.InputBegan:Connect(function(inp, gpe)
     if inp.KeyCode == Enum.KeyCode.P then Hopper.Toggle() end
 end)
 
-closeBtn.MouseButton1Click:Connect(function() setWindow(false) end)
-
 setWindow = function(show)
     isOpen = show
     TweenService:Create(win,
@@ -9745,8 +10103,13 @@ setWindow = function(show)
         { Size = UDim2.new(0, WIN_W, 0, show and WIN_H or HEADER_H) }):Play()
     sidebar.Visible = show
     content.Visible = show
+    if closeBtn then
+        closeBtn.Text = show and "✕" or "▼"
+        closeBtn.TextColor3 = show and C.dim or C.accent
+    end
+    if menuToggleBtn then menuToggleBtn.Visible = not show end
     hint.Text = show and "LMB: Toggle Bot  •  RMB / F: Menu  •  P: Pause"
-        or "Click floating icon to expand menu"
+        or "Click header or floating icon to expand menu"
     uiState.winOpen = show
     saveNow()
 end
@@ -9809,13 +10172,30 @@ syncGuiWithConfig = function()
         if fDigTool and CONFIG.DIG_TOOL_KEYWORD ~= nil then fDigTool.Text = tostring(CONFIG.DIG_TOOL_KEYWORD) end
         if fBurstTime and CONFIG.BURST_LOOT_TIME ~= nil then fBurstTime.Text = tostring(CONFIG.BURST_LOOT_TIME) end
         if fWindyH and CONFIG.WINDY_HOVER_HEIGHT ~= nil then fWindyH.Text = tostring(CONFIG.WINDY_HOVER_HEIGHT) end
+        if fVicH and CONFIG.VICIOUS_HOVER_HEIGHT ~= nil then fVicH.Text = tostring(CONFIG.VICIOUS_HOVER_HEIGHT) end
+        if fVicChannel and CONFIG.VICIOUS_CHANNEL_ID ~= nil then fVicChannel.Text = tostring(CONFIG.VICIOUS_CHANNEL_ID) end
         if fDisc and CONFIG.DISCORD_WEBHOOK_URL ~= nil then fDisc.Text = tostring(CONFIG.DISCORD_WEBHOOK_URL) end
         if fTgToken and CONFIG.TELEGRAM_BOT_TOKEN ~= nil then fTgToken.Text = tostring(CONFIG.TELEGRAM_BOT_TOKEN) end
         if fTgChat and CONFIG.TELEGRAM_CHAT_ID ~= nil then fTgChat.Text = tostring(CONFIG.TELEGRAM_CHAT_ID) end
         if fRepInterval and CONFIG.PERIODIC_REPORT_INTERVAL ~= nil then fRepInterval.Text = tostring(CONFIG.PERIODIC_REPORT_INTERVAL) end
         if fMaxP and CONFIG.MAX_PLAYERS ~= nil then fMaxP.Text = tostring(CONFIG.MAX_PLAYERS) end
+        if fTag and CONFIG.SELF_TAG ~= nil then fTag.Text = tostring(CONFIG.SELF_TAG) end
+        if fUrl and CONFIG.API_URL ~= nil then fUrl.Text = tostring(CONFIG.API_URL) end
+        if fKey and CONFIG.API_KEY ~= nil then fKey.Text = tostring(CONFIG.API_KEY) end
+        if fHop and CONFIG.HOP_DELAY ~= nil then fHop.Text = tostring(CONFIG.HOP_DELAY) end
+        if fPoll and CONFIG.POLL_INTERVAL ~= nil then fPoll.Text = tostring(CONFIG.POLL_INTERVAL) end
+        if fWait and CONFIG.BROKEN_WAIT ~= nil then fWait.Text = tostring(CONFIG.BROKEN_WAIT) end
+        if fConn and CONFIG.CONNECT_TIMEOUT ~= nil then fConn.Text = tostring(CONFIG.CONNECT_TIMEOUT) end
+        if fSprinkler and CONFIG.SPRINKLER_KEYWORD ~= nil then fSprinkler.Text = tostring(CONFIG.SPRINKLER_KEYWORD) end
+        if fSprinklerCount and CONFIG.SPRINKLER_COUNT ~= nil then fSprinklerCount.Text = tostring(CONFIG.SPRINKLER_COUNT) end
+        if fSlotKeyword and CONFIG.EMPTY_SLOT_KEYWORD ~= nil then fSlotKeyword.Text = tostring(CONFIG.EMPTY_SLOT_KEYWORD) end
+        if fHoneyKeyword and CONFIG.MY_HIVE_KEYWORD ~= nil then fHoneyKeyword.Text = tostring(CONFIG.MY_HIVE_KEYWORD) end
+        if fWalk and CONFIG.WALK_SPEED_MULT ~= nil then fWalk.Text = tostring(CONFIG.WALK_SPEED_MULT) end
+        if fFly and CONFIG.FLY_SPEED ~= nil then fFly.Text = tostring(CONFIG.FLY_SPEED) end
         if fCfgName then fCfgName.Text = tostring(currentActiveConfig or "default") end
         if updateFieldPickerUI then updateFieldPickerUI() end
+        if refreshConfigButtons then refreshConfigButtons() end
+        if refreshBindsList then refreshBindsList() end
     end)
 end
 
