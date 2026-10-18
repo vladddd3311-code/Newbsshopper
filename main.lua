@@ -8566,7 +8566,7 @@ local content = new("ScrollingFrame", {
     ScrollBarImageColor3 = C.border,
     AutomaticCanvasSize = Enum.AutomaticSize.Y,
     CanvasSize = UDim2.new(),
-    ScrollingDirection = Enum.Direction.Y,
+    ScrollingDirection = Enum.ScrollingDirection.Y,
     Parent = win,
 })
 new("UIListLayout", { SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0, 8), Parent = content })
