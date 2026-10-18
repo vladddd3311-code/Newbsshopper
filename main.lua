@@ -3834,9 +3834,10 @@ function pruneFailures()
     end
 end
 
--- Черный список последних посещенных серверов (Blacklist последних 20 серверов)
+-- Черный список последних посещенных серверов (Blacklist до 1000 серверов)
 local VISITED_SERVERS_FILE = "bss_recent_servers.json"
 local recentVisitedServers = {}
+local visitedServersSet = {}
 
 function loadRecentVisited()
     pcall(function()
@@ -3847,18 +3848,27 @@ function loadRecentVisited()
             local decoded = HttpService:JSONDecode(raw)
             if type(decoded) == "table" then recentVisitedServers = decoded end
         end
+        visitedServersSet = {}
+        for _, id in ipairs(recentVisitedServers) do
+            local norm = normalizeJobId(id)
+            if norm ~= "" then visitedServersSet[norm] = true end
+        end
     end)
 end
 loadRecentVisited()
 
 function addVisitedServer(jobId)
     if not jobId or jobId == "" then return end
+    local norm = normalizeJobId(jobId)
+    if norm == "" then return end
+    visitedServersSet[norm] = true
     for i, id in ipairs(recentVisitedServers) do
-        if id == jobId then table.remove(recentVisitedServers, i); break end
+        if normalizeJobId(id) == norm then table.remove(recentVisitedServers, i); break end
     end
     table.insert(recentVisitedServers, 1, jobId)
-    while #recentVisitedServers > 25 do
-        table.remove(recentVisitedServers)
+    while #recentVisitedServers > 1000 do
+        local removed = table.remove(recentVisitedServers)
+        if removed then visitedServersSet[normalizeJobId(removed)] = nil end
     end
     _G.BSS_VISITED_SERVERS = recentVisitedServers
     pcall(function()
@@ -3869,14 +3879,14 @@ function addVisitedServer(jobId)
 end
 
 function isVisitedServer(jobId)
-    if not jobId then return false end
-    for _, id in ipairs(recentVisitedServers) do
-        if id == jobId then return true end
-    end
-    return false
+    if not jobId or jobId == "" then return true end
+    local norm = normalizeJobId(jobId)
+    if norm == "" then return true end
+    if norm == normalizeJobId(game.JobId) then return true end
+    return visitedServersSet[norm] == true
 end
 
--- Добавляем текущий сервер в список посещенных
+-- Добавляем текущий сервер в список посещенных навсегда
 pcall(function() addVisitedServer(game.JobId) end)
 
 function getCandidateServers()
@@ -3909,8 +3919,8 @@ function getCandidateServers()
             continue
         end
 
-        -- 2. СТРОГИЙ ЗАПРЕТ: Текущий сервер, посещенные и сбойные
-        if sid == game.JobId or isFailed(sid) or isVisitedServer(sid) then
+        -- 2. СТРОГИЙ ЗАПРЕТ: Текущий сервер, посещенные и сбойные (НИ ПРИ КАКИХ УСЛОВИЯХ НЕ ЗАХОДИТЬ)
+        if sid == game.JobId or normalizeJobId(sid) == normalizeJobId(game.JobId) or isFailed(sid) or isVisitedServer(sid) then
             continue
         end
 
@@ -3936,23 +3946,6 @@ function getCandidateServers()
             end
         else
             table.insert(out, entry)
-        end
-    end
-
-    -- Резервный пул (если все подходящие уже были посещены)
-    if #out == 0 and #fallback == 0 then
-        for _, s in ipairs(servers) do
-            local sid = tostring(s.id or "")
-            local playing = tonumber(s.playing) or 0
-            local maxPlr = tonumber(s.maxPlayers) or 6
-            local ping = tonumber(s.ping) or 0
-            local fps = tonumber(s.fps) or 60
-            if sid ~= game.JobId and not isFailed(sid)
-                and (CONFIG.AVOID_FRIENDS == false or not friendJobIds[sid])
-                and playing >= 1 and playing < maxPlr
-                and (ping == 0 or ping < 300) and fps >= 15 then
-                table.insert(fallback, { id = sid, ping = ping, playing = playing })
-            end
         end
     end
 
@@ -3997,8 +3990,10 @@ function hopTo(jobId, placeId)
         end
     end
 
-    if not jobId or jobId == "" or jobId == game.JobId then
-        log("Телепорт", "Отмена: попытка прыжка на текущий же сервер!")
+    local normTarget = normalizeJobId(jobId)
+    local normCurrent = normalizeJobId(game.JobId)
+    if not jobId or jobId == "" or normTarget == "" or normTarget == normCurrent or isVisitedServer(jobId) then
+        log("Телепорт", string.format("СТРОГИЙ ЗАПРЕТ: Сервер %s уже посещался или является текущим! Отмена телепорта.", tostring(jobId):sub(1, 12)))
         return false
     end
     lastAttemptId += 1
@@ -4085,15 +4080,6 @@ function hopRandom()
                 task.wait(0.25)
             end
         end
-        -- Если все посещены — пробуем любой сервер кроме текущего
-        for _, s in ipairs(pool) do
-            local sid = tostring(s.id or "")
-            if sid ~= "" and sid ~= game.JobId
-                and (CONFIG.AVOID_FRIENDS == false or not friendJobIds[sid]) then
-                if hopTo(sid) then return true end
-                task.wait(0.25)
-            end
-        end
     end
 
     -- СТРОГИЙ ЗАПРЕТ: НИ В КОЕМ СЛУЧАЕ НЕ ВЫЗЫВАЕМ TeleportService:Teleport(placeId)!
@@ -4145,21 +4131,7 @@ end)
 
 function rejoinSame()
     armTeleportPersistence()
-    local servers = getServerList()
-    if servers then
-        pruneFailures()
-        updateFriendsList()
-        for _, s in ipairs(servers) do
-            local sid = tostring(s.id or "")
-            local p = tonumber(s.playing) or 0
-            local maxP = tonumber(s.maxPlayers) or 6
-            if sid ~= game.JobId and p >= 2 and p < maxP
-                and not isFailed(sid)
-                and (CONFIG.AVOID_FRIENDS == false or not friendJobIds[sid]) then
-                hopTo(sid); return
-            end
-        end
-    end
+    hopRandom()
 end
 
 local RETRYABLE_TELEPORT_CODES = { [2]=true, [3]=true, [279]=true, [267]=true }
@@ -4170,10 +4142,8 @@ function rejoinRetry(code)
     task.wait(3) -- Таймаут перезахода: статично 3 секунды
     armTeleportPersistence()
     if CONFIG.ENABLE_BYPASS then bypassRecover("code_" .. tostring(code)) end
-    if attempt >= MAX_REJOIN_TRIES then
-        rejoinTries = 0; clearTeleport(); hopRandom(); return
-    end
-    clearTeleport(); rejoinSame()
+    clearTeleport()
+    hopRandom()
 end
 
 local teleportLock = false
@@ -4185,7 +4155,7 @@ function handleTeleportFailure(reason)
     armTeleportPersistence()
     if CONFIG.ENABLE_BYPASS then bypassRecover(tostring(reason)) end
     if attemptCounter >= (tonumber(CONFIG.MAX_ATTEMPTS) or 3) then clearFailures() end
-    rejoinSame()
+    hopRandom()
     teleportLock = false
 end
 
@@ -4207,15 +4177,9 @@ function checkAndBypassError()
     if not errorPrompt then return end
 
     local fullText = ""
-    local retryBtn = nil
     for _, d in ipairs(errorPrompt:GetDescendants()) do
         if d:IsA("TextLabel") and d.Text and d.Text ~= "" then
             fullText = fullText .. " " .. d.Text
-        elseif (d:IsA("TextButton") or d:IsA("ImageButton")) and d.Visible then
-            local bText = string.lower(tostring(d.Text or ""))
-            if string.find(bText, "retry") or string.find(bText, "reconnect") or string.find(bText, "повтор") or string.find(bText, "переподключ") then
-                retryBtn = d
-            end
         end
     end
 
@@ -4240,32 +4204,19 @@ function checkAndBypassError()
         lastErrorBypass = os.clock()
         log("TP", "[ОБХОД 267/279/DISCONNECT] Найдено окно сбоя подключения: " .. fullText:sub(1, 80))
 
-        -- Вооружаем персистентность (queue_on_teleport) перед перезаходом,
-        -- чтобы скрипт автоматически оставался и выполнялся на новом сервере без повторного инжекта!
+        -- Вооружаем персистентность (queue_on_teleport) перед перезаходом
         armTeleportPersistence()
         if CONFIG.ENABLE_BYPASS then bypassRecover("error_kick_267") end
         if bypassActive and Bypass.Recover then pcall(Bypass.Recover, Bypass, "error_kick_267") end
         if bypassActive and Bypass.Bypass267 then pcall(Bypass.Bypass267, Bypass) end
 
-        if retryBtn then
-            log("TP", "[ОБХОД 267/279] Нажимаю Reconnect / Retry (скрипт сохранен в queue_on_teleport)...")
-            pcall(function()
-                if type(firesignal) == "function" then
-                    firesignal(retryBtn.MouseButton1Click)
-                end
-                retryBtn.MouseButton1Click:Fire()
-            end)
-            task.wait(1.5)
-        end
-
-        if overlay:FindFirstChild("ErrorPrompt") then
-            log("TP", "[ОБХОД 267/279] Перезапускаю подключение к серверу (скрипт сохранен в queue_on_teleport)...")
-            pcall(function() errorPrompt.Visible = false end)
-            task.wait(2.5)
-            clearTeleport()
-            armTeleportPersistence()
-            rejoinSame()
-        end
+        -- НИ В КОЕМ СЛУЧАЕ НЕ НАЖИМАЕМ Retry / Reconnect (так как это возвращает на тот же сервер!)
+        log("TP", "[ОБХОД СБОЯ] Ухожу на новый сервер (не текущий!)...")
+        pcall(function() errorPrompt.Visible = false end)
+        task.wait(1.5)
+        clearTeleport()
+        armTeleportPersistence()
+        hopRandom()
     end
 end
 
@@ -5987,7 +5938,9 @@ function getTokenPriorityForObj(obj)
     end
 
     -- 1. Метод Atlas BSS: проверка спец-эффектов редкости (Spots, Rainbow, Sparkles)
-    if obj:FindFirstChild("Spots") or obj:FindFirstChild("Rainbow") or obj:FindFirstChild("Sparkles") then
+    if obj:FindFirstChild("Spots") or obj:FindFirstChild("Rainbow") or obj:FindFirstChild("Sparkles")
+        or obj:FindFirstChildWhichIsA("Sparkles")
+        or (obj:IsA("Model") and (obj:FindFirstChild("Spots", true) or obj:FindFirstChild("Rainbow", true) or obj:FindFirstChild("Sparkles", true))) then
         TOKEN_PRIO_CACHE[obj] = 1
         return 1
     end
@@ -6431,22 +6384,12 @@ collectTokensFor = function(maxSeconds, stopFn, fieldAnchor)
                 end
             end
 
-            -- Поиск токенов внутри и вокруг поля (с Target Lock от тряски)
+            -- Поиск токенов внутри и вокруг поля
             local tokens = findFieldTokens(anchorZone, limitX, limitZ, fieldAnchor)
-            local best, bestKey = nil, math.huge
-            if activeTokenObj and activeTokenObj.Parent and not collectedTokens[activeTokenObj] then
-                local p = worldPos(activeTokenObj)
-                if p then
-                    local dx = p.X - rootPos.X
-                    local dz = p.Z - rootPos.Z
-                    local distSq = dx * dx + dz * dz
-                    if distSq > 4.0 then
-                        local isLink = (TOKEN_LINK_CACHE[activeTokenObj] == true)
-                        best = { obj = activeTokenObj, pos = p, priority = isLink and 0 or 1, isLink = isLink }
-                        bestKey = isLink and -10000000 or distSq
-                    end
-                end
-            end
+            local bestToken = nil
+            local bestPrio = math.huge
+            local bestDistSq = math.huge
+
             for _, token in ipairs(tokens) do
                 local tobj = token.obj
                 if tobj and tobj.Parent and not collectedTokens[tobj] then
@@ -6465,24 +6408,39 @@ collectTokensFor = function(maxSeconds, stopFn, fieldAnchor)
                         local isLink = (token.priority == 0) or (token.isLink == true)
                         local p = isLink and 0 or token.priority
                         if p < 999 then
-                            local score
-                            if p == 0 then
-                                score = -10000000 -- Token Link СВЕРХПРИОРИТЕТ 0 (пылесосит всё поле!)
-                            elseif isBurstLootActive then
-                                score = (p == 1 and 0) or 5000000
-                            else
-                                score = (p == 1 and 0) or (p == 2 and 100000) or 200000
-                            end
-                            local key = score + distSq
-                            if key < bestKey then
-                                best = token
-                                best.priority = p
-                                bestKey = key
+                            -- Atlas BSS строгая приоритезация:
+                            -- Меньший приоритет (P0 > P1 > P2 > P3) ВСЕГДА имеет абсолютное преимущество!
+                            -- При равном приоритете побеждает ближайший токен.
+                            if p < bestPrio then
+                                bestPrio = p
+                                bestDistSq = distSq
+                                bestToken = token
+                            elseif p == bestPrio and distSq < bestDistSq then
+                                bestDistSq = distSq
+                                bestToken = token
                             end
                         end
                     end
                 end
             end
+
+            -- Target lock: если уже бежим к активному токену ТОГО ЖЕ приоритета, не дергаемся между одинаковыми
+            if bestToken and activeTokenObj and activeTokenObj.Parent and not collectedTokens[activeTokenObj] and activeTokenObj ~= bestToken.obj then
+                local activePrio = getTokenPriorityForObj(activeTokenObj)
+                if activePrio == bestPrio then
+                    local p = worldPos(activeTokenObj)
+                    if p then
+                        local dx = p.X - rootPos.X
+                        local dz = p.Z - rootPos.Z
+                        local distSq = dx * dx + dz * dz
+                        if distSq < (bestDistSq + 144.0) then
+                            bestToken = { obj = activeTokenObj, pos = p, priority = activePrio, isLink = (activePrio == 0) }
+                        end
+                    end
+                end
+            end
+
+            local best = bestToken
 
             -- Приоритетная скорость бега (без резких скачков и перезаписи Heartbeat)
             local isP1 = best and (best.priority == 1 or best.priority == 0)
@@ -6497,9 +6455,9 @@ collectTokensFor = function(maxSeconds, stopFn, fieldAnchor)
                 if activeTokenObj ~= best.obj then
                     local tName = resolveTokenName(best.obj)
                     if best.priority == 0 then
-                        log("Token", string.format("🔗 НАЙДЕН TOKEN LINK! Бегу собрать его в первую очередь (дистанция %.1f studs)!", math.sqrt(math.max(0, bestKey + 10000000))))
+                        log("Token", string.format("🔗 НАЙДЕН TOKEN LINK! Бегу собрать его в первую очередь (дистанция %.1f studs)!", math.sqrt(bestDistSq)))
                     elseif isP1 then
-                        log("Token", string.format("⚡ Бегу за приоритетным токеном: %s (P1) на расстоянии %.1f studs!", tName, math.sqrt(bestKey)))
+                        log("Token", string.format("⚡ Бегу за приоритетным токеном: %s (P1) на расстоянии %.1f studs!", tName, math.sqrt(bestDistSq)))
                     end
                 end
                 activeTokenObj = best.obj
@@ -7039,16 +6997,18 @@ local localVisitedTasks = {}
 
 local function isTaskVisited(jobId)
     if not jobId or jobId == "" then return true end
-    if jobId == game.JobId then return true end
+    local norm = normalizeJobId(jobId)
+    if norm == "" or norm == normalizeJobId(game.JobId) then return true end
+    if isVisitedServer(jobId) then return true end
     if failedServers[jobId] and (os.clock() - failedServers[jobId] < 30) then return true end
-    local t = localVisitedTasks[jobId]
-    if t and (os.clock() - t < 45) then return true end
+    if localVisitedTasks[norm] then return true end
     return false
 end
 
 local function markTaskVisited(jobId)
     if jobId and jobId ~= "" then
-        localVisitedTasks[jobId] = os.clock()
+        local norm = normalizeJobId(jobId)
+        localVisitedTasks[norm] = os.clock()
         pcall(function() addVisitedServer(jobId) end)
     end
 end
