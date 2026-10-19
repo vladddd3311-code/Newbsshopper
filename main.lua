@@ -4425,8 +4425,8 @@ function sproutHasGlow(sprout)
     local ok, descendants = pcall(function() return sprout:GetDescendants() end)
     if not ok then return false end
     for _, d in ipairs(descendants) do
-        if partGlows(d) or d:IsA("PointLight") or d:IsA("SpotLight")
-            or d:IsA("SurfaceLight") or d:IsA("Highlight") then return true end
+        if partGlows(d) then return true end
+        if d:IsA("Light") and d.Enabled and d.Brightness > 0 then return true end
     end
     return false
 end
@@ -4474,6 +4474,37 @@ function detectRarity(sprout)
         end
     end
 
+    -- 3.5 Проверка по дочерним объектам, текстурам и декалям (Moon / Epic)
+    if okGui and descendants then
+        for _, d in ipairs(descendants) do
+            local dName = string.lower(tostring(d.Name or ""))
+            if string.find(dName, "moon", 1, true) or string.find(dName, "lunar", 1, true) then
+                return "moon", "descendant-name:" .. dName
+            end
+            if string.find(dName, "epic", 1, true) then
+                return "epic", "descendant-name:" .. dName
+            end
+            if d:IsA("Decal") or d:IsA("Texture") then
+                local tex = string.lower(tostring(d.Texture or ""))
+                if string.find(tex, "moon", 1, true) or string.find(tex, "2007780300", 1, true) then
+                    return "moon", "decal:moon"
+                end
+                if string.find(tex, "epic", 1, true) then
+                    return "epic", "decal:epic"
+                end
+            end
+            if d:IsA("Light") and d.Enabled and d.Brightness > 0 then
+                local lh, lsat, lval = hueOf(d.Color)
+                local ldeg = lh * 360
+                if ldeg >= 75 and ldeg <= 155 and lsat >= 0.20 then
+                    return "supreme", "light:supreme-green"
+                elseif (ldeg >= 160 and ldeg <= 275) or (lsat <= 0.35 and lval >= 0.6) then
+                    return "moon", "light:moon-blue"
+                end
+            end
+        end
+    end
+
     -- Собираем все BasePart детали ростка
     local parts = {}
     if sprout:IsA("BasePart") then table.insert(parts, sprout) end
@@ -4487,7 +4518,7 @@ function detectRarity(sprout)
 
     -- 4. ВЫСШИЙ ПРИОРИТЕТ: СВЕТЯЩИЕСЯ NEON РОСТКИ (В BSS СВЕТЯТСЯ ТОЛЬКО ДВА: SUPREME И MOON!)
     -- Supreme = Люминесцентный зеленый Neon.
-    -- Moon = Люминесцентный синий/голубой Neon.
+    -- Moon = Люминесцентный синий/голубой Neon или белое лунное свечение.
     for _, part in ipairs(parts) do
         local isNeon = (part.Material == Enum.Material.Neon)
         if isNeon or hasGlow then
@@ -4495,18 +4526,29 @@ function detectRarity(sprout)
             local deg = h * 360
 
             -- 👑 Supreme Sprout: яркий неоновый зеленый (80° - 155°)
-            if deg >= 80 and deg <= 155 and sat >= 0.28 and val >= 0.40 then
+            if deg >= 80 and deg <= 155 and sat >= 0.25 and val >= 0.35 then
                 return "supreme", "sig:supreme-neon"
             end
 
-            -- 🌙 Moon Sprout: яркий неоновый синий/голубой (180° - 245°)
-            if isNeon and deg >= 180 and deg <= 245 and sat >= 0.28 and val >= 0.40 then
-                return "moon", "sig:moon-neon"
+            -- 🌙 Moon Sprout: неоновый синий / голубой / циан / лунный белый (160° - 275°)
+            if deg >= 160 and deg <= 275 and sat >= 0.10 and val >= 0.30 then
+                return "moon", "sig:moon-blue"
+            end
+
+            -- 🌙 Moon Sprout: белый неон (лунный свет)
+            if isNeon and sat < 0.15 and val >= 0.70 then
+                return "moon", "sig:moon-white"
             end
         end
     end
 
-    -- 5. ЦВЕТНЫЕ РОСТКИ БЕЗ НЕОНА (GUMMY, LEGENDARY, EPIC, RARE)
+    -- Если у ростка есть настоящее игровое свечение (hasGlow), но это не Supreme — это 100% Moon Sprout!
+    -- Ни один другой росток (Common, Rare, Epic, Legendary, Gummy) в BSS НЕ светится!
+    if hasGlow then
+        return "moon", "sig:moon-glow-fallback"
+    end
+
+    -- 5. ЦВЕТНЫЕ РОСТКИ БЕЗ НЕОНА И БЕЗ СВЕЧЕНИЯ (GUMMY, LEGENDARY, EPIC, RARE, BASIC)
     for _, part in ipairs(parts) do
         local h, sat, val = hueOf(part.Color)
         local deg = h * 360
@@ -4524,13 +4566,17 @@ function detectRarity(sprout)
             return "legendary", "sig:legendary-teal"
         end
 
-        -- 🥇 Epic Sprout: золотой/желтый (25° - 68°)
-        if deg >= 25 and deg <= 68 and sat >= 0.35 and val >= 0.25 and not isGrey then
-            return "epic", "sig:epic"
+        -- 🥇 Epic Sprout: ЧИСТЫЙ ЗОЛОТОЙ/ЖЕЛТЫЙ БУТОН (36° - 60°)
+        -- Требования: высокая яркость (val >= 0.75), насыщенное золото (sat >= 0.55),
+        -- преобладание красного и зеленого (r >= 0.75, g >= 0.55, b <= 0.42).
+        -- Это исключает коричневые/древесные стебли (r < 0.75 или val < 0.70), желто-зеленую траву (g > r) и грязь!
+        if part.Material ~= Enum.Material.Neon and deg >= 36 and deg <= 60
+            and sat >= 0.55 and val >= 0.75
+            and r >= 0.75 and g >= 0.55 and b <= 0.42 and not isGrey then
+            return "epic", "sig:epic-gold"
         end
 
         -- 🥈 Rare Sprout: СТРОГО серебристый/металлический/серый без зеленого оттенка
-        -- У Common зеленоватый оттенок (g > r и g > b). У Rare - чистый серый/серебристый или металл!
         local isGreenish = (g > r and g > b and (g - r) >= 0.01) or (deg >= 70 and deg <= 155)
         if not isGreenish and (part.Material == Enum.Material.Metal or part.Material == Enum.Material.Glass or part.Reflectance > 0.05 or isGrey)
             and sat < 0.15 and val >= 0.45 and val <= 0.95 then
@@ -4553,8 +4599,19 @@ function detectRarity(sprout)
         end
     end
 
+    -- 6.5 Дополнительная проверка по пыльце для Epic:
+    -- Если пыльцы >= 6,500,000 на обычном поле, росток не может быть Basic (Common max на полях 1-5 уровня = 2.5M).
+    if maxPollenNum >= 6500000 then
+        for _, part in ipairs(parts) do
+            local h, sat, val = hueOf(part.Color)
+            local deg = h * 360
+            if deg >= 32 and deg <= 64 and sat >= 0.40 and val >= 0.60 then
+                return "epic", "sig:epic-pollen-gold"
+            end
+        end
+    end
+
     -- 7. ЕСЛИ РЕДКОСТЬ НЕ ОПРЕДЕЛЕНА — ЭТО 100% COMMON (BASIC) РОСТОК!
-    -- В BSS у Common ростка нет специальной метки редкости.
     return "basic", "default:common"
 end
 
