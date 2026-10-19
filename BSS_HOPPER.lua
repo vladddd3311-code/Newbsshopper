@@ -901,7 +901,6 @@ isSprout = function(obj)
         return obj.Name, obj.Parent, obj:IsA("BasePart"), obj:IsA("Model"), obj:IsA("Folder")
     end)
     if not ok or type(name) ~= "string" or not parent then return false end
-    if string.lower(name) ~= "sprout" then return false end
 
     -- Строго отсекаем любые плантеры (Pesticide Planter, Paper Planter и т.д.)
     local cur = obj
@@ -909,6 +908,29 @@ isSprout = function(obj)
         local n = string.lower(cur.Name or "")
         if string.find(n, "planter", 1, true) then return false end
         cur = cur.Parent
+    end
+
+    -- Проверяем, находится ли объект внутри папки Sprouts
+    local inSproutsFolder = false
+    cur = parent
+    while cur and cur ~= Workspace do
+        local pn = string.lower(cur.Name or "")
+        if pn == "sprouts" or pn == "folder2" then
+            inSproutsFolder = true
+            break
+        end
+        cur = cur.Parent
+    end
+
+    local n = string.lower(name)
+    if not inSproutsFolder then
+        local hasSproutName = string.find(n, "sprout", 1, true) ~= nil
+        if not hasSproutName then
+            local okAttr, isSproutAttr = pcall(function()
+                return obj:GetAttribute("Sprout") or obj:GetAttribute("Rarity") or obj:GetAttribute("SproutType")
+            end)
+            if not (okAttr and isSproutAttr) then return false end
+        end
     end
 
     if isPart then return true end
@@ -4561,7 +4583,7 @@ end
 function findLootableSprout()
     local best, bestPriority = nil, -1
     local function consider(obj)
-        if not obj or not isSprout(obj) then return end
+        if not obj or not isSprout(obj) or not worldPos(obj) then return end
         local eligible, rarity = isSproutEligible(obj)
         local priority = rarity and RARITY_PRIORITY[rarity] or 0
         if eligible and priority > bestPriority then best, bestPriority = obj, priority end
@@ -4570,6 +4592,10 @@ function findLootableSprout()
     for _, folder in ipairs(sproutFolders) do
         if folder and folder.Parent then
             consider(folder)
+            local okCh, chList = pcall(function() return folder:GetChildren() end)
+            if okCh and chList then
+                for _, child in ipairs(chList) do consider(child) end
+            end
             local ok, descendants = pcall(function() return folder:GetDescendants() end)
             if ok and descendants then
                 for _, child in ipairs(descendants) do consider(child) end
@@ -4581,6 +4607,10 @@ function findLootableSprout()
     if h then
         local hs = h:FindFirstChild("Sprouts")
         if hs then
+            local okCh, chList = pcall(function() return hs:GetChildren() end)
+            if okCh and chList then
+                for _, child in ipairs(chList) do consider(child) end
+            end
             local okH, hDesc = pcall(function() return hs:GetDescendants() end)
             if okH and hDesc then
                 for _, child in ipairs(hDesc) do consider(child) end
@@ -4589,6 +4619,10 @@ function findLootableSprout()
     end
     local ws = Workspace:FindFirstChild("Sprouts")
     if ws then
+        local okWCh, wChList = pcall(function() return ws:GetChildren() end)
+        if okWCh and wChList then
+            for _, child in ipairs(wChList) do consider(child) end
+        end
         local okW, wDesc = pcall(function() return ws:GetDescendants() end)
         if okW and wDesc then
             for _, child in ipairs(wDesc) do consider(child) end
@@ -4608,38 +4642,50 @@ function findLootableSprout()
 end
 
 function findAnySprout()
-    -- 1. Сначала проверяем лучший подходящий росток
-    local s = findLootableSprout()
-    if s and isSproutAlive(s) then return s end
-
-    -- 2. Затем общий поиск findSprout
-    s = findSprout()
-    if s and isSproutAlive(s) then return s end
-
-    -- 3. Прямой поиск в Happenings.Sprouts
+    -- 1. Сначала прямой поиск в Happenings.Sprouts
     local h = Workspace:FindFirstChild("Happenings")
     if h then
         local hs = h:FindFirstChild("Sprouts")
         if hs then
+            local okCh, chList = pcall(function() return hs:GetChildren() end)
+            if okCh and chList then
+                for _, child in ipairs(chList) do
+                    if isSprout(child) and isSproutAlive(child) and worldPos(child) then return child end
+                end
+            end
             local okH, hDesc = pcall(function() return hs:GetDescendants() end)
             if okH and hDesc then
                 for _, child in ipairs(hDesc) do
-                    if isSprout(child) and isSproutAlive(child) then return child end
+                    if isSprout(child) and isSproutAlive(child) and worldPos(child) then return child end
                 end
             end
         end
     end
 
-    -- 4. Прямой поиск в Workspace.Sprouts
+    -- 2. Прямой поиск в Workspace.Sprouts
     local ws = Workspace:FindFirstChild("Sprouts")
     if ws then
+        local okWCh, wChList = pcall(function() return ws:GetChildren() end)
+        if okWCh and wChList then
+            for _, child in ipairs(wChList) do
+                if isSprout(child) and isSproutAlive(child) and worldPos(child) then return child end
+            end
+        end
         local okW, wDesc = pcall(function() return ws:GetDescendants() end)
         if okW and wDesc then
             for _, child in ipairs(wDesc) do
-                if isSprout(child) and isSproutAlive(child) then return child end
+                if isSprout(child) and isSproutAlive(child) and worldPos(child) then return child end
             end
         end
     end
+
+    -- 3. Проверяем лучший подходящий росток по фильтрам редкости
+    local s = findLootableSprout()
+    if s and isSproutAlive(s) and worldPos(s) then return s end
+
+    -- 4. Затем общий поиск findSprout
+    s = findSprout()
+    if s and isSproutAlive(s) and worldPos(s) then return s end
 
     -- 5. Прямой поиск в Workspace.Particles.Folder2
     local part = Workspace:FindFirstChild("Particles") and Workspace.Particles:FindFirstChild("Folder2")
@@ -4647,7 +4693,7 @@ function findAnySprout()
         local okP, pDesc = pcall(function() return part:GetDescendants() end)
         if okP and pDesc then
             for _, child in ipairs(pDesc) do
-                if isSprout(child) and isSproutAlive(child) then return child end
+                if isSprout(child) and isSproutAlive(child) and worldPos(child) then return child end
             end
         end
     end
@@ -4656,7 +4702,7 @@ function findAnySprout()
     local okCh, chList = pcall(function() return Workspace:GetChildren() end)
     if okCh and chList then
         for _, child in ipairs(chList) do
-            if isSprout(child) and isSproutAlive(child) then return child end
+            if isSprout(child) and isSproutAlive(child) and worldPos(child) then return child end
         end
     end
 
@@ -6947,7 +6993,7 @@ function Searcher:Start()
             end
             local ok, err = pcall(function()
                 s.serversChecked += 1
-                local sprout = CONFIG.CHECK_SPROUTS and findSprout() or nil
+                local sprout = (CONFIG.CHECK_SPROUTS ~= false) and findAnySprout() or nil
 
                 if CONFIG.CHECK_PUFFSHROOMS then
                     local puff, puffRarity, puffLevel = findPuffshroom()
@@ -7080,7 +7126,7 @@ end
 
 local function isSproutLootProtected()
     -- 1. На сервере прямо сейчас есть активный росток для сбора
-    if CONFIG.CHECK_SPROUTS and findAnySprout() then
+    if (CONFIG.CHECK_SPROUTS ~= false) and findAnySprout() then
         return true, "на сервере активный росток"
     end
     -- 2. Росток сломан, но ещё не прошло 15 секунд обязательного сбора лута
@@ -7393,7 +7439,7 @@ function Looter:Start()
         local tStart = os.clock()
         while (os.clock() - tStart) < 1.2 do
             if not alive() then return end
-            if CONFIG.CHECK_SPROUTS then
+            if (CONFIG.CHECK_SPROUTS ~= false) then
                 sprout = findAnySprout()
                 if sprout then break end
             end
@@ -7401,7 +7447,7 @@ function Looter:Start()
         end
 
         local meteors = (not sprout and CONFIG.CHECK_METEORS ~= false) and findActiveMeteors() or nil
-        local vicious = (not sprout and not meteors and CONFIG.CHECK_VICIOUS) and findVicious() or nil
+        local vicious = (not sprout and not meteors and (CONFIG.CHECK_VICIOUS ~= false)) and findVicious() or nil
 
         -- ЕСЛИ РОСТОК ЕСТЬ — ЗАБЫВАЕТ ПРО ОЧЕРЕДЬ И ИДЕТ ЕГО ЛУТАТЬ!
         if sprout then
@@ -7491,7 +7537,7 @@ function Looter:Start()
                 s.serversChecked += 1
 
                 -- 1. Если на сервере есть росток — ЛУТАЕМ ЕГО, ЗАБЫВАЯ ПРО ОЧЕРЕДЬ!
-                local activeSprout = CONFIG.CHECK_SPROUTS and findAnySprout() or nil
+                local activeSprout = (CONFIG.CHECK_SPROUTS ~= false) and findAnySprout() or nil
                 if activeSprout then
                     stopAutoDig()
                     tokenCollectorBusy = false
@@ -7513,7 +7559,7 @@ function Looter:Start()
                 end
 
                 -- 3. Если на сервере Вициус — бьем его
-                if CONFIG.CHECK_VICIOUS then
+                if CONFIG.CHECK_VICIOUS ~= false then
                     local v = findVicious()
                     if v then
                         stopAutoDig()
@@ -7555,10 +7601,10 @@ function Looter:Start()
 
                 -- 5. ТЕПЕРЬ ВСПОМИНАЕМ ПРО ОЧЕРЕДЬ (ростков на этом сервере нет, лут собран):
                 local taskData, skipReason = nil, nil
-                if CONFIG.CHECK_VICIOUS then
+                if CONFIG.CHECK_VICIOUS ~= false then
                     taskData, skipReason = self:fetchNextVicious()
                 end
-                if not taskData and CONFIG.CHECK_SPROUTS then
+                if not taskData and (CONFIG.CHECK_SPROUTS ~= false) then
                     local sData, sReason = self:fetchNext()
                     if sData then
                         local taskRarity = normalizeRarity(sData.level)
@@ -7574,7 +7620,7 @@ function Looter:Start()
 
                 if taskData and taskData.jobId then
                     -- Дополнительная финальная проверка: вдруг росток или метеор появились прямо сейчас
-                    local localSproutCheck = CONFIG.CHECK_SPROUTS and findAnySprout() or nil
+                    local localSproutCheck = (CONFIG.CHECK_SPROUTS ~= false) and findAnySprout() or nil
                     if localSproutCheck then
                         self:returnTask(taskData, "farming_local_sprout")
                         pcall(function() self:harvest(localSproutCheck) end)
@@ -7616,13 +7662,13 @@ function Looter:Start()
                         local found = false
                         for _ = 1, 8 do
                             if not alive() then return end
-                            local sObj = CONFIG.CHECK_SPROUTS and findAnySprout() or nil
+                            local sObj = (CONFIG.CHECK_SPROUTS ~= false) and findAnySprout() or nil
                             if sObj then
                                 pcall(function() self:harvest(sObj) end)
                                 found = true
                                 break
                             end
-                            if CONFIG.CHECK_VICIOUS and findVicious() then
+                            if (CONFIG.CHECK_VICIOUS ~= false) and findVicious() then
                                 pcall(function() fightVicious(findVicious()) end)
                                 found = true
                                 break
@@ -7674,6 +7720,18 @@ function Looter:Start()
                 local fallbackField = CONFIG.FALLBACK_FARM_FIELD
                 local canFallbackFarm = fallbackField and fallbackField ~= "" and fallbackField ~= "None"
 
+                -- ПРОВЕРКА: Если на сервере есть росток прямо перед уходом на запасное поле — собираем его!
+                local directSprout = (CONFIG.CHECK_SPROUTS ~= false) and findAnySprout() or nil
+                if directSprout then
+                    stopAutoDig()
+                    tokenCollectorBusy = false
+                    s.currentStatus = "Росток на сервере — лутаю!"
+                    if not hasOwnHive() then pcall(ensureHiveClaimed) end
+                    pcall(function() self:harvest(directSprout) end)
+                    if isBackpackFull() then pcall(makeHoney) end
+                    return
+                end
+
                 if canFallbackFarm then
                     local fPart = getFieldPart(fallbackField)
                     if fPart and alive() then
@@ -7710,12 +7768,23 @@ function Looter:Start()
                             startAutoDig()
                             collectTokensFor(1.8, function()
                                 if not alive() then return true end
-                                if CONFIG.CHECK_SPROUTS and findAnySprout() then return true end
+                                if (CONFIG.CHECK_SPROUTS ~= false) and findAnySprout() then return true end
                                 if (CONFIG.CHECK_METEORS ~= false) and findActiveMeteors() then return true end
-                                if CONFIG.CHECK_VICIOUS and findVicious() then return true end
+                                if (CONFIG.CHECK_VICIOUS ~= false) and findVicious() then return true end
                                 if isBackpackFull() then return true end
                                 return false
                             end, safeGround)
+
+                            local foundSprout = (CONFIG.CHECK_SPROUTS ~= false) and findAnySprout() or nil
+                            if foundSprout then
+                                stopAutoDig()
+                                tokenCollectorBusy = false
+                                s.currentStatus = "Обнаружен росток! Переключаюсь с фарма поля..."
+                                if not hasOwnHive() then pcall(ensureHiveClaimed) end
+                                pcall(function() self:harvest(foundSprout) end)
+                                if isBackpackFull() then pcall(makeHoney) end
+                                return
+                            end
                         end
                     else
                         stopAutoDig()
@@ -7820,8 +7889,8 @@ function Solo:Start()
 
                 -- Комплексная проверка целей: Vicious, Росток, Грибы, Windy Bee, Метеоры
                 s.currentStatus = "Сканирую сервер на цели (ростки, грибы, вициус, windy, метеоры)..."
-                local vicious = CONFIG.CHECK_VICIOUS and findVicious() or nil
-                local sprout = CONFIG.CHECK_SPROUTS and findSprout() or nil
+                local vicious = (CONFIG.CHECK_VICIOUS ~= false) and findVicious() or nil
+                local sprout = (CONFIG.CHECK_SPROUTS ~= false) and findAnySprout() or nil
                 local puffRoot, puffRarity, puffLevel = nil, nil, nil
                 if CONFIG.CHECK_PUFFSHROOMS then
                     puffRoot, puffRarity, puffLevel = findPuffshroom()
@@ -8014,7 +8083,7 @@ function Solo:Start()
                 -- Если ростка нет на сервере — быстрый переход (с защитой от ухода до завершения сбора и 15с)
                 local isProtected, protectReason = isSproutLootProtected()
                 if isProtected then
-                    if CONFIG.CHECK_SPROUTS and findSprout() then
+                    if (CONFIG.CHECK_SPROUTS ~= false) and findAnySprout() then
                         -- росток есть на сервере
                     elseif lastSproutBrokenTime > 0 and (os.clock() - lastSproutBrokenTime < 15) then
                         local rem = math.ceil(15 - (os.clock() - lastSproutBrokenTime))
@@ -9076,13 +9145,13 @@ new("TextLabel", {
 
 -- 4. Quick Targets
 section(PAGE_HOME, "Quick Targets", 30)
-makeToggle(PAGE_HOME, "Loot Sprouts", "Automatically locate and harvest sprouts", CONFIG.CHECK_SPROUTS, 31, function(v)
+makeToggle(PAGE_HOME, "Loot Sprouts", "Automatically locate and harvest sprouts", CONFIG.CHECK_SPROUTS ~= false, 31, function(v)
     CONFIG.CHECK_SPROUTS = v; saveNow()
 end)
-makeToggle(PAGE_HOME, "Hunt Vicious Bee", "Attack wild Vicious Bees on fields", CONFIG.CHECK_VICIOUS, 32, function(v)
+makeToggle(PAGE_HOME, "Hunt Vicious Bee", "Attack wild Vicious Bees on fields", CONFIG.CHECK_VICIOUS ~= false, 32, function(v)
     CONFIG.CHECK_VICIOUS = v; saveNow()
 end)
-makeToggle(PAGE_HOME, "Loot Meteor Shower", "Collect all falling mythic meteor tokens", CONFIG.CHECK_METEORS, 33, function(v)
+makeToggle(PAGE_HOME, "Loot Meteor Shower", "Collect all falling mythic meteor tokens", CONFIG.CHECK_METEORS ~= false, 33, function(v)
     CONFIG.CHECK_METEORS = v; saveNow()
 end)
 makeToggle(PAGE_HOME, "Hunt Windy Bee", "Fight wild Windy Bee in cloud", CONFIG.CHECK_WINDY, 34, function(v)
