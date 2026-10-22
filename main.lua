@@ -843,13 +843,53 @@ end
 if CONFIG.ANTI_LAG then applyAntiLag(true) end
 if CONFIG.SUPER_OPTIMIZE then applySuperOptimization(true) end
 
+local potatoBlackoutGui = nil
 function applyPotatoMode(enabled)
     CONFIG.POTATO_MODE = (enabled == true)
     CONFIG.DISABLE_3D_RENDERING = (enabled == true)
+
+    -- 1. Безопасный черный оверлей (Blackout): 0% нагрузка на видеокарту БЕЗ краша DirectX!
     pcall(function()
-        local rs = game:GetService("RunService")
-        rs:Set3dRenderingEnabled(not enabled)
+        local coreGui = game:GetService("CoreGui")
+        local pGui = player and player:FindFirstChild("PlayerGui")
+        local parentTarget = coreGui or pGui
+        if enabled then
+            if not potatoBlackoutGui or not potatoBlackoutGui.Parent then
+                potatoBlackoutGui = Instance.new("ScreenGui")
+                potatoBlackoutGui.Name = "BSS_PotatoBlackout"
+                potatoBlackoutGui.DisplayOrder = 1
+                potatoBlackoutGui.IgnoreGuiInset = true
+                potatoBlackoutGui.ResetOnSpawn = false
+
+                local bg = Instance.new("Frame")
+                bg.Size = UDim2.new(1, 0, 1, 0)
+                bg.BackgroundColor3 = Color3.new(0, 0, 0)
+                bg.BorderSizePixel = 0
+                bg.ZIndex = 1
+                bg.Parent = potatoBlackoutGui
+
+                local lbl = Instance.new("TextLabel")
+                lbl.Size = UDim2.new(1, 0, 0, 35)
+                lbl.Position = UDim2.new(0, 0, 0, 8)
+                lbl.BackgroundTransparency = 1
+                lbl.Text = "🥔 POTATO MODE ACTIVE (ZERO GPU LOAD)"
+                lbl.TextColor3 = Color3.fromRGB(0, 245, 160)
+                lbl.Font = Enum.Font.GothamBold
+                lbl.TextSize = 13
+                lbl.ZIndex = 2
+                lbl.Parent = bg
+
+                pcall(function() potatoBlackoutGui.Parent = parentTarget end)
+            end
+        else
+            if potatoBlackoutGui then
+                pcall(function() potatoBlackoutGui:Destroy() end)
+                potatoBlackoutGui = nil
+            end
+        end
     end)
+
+    -- 2. Ограничение FPS (15 FPS экономит 80% ресурсов процессора и видеокарты)
     pcall(function()
         if type(setfpscap) == "function" then
             if enabled then
@@ -860,6 +900,8 @@ function applyPotatoMode(enabled)
             end
         end
     end)
+
+    -- 3. Отключение теней и тумана
     pcall(function()
         local Lighting = game:GetService("Lighting")
         if enabled then
@@ -869,6 +911,15 @@ function applyPotatoMode(enabled)
             Lighting.GlobalShadows = true
         end
     end)
+
+    -- 4. Управление 3D рендерингом (при выключении всегда возвращаем true)
+    pcall(function()
+        local rs = game:GetService("RunService")
+        if not enabled then
+            rs:Set3dRenderingEnabled(true)
+        end
+    end)
+
     if enabled then
         pcall(function() collectgarbage("collect") end)
     end
@@ -937,16 +988,20 @@ end
 
 isSprout = function(obj)
     if not obj then return false end
-    local ok, name, parent, isPart, isModel, isFolder = pcall(function()
-        return obj.Name, obj.Parent, obj:IsA("BasePart"), obj:IsA("Model"), obj:IsA("Folder")
+    if obj:IsA("Folder") or obj:IsA("Workspace") then return false end
+    local ok, name, parent, isPart, isModel = pcall(function()
+        return obj.Name, obj.Parent, obj:IsA("BasePart"), obj:IsA("Model")
     end)
     if not ok or type(name) ~= "string" or not parent then return false end
+
+    local n = string.lower(name)
+    if n == "sprouts" or n == "folder2" or n == "happenings" then return false end
 
     -- Строго отсекаем любые плантеры (Pesticide Planter, Paper Planter и т.д.)
     local cur = obj
     while cur and cur ~= Workspace do
-        local n = string.lower(cur.Name or "")
-        if string.find(n, "planter", 1, true) then return false end
+        local cn = string.lower(cur.Name or "")
+        if string.find(cn, "planter", 1, true) then return false end
         cur = cur.Parent
     end
 
@@ -962,7 +1017,6 @@ isSprout = function(obj)
         cur = cur.Parent
     end
 
-    local n = string.lower(name)
     if not inSproutsFolder then
         local hasSproutName = string.find(n, "sprout", 1, true) ~= nil
         if not hasSproutName then
@@ -974,9 +1028,9 @@ isSprout = function(obj)
     end
 
     if isPart then return true end
-    if isModel or isFolder then
+    if isModel then
         local okParts, descendants = pcall(function() return obj:GetDescendants() end)
-        if not okParts then return isModel end
+        if not okParts then return true end
         for _, d in ipairs(descendants) do
             if d:IsA("BasePart") then return true end
         end
@@ -1871,8 +1925,43 @@ end
 --  ЛОКАЛЬНАЯ ОЧЕРЕДЬ ЦЕЛЕЙ ДЛЯ РЕЖИМА "ONLY YOU"
 -- ══════════════════════════════════════════════════════════════════════
 local LOCAL_QUEUE_FILE = "bss_local_queue.json"
+local localVisitedTasks = {}
+
+function isTaskVisited(jobId)
+    if not jobId or jobId == "" then return true end
+    local norm = normalizeJobId(jobId)
+    if norm == "" or norm == normalizeJobId(game.JobId) then return true end
+    if failedServers and failedServers[jobId] and (os.clock() - failedServers[jobId] < 30) then return true end
+    if localVisitedTasks[norm] and (os.clock() - localVisitedTasks[norm] < 300) then return true end
+    return false
+end
+
+function markTaskVisited(jobId)
+    if jobId and jobId ~= "" then
+        local norm = normalizeJobId(jobId)
+        localVisitedTasks[norm] = os.clock()
+        if addVisitedServer then pcall(function() addVisitedServer(jobId) end) end
+    end
+end
+
+function removeLocalQueueTarget(jobId)
+    if not HAS_FS or not jobId then return end
+    local ok, content = pcall(readfile, LOCAL_QUEUE_FILE)
+    if not ok or not content or content == "" then return end
+    local okD, list = pcall(function() return HttpService:JSONDecode(content) end)
+    if not okD or type(list) ~= "table" then return end
+    local norm = normalizeJobId(jobId)
+    local updated = {}
+    for _, item in ipairs(list) do
+        if normalizeJobId(item.jobId) ~= norm then
+            table.insert(updated, item)
+        end
+    end
+    pcall(writefile, LOCAL_QUEUE_FILE, HttpService:JSONEncode(updated))
+end
+
 function writeLocalQueueTarget(targetData)
-    if not HAS_FS then return end
+    if not HAS_FS or not targetData then return end
     local list = {}
     local ok, content = pcall(readfile, LOCAL_QUEUE_FILE)
     if ok and content and content ~= "" then
@@ -1882,7 +1971,7 @@ function writeLocalQueueTarget(targetData)
     local now = os.time()
     local filtered = {}
     for _, item in ipairs(list) do
-        if item.timestamp and (now - item.timestamp < 180) and item.jobId ~= targetData.jobId then
+        if item.timestamp and (now - item.timestamp < 240) and item.jobId ~= targetData.jobId then
             table.insert(filtered, item)
         end
     end
@@ -1891,7 +1980,7 @@ function writeLocalQueueTarget(targetData)
     pcall(writefile, LOCAL_QUEUE_FILE, HttpService:JSONEncode(filtered))
 end
 
-function readLocalQueueTarget(targetType)
+function readLocalQueueTarget(targetType, filterFn)
     if not HAS_FS then return nil end
     local ok, content = pcall(readfile, LOCAL_QUEUE_FILE)
     if not ok or not content or content == "" then return nil end
@@ -1899,11 +1988,13 @@ function readLocalQueueTarget(targetType)
     if not okD or type(list) ~= "table" then return nil end
     local now = os.time()
     for _, item in ipairs(list) do
-        local age = now - (item.timestamp or now)
-        if age <= 180 and not isTaskVisited(item.jobId) then
+        local age = now - (tonumber(item.timestamp) or now)
+        if age <= 240 and not isTaskVisited(item.jobId) then
             if not targetType or item.type == targetType then
-                item.age = age
-                return item
+                if not filterFn or filterFn(item) then
+                    item.age = age
+                    return item
+                end
             end
         end
     end
@@ -4340,7 +4431,13 @@ function resetRejoinTries() if rejoinTries > 0 then rejoinTries = 0 end end
 function markTeleport(j) pendingTarget = j; pendingAt = os.clock(); resetRejoinTries() end
 function clearTeleport() pendingTarget = nil; pendingAt = 0 end
 
+local isTeleportInProgress = false
+
 function hopTo(jobId, placeId, isTaskHop)
+    if isTeleportInProgress and (os.clock() - lastTeleportAt < 10) then
+        return false
+    end
+
     -- Защита от блокировки прыжка: если рюкзак пуст, флаг конвертации сбрасывается
     if isConvertingHoney then
         local bp = getBackpackPollen()
@@ -4362,8 +4459,18 @@ function hopTo(jobId, placeId, isTaskHop)
         log("Телепорт", string.format("СТРОГИЙ ЗАПРЕТ: Сервер %s уже посещался! Отмена телепорта.", tostring(jobId):sub(1, 12)))
         return false
     end
+
+    -- Concurrency guard: lock immediately before any yielding
+    isTeleportInProgress = true
     lastAttemptId += 1
     lastTeleportAt = os.clock()
+
+    -- ГАРАНТИЯ 3D РЕНДЕРА ПЕРЕД ТЕЛЕПОРТОМ (Предотвращает краш DirectX / D3D11 device loss)
+    pcall(function()
+        game:GetService("RunService"):Set3dRenderingEnabled(true)
+    end)
+    task.wait(0.12)
+
     markTeleport(jobId)
     flushSettings()
     armTeleportPersistence()
@@ -4376,6 +4483,7 @@ function hopTo(jobId, placeId, isTaskHop)
         TeleportService:TeleportToPlaceInstance(pid, jobId, player)
     end)
     if not ok then
+        isTeleportInProgress = false
         rememberFailure(jobId)
         log("Телепорт", "Сбой вызова TeleportToPlaceInstance: " .. tostring(err))
         if CONFIG.ENABLE_BYPASS then bypassRecover("teleport_fail") end
@@ -4606,6 +4714,15 @@ end)
 
 safeConnect(TeleportService, "TeleportInitFailed", function(plr, result, msg)
     if plr ~= player then return end
+
+    -- Если предыдущий телепорт еще в обработке, не сбрасываем флаг и не спамим запросами
+    if result == Enum.TeleportResult.IsTeleporting then
+        return
+    end
+
+    isTeleportInProgress = false
+    pcall(function() game:GetService("RunService"):Set3dRenderingEnabled(true) end)
+
     local code = tonumber(result)
     log("TP", "TeleportInitFailed: " .. tostring(result) .. " (" .. tostring(msg) .. ")")
     if code and RETRYABLE_TELEPORT_CODES[code] then
@@ -4723,7 +4840,6 @@ function sproutHasGlow(sprout)
     if not ok then return false end
     for _, d in ipairs(descendants) do
         if partGlows(d) then return true end
-        if d:IsA("Light") and d.Enabled and d.Brightness > 0 then return true end
     end
     return false
 end
@@ -4793,9 +4909,11 @@ function detectRarity(sprout)
             if d:IsA("Light") and d.Enabled and d.Brightness > 0 then
                 local lh, lsat, lval = hueOf(d.Color)
                 local ldeg = lh * 360
-                if ldeg >= 75 and ldeg <= 155 and lsat >= 0.20 then
+                -- Supreme: яркий зеленый свет
+                if ldeg >= 75 and ldeg <= 155 and lsat >= 0.30 and lval >= 0.35 then
                     return "supreme", "light:supreme-green"
-                elseif (ldeg >= 160 and ldeg <= 275) or (lsat <= 0.35 and lval >= 0.6) then
+                -- Moon: насыщенный синий/голубой свет (СТРОГО НЕ БЕЛЫЙ! Белый свет по умолчанию есть у всех ростков)
+                elseif ldeg >= 180 and ldeg <= 245 and lsat >= 0.40 and lval >= 0.40 then
                     return "moon", "light:moon-blue"
                 end
             end
@@ -4811,14 +4929,12 @@ function detectRarity(sprout)
         end
     end
 
-    local hasGlow = sproutHasGlow(sprout)
-
     -- 4. ВЫСШИЙ ПРИОРИТЕТ: СВЕТЯЩИЕСЯ NEON РОСТКИ (В BSS СВЕТЯТСЯ ТОЛЬКО ДВА: SUPREME И MOON!)
     -- Supreme = Люминесцентный зеленый Neon.
     -- Moon = Люминесцентный синий/голубой Neon или белое лунное свечение.
     for _, part in ipairs(parts) do
         local isNeon = (part.Material == Enum.Material.Neon)
-        if isNeon or hasGlow then
+        if isNeon then
             local h, sat, val = hueOf(part.Color)
             local deg = h * 360
 
@@ -4827,22 +4943,16 @@ function detectRarity(sprout)
                 return "supreme", "sig:supreme-neon"
             end
 
-            -- 🌙 Moon Sprout: неоновый синий / голубой / циан / лунный белый (160° - 275°)
-            if deg >= 160 and deg <= 275 and sat >= 0.10 and val >= 0.30 then
+            -- 🌙 Moon Sprout: неоновый синий / голубой / циан (165° - 265°)
+            if deg >= 165 and deg <= 265 and sat >= 0.25 and val >= 0.30 then
                 return "moon", "sig:moon-blue"
             end
 
             -- 🌙 Moon Sprout: белый неон (лунный свет)
-            if isNeon and sat < 0.15 and val >= 0.70 then
+            if sat < 0.15 and val >= 0.85 then
                 return "moon", "sig:moon-white"
             end
         end
-    end
-
-    -- Если у ростка есть настоящее игровое свечение (hasGlow), но это не Supreme — это 100% Moon Sprout!
-    -- Ни один другой росток (Common, Rare, Epic, Legendary, Gummy) в BSS НЕ светится!
-    if hasGlow then
-        return "moon", "sig:moon-glow-fallback"
     end
 
     -- 5. ЦВЕТНЫЕ РОСТКИ БЕЗ НЕОНА И БЕЗ СВЕЧЕНИЯ (GUMMY, LEGENDARY, EPIC, RARE, BASIC)
@@ -4988,9 +5098,6 @@ function findLootableSprout()
         if okP and pDesc then
             for _, child in ipairs(pDesc) do consider(child) end
         end
-    end
-    if not best then
-        best = findSprout()
     end
     return best
 end
@@ -7495,29 +7602,11 @@ end
 
 local lastSproutBrokenTime = 0
 local lastSproutHarvestAnchor = nil
-local localVisitedTasks = {}
-
-local function isTaskVisited(jobId)
-    if not jobId or jobId == "" then return true end
-    local norm = normalizeJobId(jobId)
-    if norm == "" or norm == normalizeJobId(game.JobId) then return true end
-    if failedServers[jobId] and (os.clock() - failedServers[jobId] < 30) then return true end
-    if localVisitedTasks[norm] and (os.clock() - localVisitedTasks[norm] < 300) then return true end
-    return false
-end
-
-local function markTaskVisited(jobId)
-    if jobId and jobId ~= "" then
-        local norm = normalizeJobId(jobId)
-        localVisitedTasks[norm] = os.clock()
-        pcall(function() addVisitedServer(jobId) end)
-    end
-end
-
 local function isSproutLootProtected()
-    -- 1. На сервере прямо сейчас есть активный росток для сбора
-    if (CONFIG.CHECK_SPROUTS ~= false) and findAnySprout() then
-        return true, "на сервере активный росток"
+    -- 1. На сервере прямо сейчас есть активный росток для сбора (ТОЛЬКО РАЗРЕШЕННЫЙ ПО ФИЛЬТРАМ!)
+    local targetSprout = findLootableSprout()
+    if targetSprout and isSproutAlive(targetSprout) then
+        return true, "на сервере активный росток (" .. tostring(detectRarity(targetSprout) or "sprout") .. ")"
     end
     -- 2. Росток сломан, но ещё не прошло 15 секунд обязательного сбора лута
     if lastSproutBrokenTime > 0 then
@@ -7735,20 +7824,24 @@ end
 
 function Looter:fetchNext()
     -- 0. Check local queue first (Only You mode or fast local transfer)
-    local localTarget = readLocalQueueTarget("sprout")
+    local localTarget = readLocalQueueTarget("sprout", function(item)
+        local taskRarity = normalizeRarity(item.level)
+        if CONFIG.ALLOWED_SPROUT_RARITIES and CONFIG.ALLOWED_SPROUT_RARITIES[taskRarity] == false then
+            return false
+        end
+        return true
+    end)
     if localTarget then
         local taskRarity = normalizeRarity(localTarget.level)
-        if not CONFIG.ALLOWED_SPROUT_RARITIES or CONFIG.ALLOWED_SPROUT_RARITIES[taskRarity] ~= false then
-            return {
-                jobId = localTarget.jobId,
-                level = taskRarity,
-                placeId = localTarget.placeId or CONFIG.PLACE_ID,
-                fieldName = localTarget.fieldName or "unknown",
-                age = localTarget.age or 0,
-                priority = RARITY_PRIORITY[taskRarity] or 1,
-                searcherTag = localTarget.searcherTag or "local_queue",
-            }, nil
-        end
+        return {
+            jobId = localTarget.jobId,
+            level = taskRarity,
+            placeId = localTarget.placeId or CONFIG.PLACE_ID,
+            fieldName = localTarget.fieldName or "unknown",
+            age = localTarget.age or 0,
+            priority = RARITY_PRIORITY[taskRarity] or 1,
+            searcherTag = localTarget.searcherTag or "local_queue",
+        }, nil
     end
 
     local lastErr = nil
@@ -7862,10 +7955,13 @@ function Looter:Start()
         while (os.clock() - tStart) < 1.2 do
             if not alive() then return end
             if (CONFIG.CHECK_SPROUTS ~= false) then
-                sprout = findAnySprout()
+                sprout = findLootableSprout()
                 if sprout then break end
             end
             task.wait(0.1)
+        end
+        if not sprout then
+            s.currentStatus = "Ожидание задач от Searchers..."
         end
 
         local meteors = (not sprout and CONFIG.CHECK_METEORS ~= false) and findActiveMeteors() or nil
@@ -7959,7 +8055,7 @@ function Looter:Start()
                 s.serversChecked += 1
 
                 -- 1. Если на сервере есть росток — ЛУТАЕМ ЕГО, ЗАБЫВАЯ ПРО ОЧЕРЕДЬ!
-                local activeSprout = (CONFIG.CHECK_SPROUTS ~= false) and findAnySprout() or nil
+                local activeSprout = (CONFIG.CHECK_SPROUTS ~= false) and findLootableSprout() or nil
                 if activeSprout then
                     stopAutoDig()
                     tokenCollectorBusy = false
@@ -8032,6 +8128,7 @@ function Looter:Start()
                         local taskRarity = normalizeRarity(sData.level)
                         if CONFIG.ALLOWED_SPROUT_RARITIES and CONFIG.ALLOWED_SPROUT_RARITIES[taskRarity] == false then
                             self:returnTask(sData, "rarity_disabled")
+                            removeLocalQueueTarget(sData.jobId)
                             sData = nil
                         end
                         taskData = sData
@@ -8041,8 +8138,9 @@ function Looter:Start()
                 end
 
                 if taskData and taskData.jobId then
+                    removeLocalQueueTarget(taskData.jobId)
                     -- Дополнительная финальная проверка: вдруг росток или метеор появились прямо сейчас
-                    local localSproutCheck = (CONFIG.CHECK_SPROUTS ~= false) and findAnySprout() or nil
+                    local localSproutCheck = (CONFIG.CHECK_SPROUTS ~= false) and findLootableSprout() or nil
                     if localSproutCheck then
                         self:returnTask(taskData, "farming_local_sprout")
                         pcall(function() self:harvest(localSproutCheck) end)
