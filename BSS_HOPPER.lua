@@ -374,6 +374,18 @@ local CONFIG = {
     TOKEN_PRIORITIES = {},
     PERIODIC_REPORT_ENABLED = true,
     PERIODIC_REPORT_INTERVAL = 15,
+
+    -- Potato Mode & Multi-Instance Performance (4 Searchers + 1 Looter)
+    POTATO_MODE = false,
+    TARGET_FPS = 60,
+    AUTO_POTATO_ON_SEARCHER = false,
+
+    -- Searcher Broadcast Mode: "Only You" (Local queue) vs "All" (Telegram + Discord + Railway API)
+    SEARCHER_BROADCAST_MODE = "Only You",
+
+    -- Telegram Remote Control & Ultra-Rare Alerts
+    TELEGRAM_BOT_POLLING = true,
+    ALERT_ULTRA_RARE_ITEMS = true,
 }
 
 local SAVE_FILE = "bss_hopper_config.json"
@@ -494,6 +506,7 @@ local SAVED_KEYS = {
     "PLANTERS_CONFIG","PUFF_AUTO_BOOST_EPIC","PUFF_SELECTED_BOOSTS","PUFF_MIN_LEVEL","PUFF_MAX_LEVEL",
     "DISCORD_WEBHOOK_URL","TELEGRAM_BOT_TOKEN","TELEGRAM_CHAT_ID",
     "PERIODIC_REPORT_ENABLED","PERIODIC_REPORT_INTERVAL",
+    "POTATO_MODE","TARGET_FPS","AUTO_POTATO_ON_SEARCHER","SEARCHER_BROADCAST_MODE","TELEGRAM_BOT_POLLING","ALERT_ULTRA_RARE_ITEMS",
 }
 
 function applySavedData(data, source)
@@ -830,14 +843,41 @@ end
 if CONFIG.ANTI_LAG then applyAntiLag(true) end
 if CONFIG.SUPER_OPTIMIZE then applySuperOptimization(true) end
 
-function apply3dRendering(disabled)
-    CONFIG.DISABLE_3D_RENDERING = (disabled == true)
+function applyPotatoMode(enabled)
+    CONFIG.POTATO_MODE = (enabled == true)
+    CONFIG.DISABLE_3D_RENDERING = (enabled == true)
     pcall(function()
         local rs = game:GetService("RunService")
-        rs:Set3dRenderingEnabled(not disabled)
+        rs:Set3dRenderingEnabled(not enabled)
     end)
+    pcall(function()
+        if type(setfpscap) == "function" then
+            if enabled then
+                local fps = tonumber(CONFIG.TARGET_FPS) or 15
+                setfpscap(fps)
+            else
+                setfpscap(60)
+            end
+        end
+    end)
+    pcall(function()
+        local Lighting = game:GetService("Lighting")
+        if enabled then
+            Lighting.GlobalShadows = false
+            Lighting.FogEnd = 100000
+        else
+            Lighting.GlobalShadows = true
+        end
+    end)
+    if enabled then
+        pcall(function() collectgarbage("collect") end)
+    end
 end
-if CONFIG.DISABLE_3D_RENDERING then apply3dRendering(true) end
+
+function apply3dRendering(disabled)
+    applyPotatoMode(disabled == true)
+end
+if CONFIG.POTATO_MODE or CONFIG.DISABLE_3D_RENDERING then applyPotatoMode(true) end
 
 saveNow = function()
     local data = {}
@@ -1013,24 +1053,47 @@ function isSproutAlive(sprout, anchorPos)
     return false
 end
 
+local TOKEN_POS_CACHE = setmetatable({}, { __mode = "k" })
+
 function _rawWorldPos(obj)
     if not obj then return nil end
-    if obj:IsA("BasePart") then return obj.Position end
-    if obj:IsA("Model") then
+    local cached = TOKEN_POS_CACHE[obj]
+    if cached and obj.Parent then return cached end
+
+    local p = nil
+    if obj:IsA("BasePart") then
+        p = obj.Position
+    elseif obj:IsA("Model") then
         local prim = obj.PrimaryPart
-        if prim then return prim.Position end
-        local ok, piv = pcall(function() return obj:GetPivot().Position end)
-        if ok and piv then return piv end
+        if prim then
+            p = prim.Position
+        else
+            local ok, piv = pcall(function() return obj:GetPivot().Position end)
+            if ok and piv then p = piv end
+        end
+    else
+        local bp = obj:FindFirstChildWhichIsA("BasePart")
+        if bp then
+            p = bp.Position
+        else
+            local ok, bp2 = pcall(function() return obj:FindFirstChildWhichIsA("BasePart", true) end)
+            if ok and bp2 then p = bp2.Position end
+        end
     end
-    local bp = obj:FindFirstChildWhichIsA("BasePart", true)
-    if bp then return bp.Position end
-    return nil
+
+    if p then TOKEN_POS_CACHE[obj] = p end
+    return p
 end
 
 function worldPos(obj)
     if not obj then return nil end
+    local cached = TOKEN_POS_CACHE[obj]
+    if cached and obj.Parent then return cached end
     local ok, p = pcall(_rawWorldPos, obj)
-    if ok and p then return p end
+    if ok and p then
+        TOKEN_POS_CACHE[obj] = p
+        return p
+    end
     return nil
 end
 
@@ -1703,13 +1766,44 @@ local function getPlayerHoney()
     return 0
 end
 
+local ULTRA_RARE_ITEMS = {
+    ["Mythic Egg"] = true,
+    ["Star Egg"] = true,
+    ["Gifted Silver Egg"] = true,
+    ["Gifted Gold Egg"] = true,
+    ["Gifted Diamond Egg"] = true,
+    ["Diamond Egg"] = true,
+    ["Gold Egg"] = true,
+    ["Silver Egg"] = true,
+    ["Turpentine"] = true,
+    ["Super Smoothie"] = true,
+    ["Star Jelly"] = true,
+    ["Atomic Treat"] = true,
+    ["Purple Potion"] = true,
+    ["Night Bell"] = true,
+}
+
+local LOOT_HISTORY = {}
+local updateLootedUI = nil
+
 local LOOT_REPORT_STATS = {
     startTime = os.clock(),
     lastReportTime = os.clock(),
     startHoney = 0,
     lastHoney = 0,
     sprouts = 0,
+    sproutsByRarity = {
+        basic = 0,
+        silver = 0,
+        gold = 0,
+        diamond = 0,
+        epic = 0,
+        legendary = 0,
+        supreme = 0,
+        moon = 0,
+    },
     vicious = 0,
+    viciousByKind = { wild = 0, rogue = 0 },
     windy = 0,
     meteors = 0,
     planters = 0,
@@ -1717,11 +1811,204 @@ local LOOT_REPORT_STATS = {
     periodItems = {},
 }
 
+function addLootHistory(text, item, rarity)
+    local entry = {
+        time = os.time(),
+        text = tostring(text or ""),
+        item = item,
+        rarity = rarity or "normal"
+    }
+    table.insert(LOOT_HISTORY, 1, entry)
+    if #LOOT_HISTORY > 80 then table.remove(LOOT_HISTORY) end
+    if updateLootedUI then pcall(updateLootedUI) end
+end
+
+function recordSproutPopped(rarity, fieldName)
+    local r = string.lower(tostring(rarity or "basic"))
+    LOOT_REPORT_STATS.sprouts = (LOOT_REPORT_STATS.sprouts or 0) + 1
+    if not LOOT_REPORT_STATS.sproutsByRarity then
+        LOOT_REPORT_STATS.sproutsByRarity = {}
+    end
+    LOOT_REPORT_STATS.sproutsByRarity[r] = (LOOT_REPORT_STATS.sproutsByRarity[r] or 0) + 1
+    local fStr = fieldName and (" in " .. tostring(fieldName)) or ""
+    addLootHistory(string.format("🌱 Popped %s Sprout%s", string.upper(r), fStr), r, r)
+end
+
+function recordViciousDefeated(kind, fieldName)
+    local k = string.lower(tostring(kind or "wild"))
+    LOOT_REPORT_STATS.vicious = (LOOT_REPORT_STATS.vicious or 0) + 1
+    if not LOOT_REPORT_STATS.viciousByKind then
+        LOOT_REPORT_STATS.viciousByKind = {}
+    end
+    LOOT_REPORT_STATS.viciousByKind[k] = (LOOT_REPORT_STATS.viciousByKind[k] or 0) + 1
+    local fStr = fieldName and (" in " .. tostring(fieldName)) or ""
+    addLootHistory(string.format("🐝 Defeated %s Vicious Bee%s", string.upper(k), fStr), k, "vicious")
+end
+
 function recordLootItem(name, count)
     if not name or name == "" then return end
     count = count or 1
     LOOT_REPORT_STATS.items[name] = (LOOT_REPORT_STATS.items[name] or 0) + count
     LOOT_REPORT_STATS.periodItems[name] = (LOOT_REPORT_STATS.periodItems[name] or 0) + count
+    local isUltra = ULTRA_RARE_ITEMS[name] == true
+    addLootHistory(string.format("+%d %s", count, name), name, isUltra and "ultra" or "normal")
+
+    if isUltra and CONFIG.ALERT_ULTRA_RARE_ITEMS ~= false then
+        local alertMsg = string.format(
+            "🚨 *ULTRA RARE DROP ACQUIRED!* 🚨\n\n" ..
+            "👤 *Account:* `%s`\n" ..
+            "🎁 *Item:* *%s* (x%d)\n" ..
+            "🌐 *Server:* `%s`",
+            player.Name, name, count, tostring(game.JobId or "")
+        )
+        sendTelegramMessage(alertMsg)
+        sendDiscordWebhook("🚨 ULTRA RARE DROP!", string.format("Account: %s\nItem: %s (x%d)\nJobId: %s", player.Name, name, count, tostring(game.JobId or "")), "ff0055")
+        log("Loot", "🎉 СВЕРХРЕДКИЙ ДРОП: " .. tostring(name) .. " x" .. tostring(count))
+    end
+end
+
+-- ══════════════════════════════════════════════════════════════════════
+--  ЛОКАЛЬНАЯ ОЧЕРЕДЬ ЦЕЛЕЙ ДЛЯ РЕЖИМА "ONLY YOU"
+-- ══════════════════════════════════════════════════════════════════════
+local LOCAL_QUEUE_FILE = "bss_local_queue.json"
+function writeLocalQueueTarget(targetData)
+    if not HAS_FS then return end
+    local list = {}
+    local ok, content = pcall(readfile, LOCAL_QUEUE_FILE)
+    if ok and content and content ~= "" then
+        local okD, d = pcall(function() return HttpService:JSONDecode(content) end)
+        if okD and type(d) == "table" then list = d end
+    end
+    local now = os.time()
+    local filtered = {}
+    for _, item in ipairs(list) do
+        if item.timestamp and (now - item.timestamp < 180) and item.jobId ~= targetData.jobId then
+            table.insert(filtered, item)
+        end
+    end
+    targetData.timestamp = now
+    table.insert(filtered, 1, targetData)
+    pcall(writefile, LOCAL_QUEUE_FILE, HttpService:JSONEncode(filtered))
+end
+
+function readLocalQueueTarget(targetType)
+    if not HAS_FS then return nil end
+    local ok, content = pcall(readfile, LOCAL_QUEUE_FILE)
+    if not ok or not content or content == "" then return nil end
+    local okD, list = pcall(function() return HttpService:JSONDecode(content) end)
+    if not okD or type(list) ~= "table" then return nil end
+    local now = os.time()
+    for _, item in ipairs(list) do
+        local age = now - (item.timestamp or now)
+        if age <= 180 and not isTaskVisited(item.jobId) then
+            if not targetType or item.type == targetType then
+                item.age = age
+                return item
+            end
+        end
+    end
+    return nil
+end
+
+-- ══════════════════════════════════════════════════════════════════════
+--  TELEGRAM REMOTE CONTROL BOT (ПОЛЛИНГ КОМАНД getUpdates)
+-- ══════════════════════════════════════════════════════════════════════
+local tgLastUpdateId = 0
+function pollTelegramUpdates()
+    local token = CONFIG.TELEGRAM_BOT_TOKEN
+    local targetChatId = tostring(CONFIG.TELEGRAM_CHAT_ID or "")
+    if not token or token == "" or targetChatId == "" then return end
+    if CONFIG.TELEGRAM_BOT_POLLING == false then return end
+
+    local req = (syn and syn.request) or (http and http.request) or http_request or request
+    if not req then return end
+
+    local url = string.format("https://api.telegram.org/bot%s/getUpdates?offset=%d&timeout=2", token, tgLastUpdateId)
+    local ok, resp = pcall(function()
+        return req({
+            Url = url,
+            Method = "GET",
+            Headers = { ["Content-Type"] = "application/json" }
+        })
+    end)
+
+    if not ok or not resp or not resp.Body then return end
+    local okJson, data = pcall(function() return HttpService:JSONDecode(resp.Body) end)
+    if not okJson or not data or not data.ok or not data.result then return end
+
+    for _, update in ipairs(data.result) do
+        if update.update_id and update.update_id >= tgLastUpdateId then
+            tgLastUpdateId = update.update_id + 1
+        end
+
+        local msg = update.message
+        if msg and msg.text and msg.chat and tostring(msg.chat.id) == targetChatId then
+            local text = string.gsub(msg.text, "^%s+", ""):gsub("%s+$", "")
+            local cmd = string.lower(string.match(text, "^(/%w+)") or text)
+
+            if cmd == "/status" then
+                local curHoney = getPlayerHoney()
+                local totalHoney = math.max(0, curHoney - (LOOT_REPORT_STATS.startHoney > 0 and LOOT_REPORT_STATS.startHoney or curHoney))
+                local uptimeMins = math.floor((os.clock() - LOOT_REPORT_STATS.startTime) / 60)
+                local hours = math.floor(uptimeMins / 60)
+                local mins = uptimeMins % 60
+                local ping = 0
+                pcall(function() ping = math.floor(player:GetNetworkPing() * 1000) end)
+
+                local sText = string.format(
+                    "🤖 *BSS Hopper Remote Status*\n\n" ..
+                    "👤 *Account:* `%s`\n" ..
+                    "⚙️ *Mode:* `%s`\n" ..
+                    "📍 *Status:* %s\n" ..
+                    "🌐 *JobId:* `%s`\n" ..
+                    "📶 *Ping:* %d ms | ⏱ *Uptime:* %dh %dm\n\n" ..
+                    "🍯 *Honey Gained:* +%s\n" ..
+                    "🌱 *Sprouts:* %d (Supreme: %d, Moon: %d)\n" ..
+                    "🐝 *Vicious Defeated:* %d\n" ..
+                    "🌪️ *Windy Bees:* %d\n" ..
+                    "📦 *Stingers:* %d | *Star Jellies:* %d",
+                    player.Name,
+                    string.upper(tostring(CONFIG.MODE or lastMode)),
+                    tostring(Hopper.GetStatus and Hopper.GetStatus() or "Running"),
+                    string.sub(tostring(game.JobId), 1, 10) .. "...",
+                    ping, hours, mins,
+                    formatNumber(totalHoney),
+                    LOOT_REPORT_STATS.sprouts or 0,
+                    (LOOT_REPORT_STATS.sproutsByRarity and LOOT_REPORT_STATS.sproutsByRarity.supreme) or 0,
+                    (LOOT_REPORT_STATS.sproutsByRarity and LOOT_REPORT_STATS.sproutsByRarity.moon) or 0,
+                    LOOT_REPORT_STATS.vicious or 0,
+                    LOOT_REPORT_STATS.windy or 0,
+                    (LOOT_REPORT_STATS.items and LOOT_REPORT_STATS.items["Stinger"]) or 0,
+                    (LOOT_REPORT_STATS.items and LOOT_REPORT_STATS.items["Star Jelly"]) or 0
+                )
+                sendTelegramMessage(sText)
+
+            elseif cmd == "/searcher" then
+                if Hopper and Hopper.SwitchMode then Hopper.SwitchMode("searcher") end
+                sendTelegramMessage(string.format("✅ *%s* switched to *Searcher* mode!", player.Name))
+
+            elseif cmd == "/looter" then
+                if Hopper and Hopper.SwitchMode then Hopper.SwitchMode("looter") end
+                sendTelegramMessage(string.format("✅ *%s* switched to *Looter* mode!", player.Name))
+
+            elseif cmd == "/solo" then
+                if Hopper and Hopper.SwitchMode then Hopper.SwitchMode("solo") end
+                sendTelegramMessage(string.format("✅ *%s* switched to *Solo* mode!", player.Name))
+
+            elseif cmd == "/pause" then
+                if Hopper and Hopper.Toggle then Hopper.Toggle() end
+                local isRunning = (Hopper and Hopper.Mode ~= nil)
+                sendTelegramMessage(string.format("⏸ *%s* Hopper is now *%s*!", player.Name, isRunning and "RUNNING" or "PAUSED"))
+
+            elseif cmd == "/hop" then
+                sendTelegramMessage(string.format("🚀 *%s* forcing immediate server hop...", player.Name))
+                task.spawn(function()
+                    task.wait(0.5)
+                    if rejoinDifferent then rejoinDifferent() end
+                end)
+            end
+        end
+    end
 end
 
 function sendPeriodicLootReport()
@@ -1760,8 +2047,8 @@ function sendPeriodicLootReport()
         "💎 **Добытые ресурсы за период:**\n%s",
         intervalMins, elapsedMins,
         formatNumber(periodHoney), formatNumber(totalHoney),
-        LOOT_REPORT_STATS.sprouts, LOOT_REPORT_STATS.vicious, LOOT_REPORT_STATS.windy,
-        LOOT_REPORT_STATS.meteors, LOOT_REPORT_STATS.planters,
+        LOOT_REPORT_STATS.sprouts or 0, LOOT_REPORT_STATS.vicious or 0, LOOT_REPORT_STATS.windy or 0,
+        LOOT_REPORT_STATS.meteors or 0, LOOT_REPORT_STATS.planters or 0,
         itemsText
     )
 
@@ -1779,7 +2066,10 @@ task.spawn(function()
             LOOT_REPORT_STATS.lastReportTime = now
             pcall(sendPeriodicLootReport)
         end
-        task.wait(5)
+        if CONFIG.TELEGRAM_BOT_POLLING ~= false and CONFIG.TELEGRAM_BOT_TOKEN ~= "" and CONFIG.TELEGRAM_CHAT_ID ~= "" then
+            pcall(pollTelegramUpdates)
+        end
+        task.wait(3)
     end
 end)
 
@@ -3651,7 +3941,14 @@ function fightVicious(vicious)
         end
     end
     setFlightNoclip(false)
-    return viciousDefeatedMessageVisible() or not vicious.Parent
+    local defeated = viciousDefeatedMessageVisible() or not vicious.Parent
+    if defeated then
+        local kind = detectViciousKind(vicious)
+        local pos = worldPos(vicious) or lastActiveTargetPos
+        local fName = pos and getFieldForPos(pos)
+        pcall(function() recordViciousDefeated(kind, fName) end)
+    end
+    return defeated
 end
 
 function detectViciousKind(obj)
@@ -6253,7 +6550,8 @@ local TOKEN_CACHE, TOKEN_CACHE_AT = {}, 0
 local collectedTokens = setmetatable({}, { __mode = "k" })
 function findFieldTokens(anchorZone, limitX, limitZ, fieldAnchor)
     local now = os.clock()
-    if now - TOKEN_CACHE_AT < 0.15 then
+    local interval = math.max(0.12, tonumber(CONFIG.TOKEN_SCAN_INTERVAL) or 0.14)
+    if now - TOKEN_CACHE_AT < interval then
         return TOKEN_CACHE
     end
     TOKEN_CACHE_AT = now
@@ -6262,6 +6560,7 @@ function findFieldTokens(anchorZone, limitX, limitZ, fieldAnchor)
     local zonePos = anchorZone and anchorZone.Position
     local maxRadius = (anchorZone and math.max(anchorZone.Size.X, anchorZone.Size.Z) * 0.5 + 30) or 65
     local maxRadiusSq = maxRadius * maxRadius
+    local halfSize = anchorZone and (anchorZone.Size * 0.5)
 
     for _, folderName in ipairs(TOKEN_FOLDERS) do
         local folder = Workspace:FindFirstChild(folderName)
@@ -6270,38 +6569,44 @@ function findFieldTokens(anchorZone, limitX, limitZ, fieldAnchor)
             if ok and items then
                 for _, obj in ipairs(items) do
                     if not collectedTokens[obj] then
-                        local pos = worldPos(obj)
-                        if pos then
-                            local inField = false
-                            if anchorZone and zonePos then
-                                local dx = pos.X - zonePos.X
-                                local dz = pos.Z - zonePos.Z
-                                if (dx * dx + dz * dz) <= maxRadiusSq then
-                                    local lp = anchorZone.CFrame:PointToObjectSpace(pos)
-                                    local half = anchorZone.Size * 0.5
-                                    -- Строго внутри цветков поля (с запасом 2 стадса от края) — не убегаем за пределы поля!
-                                    if math.abs(lp.X) <= (half.X - 2.0) and math.abs(lp.Z) <= (half.Z - 2.0) then
+                        local cachedPrio = TOKEN_PRIO_CACHE[obj]
+                        if not cachedPrio or cachedPrio <= 3 then
+                            local pos = worldPos(obj)
+                            if pos then
+                                local inField = false
+                                if anchorZone and zonePos and halfSize then
+                                    local absX = math.abs(pos.X - zonePos.X)
+                                    local absZ = math.abs(pos.Z - zonePos.Z)
+                                    if absX <= maxRadius and absZ <= maxRadius then
+                                        if (absX * absX + absZ * absZ) <= maxRadiusSq then
+                                            local lp = anchorZone.CFrame:PointToObjectSpace(pos)
+                                            if math.abs(lp.X) <= (halfSize.X - 2.0) and math.abs(lp.Z) <= (halfSize.Z - 2.0) then
+                                                inField = true
+                                            end
+                                        end
+                                    end
+                                elseif fieldAnchor then
+                                    local absX = math.abs(pos.X - fieldAnchor.X)
+                                    local absZ = math.abs(pos.Z - fieldAnchor.Z)
+                                    if absX <= 38 and absZ <= 38 and (absX * absX + absZ * absZ) <= 1444 then
                                         inField = true
                                     end
+                                else
+                                    inField = true
                                 end
-                            elseif fieldAnchor then
-                                local dx = pos.X - fieldAnchor.X
-                                local dz = pos.Z - fieldAnchor.Z
-                                inField = (dx * dx + dz * dz) <= (38 * 38)
-                            else
-                                inField = true
-                            end
 
-                            if inField then
-                                local prio = getTokenPriorityForObj(obj)
-                                if prio <= 3 then
-                                    local isLink = (prio == 0) or (TOKEN_LINK_CACHE[obj] == true)
-                                    out[#out+1] = {
-                                        obj = obj,
-                                        pos = pos,
-                                        priority = isLink and 0 or prio,
-                                        isLink = isLink,
-                                    }
+                                if inField then
+                                    local prio = getTokenPriorityForObj(obj)
+                                    if prio <= 3 then
+                                        local isLink = (prio == 0) or (TOKEN_LINK_CACHE[obj] == true)
+                                        out[#out+1] = {
+                                            obj = obj,
+                                            pos = pos,
+                                            priority = isLink and 0 or prio,
+                                            isLink = isLink,
+                                        }
+                                        if #out >= 150 then break end
+                                    end
                                 end
                             end
                         end
@@ -6309,6 +6614,7 @@ function findFieldTokens(anchorZone, limitX, limitZ, fieldAnchor)
                 end
             end
         end
+        if #out >= 150 then break end
     end
     TOKEN_CACHE = out
     return out
@@ -6970,47 +7276,73 @@ function responseRejected(resp)
 end
 
 function Searcher:report(jobId, rarity, fieldName)
-    local body = HttpService:JSONEncode({
-        apiKey=CONFIG.API_KEY, jobId=jobId, level=rarity or "unknown",
-        placeId=CONFIG.PLACE_ID, fieldName=fieldName or "unknown",
-        searcherTag=CONFIG.SELF_TAG,
+    -- Always save to local queue file for own looters
+    writeLocalQueueTarget({
+        type = "sprout",
+        jobId = jobId,
+        level = rarity or "unknown",
+        placeId = CONFIG.PLACE_ID,
+        fieldName = fieldName or "unknown",
+        searcherTag = CONFIG.SELF_TAG,
     })
-    local maxAttempts = math.min(3, math.max(2, tonumber(CONFIG.MAX_ATTEMPTS) or 2))
-    for attempt = 1, maxAttempts do
-        local ok, resp = pcall(function() return postJson("/report", body) end)
-        if ok and not responseRejected(resp) then
-            self.stats.reportsSent += 1
-            self.stats.lastSprout = { fieldName = "отправлено" }
-            return true
+    self.stats.reportsSent += 1
+    self.stats.lastSprout = { fieldName = fieldName or "detected", rarity = rarity }
+
+    if CONFIG.SEARCHER_BROADCAST_MODE == "All" then
+        -- Broadcast to Telegram & Webhook
+        sendTelegramMessage(string.format("🌱 *Sprout Detected!* [%s]\n• Field: *%s*\n• Server JobId: `%s`", tostring(rarity):upper(), tostring(fieldName), tostring(jobId)))
+        notifyAllWebhooks("Sprout Detected", string.format("Rarity: %s\nField: %s\nJobId: %s", rarity, fieldName, jobId), "00f5a0")
+
+        local body = HttpService:JSONEncode({
+            apiKey=CONFIG.API_KEY, jobId=jobId, level=rarity or "unknown",
+            placeId=CONFIG.PLACE_ID, fieldName=fieldName or "unknown",
+            searcherTag=CONFIG.SELF_TAG,
+        })
+        local maxAttempts = math.min(3, math.max(2, tonumber(CONFIG.MAX_ATTEMPTS) or 2))
+        for attempt = 1, maxAttempts do
+            local ok, resp = pcall(function() return postJson("/report", body) end)
+            if ok and not responseRejected(resp) then return true end
+            if attempt < maxAttempts then task.wait(0.2) end
         end
-        if attempt < maxAttempts then task.wait(0.2) end
     end
-    return false
+    return true
 end
 
 function Searcher:reportVicious(jobId, kind, fieldName)
-    local body = HttpService:JSONEncode({
-        apiKey=CONFIG.API_KEY, jobId=jobId, kind=kind or "wild",
-        placeId=CONFIG.PLACE_ID, fieldName=fieldName or "unknown",
-        searcherTag=CONFIG.SELF_TAG,
-        viciousChannelId=(CONFIG.VICIOUS_CHANNEL_ID ~= "" and CONFIG.VICIOUS_CHANNEL_ID) or nil,
+    writeLocalQueueTarget({
+        type = "vicious",
+        jobId = jobId,
+        kind = kind or "wild",
+        placeId = CONFIG.PLACE_ID,
+        fieldName = fieldName or "unknown",
+        searcherTag = CONFIG.SELF_TAG,
     })
-    for attempt = 1, 2 do
-        local ok, resp = pcall(function() return postJson("/vicious", body) end)
-        if ok then
-            local lower = string.lower(tostring(resp))
-            local failure = string.find(lower,'"error"',1,true)
-                or string.find(lower,'"success":false',1,true)
-                or string.find(lower,'"ok":false',1,true)
-            if not failure then
-                self.stats.viciousFound += 1
-                self.stats.lastVicious = { fieldName=fieldName, kind=kind }
-                return true
+    self.stats.viciousFound += 1
+    self.stats.lastVicious = { fieldName=fieldName, kind=kind }
+
+    if CONFIG.SEARCHER_BROADCAST_MODE == "All" then
+        sendTelegramMessage(string.format("🐝 *Vicious Bee Detected!* [%s]\n• Field: *%s*\n• Server JobId: `%s`", tostring(kind):upper(), tostring(fieldName), tostring(jobId)))
+        notifyAllWebhooks("Vicious Bee Detected", string.format("Kind: %s\nField: %s\nJobId: %s", kind, fieldName, jobId), "ff4d4d")
+
+        local body = HttpService:JSONEncode({
+            apiKey=CONFIG.API_KEY, jobId=jobId, kind=kind or "wild",
+            placeId=CONFIG.PLACE_ID, fieldName=fieldName or "unknown",
+            searcherTag=CONFIG.SELF_TAG,
+            viciousChannelId=(CONFIG.VICIOUS_CHANNEL_ID ~= "" and CONFIG.VICIOUS_CHANNEL_ID) or nil,
+        })
+        for attempt = 1, 2 do
+            local ok, resp = pcall(function() return postJson("/vicious", body) end)
+            if ok then
+                local lower = string.lower(tostring(resp))
+                local failure = string.find(lower,'"error"',1,true)
+                    or string.find(lower,'"success":false',1,true)
+                    or string.find(lower,'"ok":false',1,true)
+                if not failure then return true end
             end
+            if attempt < 2 then task.wait(0.2) end
         end
-        if attempt < 2 then task.wait(0.2) end
     end
-    return false
+    return true
 end
 
 function Searcher:reportPuffshroom(jobId, rarity, level, fieldName, timeRemaining)
@@ -7031,6 +7363,7 @@ end
 
 function Searcher:Start()
     self:Stop()
+    if CONFIG.AUTO_POTATO_ON_SEARCHER then applyPotatoMode(true) end
     local s = self.stats
     s.serversChecked, s.reportsSent = 0, 0
     s.viciousFound = 0
@@ -7260,6 +7593,7 @@ function Looter:harvest(sproutObj)
     -- Фаза 2: Росток сломан! Засекаем точное время поломки
     lastSproutBrokenTime = os.clock()
     lastSproutHarvestAnchor = sproutAnchor
+    pcall(function() recordSproutPopped(rar or "basic", currentSproutFieldZone and currentSproutFieldZone.Name) end)
     log("Спрут", "Росток сломан! Запущен 15-секундный таймер обязательного лутания.")
 
     if alive() and sproutAnchor then
@@ -7342,6 +7676,20 @@ local function apiGet(path)
 end
 
 function Looter:fetchNextVicious()
+    -- 0. Check local queue first (Only You mode or fast local transfer)
+    local localTarget = readLocalQueueTarget("vicious")
+    if localTarget then
+        return {
+            jobId = localTarget.jobId,
+            kind = localTarget.kind or "wild",
+            placeId = localTarget.placeId or CONFIG.PLACE_ID,
+            fieldName = localTarget.fieldName or "unknown",
+            age = localTarget.age or 0,
+            searcherTag = localTarget.searcherTag or "local_queue",
+            isVicious = true,
+        }, nil
+    end
+
     local lastErr = nil
 
     -- 1. Сканируем всю очередь /vicious-queue за последние 2 минуты (120 секунд)
@@ -7386,6 +7734,23 @@ function Looter:fetchNextVicious()
 end
 
 function Looter:fetchNext()
+    -- 0. Check local queue first (Only You mode or fast local transfer)
+    local localTarget = readLocalQueueTarget("sprout")
+    if localTarget then
+        local taskRarity = normalizeRarity(localTarget.level)
+        if not CONFIG.ALLOWED_SPROUT_RARITIES or CONFIG.ALLOWED_SPROUT_RARITIES[taskRarity] ~= false then
+            return {
+                jobId = localTarget.jobId,
+                level = taskRarity,
+                placeId = localTarget.placeId or CONFIG.PLACE_ID,
+                fieldName = localTarget.fieldName or "unknown",
+                age = localTarget.age or 0,
+                priority = RARITY_PRIORITY[taskRarity] or 1,
+                searcherTag = localTarget.searcherTag or "local_queue",
+            }, nil
+        end
+    end
+
     local lastErr = nil
 
     -- 1. Сначала сканируем всю очередь /queue за последние 4 минуты (240 секунд)
@@ -8065,6 +8430,7 @@ function Solo:Start()
                         -- Фаза 2: Росток сломан! Засекаем точное время поломки
                         lastSproutBrokenTime = os.clock()
                         lastSproutHarvestAnchor = sproutAnchor
+                        pcall(function() recordSproutPopped(rar or "basic", currentSproutFieldZone and currentSproutFieldZone.Name) end)
                         log("Спрут", "Росток сломан! Запущен 15-секундный таймер обязательного лутания.")
 
                         if alive() and sproutAnchor and not (CONFIG.CHECK_VICIOUS and findVicious()) then
@@ -8569,6 +8935,27 @@ local function openUrl(url)
     return false
 end
 
+local isDrawerOpen = false
+local drawerFrame = nil
+local toggleDrawer = nil
+
+local quickBtn = new("TextButton", {
+    Size = UDim2.new(0, 78, 0, 26),
+    Position = UDim2.new(1, -158, 0.5, -13),
+    BackgroundColor3 = C.card,
+    Text = "⚙ QUICK",
+    Font = Enum.Font.GothamBold,
+    TextSize = 10,
+    TextColor3 = C.accent,
+    BorderSizePixel = 0,
+    Parent = head,
+})
+round(quickBtn, 6)
+stroke(quickBtn, C.border, 1)
+quickBtn.MouseButton1Click:Connect(function()
+    if toggleDrawer then toggleDrawer() end
+end)
+
 local discordBtn = new("TextButton", {
     Size = UDim2.new(0, 30, 0, 30),
     Position = UDim2.new(1, -72, 0.5, -15),
@@ -8585,7 +8972,7 @@ discordBtn.MouseButton1Click:Connect(function() openUrl(DISCORD_URL) end)
 
 local menuToggleBtn = new("TextButton", {
     Size = UDim2.new(0, 110, 0, 28),
-    Position = UDim2.new(1, -190, 0.5, -14),
+    Position = UDim2.new(1, -276, 0.5, -14),
     BackgroundColor3 = C.cardHi,
     Text = "OPEN MENU ▼",
     TextColor3 = C.accent,
@@ -8723,6 +9110,8 @@ end
 makeTab("⌂", "Dashboard", "main")
 makeTab("🌱", "Sprouts", "sprouts")
 makeTab("🪴", "Planters & Mobs", "planters_mobs")
+makeTab("🏆", "Looted", "looted")
+makeTab("✈️", "Telegram", "telegram")
 makeTab("📁", "Configs", "configs")
 makeTab("⚙", "Settings", "settings")
 
@@ -9053,6 +9442,95 @@ for _, key in ipairs({ "searcher", "looter", "solo" }) do
     end)
     modeButtons[key] = { btn=b, title=tl, bar=bar, outline=mStroke }
 end
+
+-- Searcher Broadcast & Potato Quick Bar
+local routingRow = new("Frame", {
+    Size = UDim2.new(1, 0, 0, 36),
+    BackgroundColor3 = C.card,
+    BorderSizePixel = 0,
+    LayoutOrder = 3,
+    Parent = PAGE_HOME,
+})
+round(routingRow, 8)
+stroke(routingRow, C.border, 1)
+
+new("TextLabel", {
+    Size = UDim2.new(0, 140, 1, 0),
+    Position = UDim2.new(0, 10, 0, 0),
+    BackgroundTransparency = 1,
+    Text = "📡 SEARCH ROUTE:",
+    TextColor3 = C.dim,
+    Font = Enum.Font.GothamBold,
+    TextSize = 9,
+    TextXAlignment = Enum.TextXAlignment.Left,
+    Parent = routingRow,
+})
+
+local btnOnlyYou = new("TextButton", {
+    Size = UDim2.new(0, 120, 0, 24),
+    Position = UDim2.new(0, 145, 0.5, -12),
+    BackgroundColor3 = (CONFIG.SEARCHER_BROADCAST_MODE ~= "All") and C.accent2 or C.field,
+    Text = "🔒 Only You",
+    TextColor3 = (CONFIG.SEARCHER_BROADCAST_MODE ~= "All") and C.accent or C.dim,
+    Font = Enum.Font.GothamBold,
+    TextSize = 10,
+    BorderSizePixel = 0,
+    Parent = routingRow,
+})
+round(btnOnlyYou, 6)
+
+local btnBroadcast = new("TextButton", {
+    Size = UDim2.new(0, 130, 0, 24),
+    Position = UDim2.new(0, 272, 0.5, -12),
+    BackgroundColor3 = (CONFIG.SEARCHER_BROADCAST_MODE == "All") and C.accent2 or C.field,
+    Text = "🌐 Broadcast All",
+    TextColor3 = (CONFIG.SEARCHER_BROADCAST_MODE == "All") and Color3.fromRGB(100, 220, 255) or C.dim,
+    Font = Enum.Font.GothamBold,
+    TextSize = 10,
+    BorderSizePixel = 0,
+    Parent = routingRow,
+})
+round(btnBroadcast, 6)
+
+local function updateRoutingBtns()
+    local isAll = (CONFIG.SEARCHER_BROADCAST_MODE == "All")
+    btnOnlyYou.BackgroundColor3 = not isAll and C.accent2 or C.field
+    btnOnlyYou.TextColor3 = not isAll and C.accent or C.dim
+    btnBroadcast.BackgroundColor3 = isAll and C.accent2 or C.field
+    btnBroadcast.TextColor3 = isAll and Color3.fromRGB(100, 220, 255) or C.dim
+end
+
+btnOnlyYou.MouseButton1Click:Connect(function()
+    CONFIG.SEARCHER_BROADCAST_MODE = "Only You"
+    saveNow()
+    updateRoutingBtns()
+end)
+
+btnBroadcast.MouseButton1Click:Connect(function()
+    CONFIG.SEARCHER_BROADCAST_MODE = "All"
+    saveNow()
+    updateRoutingBtns()
+end)
+
+local potatoDashBtn = new("TextButton", {
+    Size = UDim2.new(0, 105, 0, 24),
+    Position = UDim2.new(1, -115, 0.5, -12),
+    BackgroundColor3 = CONFIG.POTATO_MODE and C.accent2 or C.field,
+    Text = CONFIG.POTATO_MODE and "🥔 Potato: ON" or "🥔 Potato: OFF",
+    TextColor3 = CONFIG.POTATO_MODE and C.accent or C.dim,
+    Font = Enum.Font.GothamBold,
+    TextSize = 10,
+    BorderSizePixel = 0,
+    Parent = routingRow,
+})
+round(potatoDashBtn, 6)
+potatoDashBtn.MouseButton1Click:Connect(function()
+    applyPotatoMode(not CONFIG.POTATO_MODE)
+    saveNow()
+    potatoDashBtn.BackgroundColor3 = CONFIG.POTATO_MODE and C.accent2 or C.field
+    potatoDashBtn.TextColor3 = CONFIG.POTATO_MODE and C.accent or C.dim
+    potatoDashBtn.Text = CONFIG.POTATO_MODE and "🥔 Potato: ON" or "🥔 Potato: OFF"
+end)
 
 -- 2. Status & Activity Cards
 section(PAGE_HOME, "Live Activity", 10)
@@ -9579,10 +10057,16 @@ local fRepInterval = makeField(PAGE_SETTINGS, "Report Interval (minutes)", CONFI
 end)
 
 section(PAGE_SETTINGS, "Performance & Safety", 10)
-makeToggle(PAGE_SETTINGS, "Anti-Lag (Reduce token visuals)", "Optimizes memory and reduces client lag", CONFIG.ANTI_LAG ~= false, 11, function(v)
+makeToggle(PAGE_SETTINGS, "Potato Mode (Disable 3D Viewport)", "Eliminates 3D rendering to run 4+ accounts smoothly", CONFIG.POTATO_MODE == true, 10, function(v)
+    applyPotatoMode(v); saveNow()
+end)
+makeToggle(PAGE_SETTINGS, "Auto-Potato on Searcher", "Automatically disables 3D rendering when Searcher mode is active", CONFIG.AUTO_POTATO_ON_SEARCHER == true, 11, function(v)
+    CONFIG.AUTO_POTATO_ON_SEARCHER = v; saveNow()
+end)
+makeToggle(PAGE_SETTINGS, "Anti-Lag (Reduce token visuals)", "Optimizes memory and reduces client lag", CONFIG.ANTI_LAG ~= false, 12, function(v)
     CONFIG.ANTI_LAG = v; saveNow()
 end)
-makeToggle(PAGE_SETTINGS, "Super Optimizer (Boost FPS)", "Drastically reduces CPU & GPU load", CONFIG.SUPER_OPTIMIZE == true, 12, function(v)
+makeToggle(PAGE_SETTINGS, "Super Optimizer (Boost FPS)", "Drastically reduces CPU & GPU load", CONFIG.SUPER_OPTIMIZE == true, 13, function(v)
     CONFIG.SUPER_OPTIMIZE = v; saveNow()
 end)
 makeToggle(PAGE_SETTINGS, "Avoid Friends (Anti-Detection)", "Leaves server immediately if a friend is spotted", CONFIG.AVOID_FRIENDS ~= false, 13, function(v)
@@ -10160,12 +10644,524 @@ pickerCloseBtn.MouseButton1Click:Connect(function() pickerOverlay.Visible = fals
 pickerOverlay.MouseButton1Click:Connect(function() pickerOverlay.Visible = false end)
 
 -- ══════════════════════════════════════════════════════════════════════
+--  SLIDE-OUT SETTINGS & QUICK DRAWER
+-- ══════════════════════════════════════════════════════════════════════
+local DRAWER_W = 230
+drawerFrame = new("Frame", {
+    Name = "SettingsDrawer",
+    Size = UDim2.new(0, DRAWER_W, 1, 0),
+    Position = UDim2.new(1, 0, 0, 0),
+    BackgroundColor3 = Color3.fromRGB(15, 19, 27),
+    BorderSizePixel = 0,
+    ZIndex = 40,
+    Parent = win,
+})
+stroke(drawerFrame, C.border, 1.2)
+
+local drawerHead = new("Frame", {
+    Size = UDim2.new(1, 0, 0, 48),
+    BackgroundColor3 = C.panel,
+    BorderSizePixel = 0,
+    ZIndex = 41,
+    Parent = drawerFrame,
+})
+new("TextLabel", {
+    Size = UDim2.new(1, -40, 1, 0),
+    Position = UDim2.new(0, 14, 0, 0),
+    BackgroundTransparency = 1,
+    Text = "⚡ QUICK CONTROLS",
+    TextColor3 = C.text,
+    Font = Enum.Font.GothamBold,
+    TextSize = 11,
+    TextXAlignment = Enum.TextXAlignment.Left,
+    ZIndex = 42,
+    Parent = drawerHead,
+})
+local drawerCloseBtn = new("TextButton", {
+    Size = UDim2.new(0, 26, 0, 26),
+    Position = UDim2.new(1, -34, 0.5, -13),
+    BackgroundColor3 = C.card,
+    Text = "✕",
+    TextColor3 = C.dim,
+    Font = Enum.Font.GothamBold,
+    TextSize = 12,
+    BorderSizePixel = 0,
+    ZIndex = 42,
+    Parent = drawerHead,
+})
+round(drawerCloseBtn, 6)
+drawerCloseBtn.MouseButton1Click:Connect(function()
+    if toggleDrawer then toggleDrawer(false) end
+end)
+
+local drawerContent = new("ScrollingFrame", {
+    Size = UDim2.new(1, 0, 1, -48),
+    Position = UDim2.new(0, 0, 0, 48),
+    BackgroundTransparency = 1,
+    BorderSizePixel = 0,
+    ScrollBarThickness = 3,
+    ScrollBarImageColor3 = C.border,
+    AutomaticCanvasSize = Enum.AutomaticSize.Y,
+    CanvasSize = UDim2.new(),
+    ScrollingDirection = Enum.ScrollingDirection.Y,
+    ZIndex = 41,
+    Parent = drawerFrame,
+})
+new("UIListLayout", { SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0, 8), Parent = drawerContent })
+new("UIPadding", { PaddingTop = UDim.new(0, 8), PaddingBottom = UDim.new(0, 14), PaddingLeft = UDim.new(0, 8), PaddingRight = UDim.new(0, 8), Parent = drawerContent })
+
+toggleDrawer = function(forceState)
+    if forceState ~= nil then isDrawerOpen = forceState
+    else isDrawerOpen = not isDrawerOpen end
+    local targetPos = isDrawerOpen and UDim2.new(1, -DRAWER_W, 0, 0) or UDim2.new(1, 0, 0, 0)
+    quickBtn.TextColor3 = isDrawerOpen and C.accent or C.dim
+    quickBtn.BackgroundColor3 = isDrawerOpen and C.cardHi or C.card
+    TweenService:Create(drawerFrame, TweenInfo.new(0.24, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), { Position = targetPos }):Play()
+end
+
+-- Controls inside Drawer
+section(drawerContent, "Performance Suite", 1)
+makeToggle(drawerContent, "Potato Mode (Black 3D)", "Disables 3D viewport. -75% CPU/GPU", CONFIG.POTATO_MODE == true, 2, function(v)
+    applyPotatoMode(v)
+    saveNow()
+end)
+
+makeToggle(drawerContent, "Auto-Potato on Searcher", "Automatically disables 3D on Searcher", CONFIG.AUTO_POTATO_ON_SEARCHER == true, 3, function(v)
+    CONFIG.AUTO_POTATO_ON_SEARCHER = v
+    if v and Hopper.Mode == Hopper.instances.searcher then applyPotatoMode(true) end
+    saveNow()
+end)
+
+section(drawerContent, "FPS Limiter", 4)
+local fpsRow = new("Frame", { Size = UDim2.new(1, 0, 0, 28), BackgroundTransparency = 1, LayoutOrder = 5, Parent = drawerContent })
+new("UIListLayout", { FillDirection = Enum.FillDirection.Horizontal, Padding = UDim.new(0, 4), Parent = fpsRow })
+local fpsOpts = { 15, 30, 60 }
+for _, fps in ipairs(fpsOpts) do
+    local isCur = (CONFIG.TARGET_FPS == fps)
+    local fb = new("TextButton", {
+        Size = UDim2.new(1/#fpsOpts, -4, 1, 0),
+        BackgroundColor3 = isCur and C.accent2 or C.card,
+        Text = tostring(fps) .. " FPS",
+        TextColor3 = isCur and C.accent or C.text,
+        Font = Enum.Font.GothamBold,
+        TextSize = 10,
+        BorderSizePixel = 0,
+        Parent = fpsRow,
+    })
+    round(fb, 6)
+    fb.MouseButton1Click:Connect(function()
+        CONFIG.TARGET_FPS = fps
+        if type(setfpscap) == "function" then setfpscap(fps) end
+        saveNow()
+    end)
+end
+
+section(drawerContent, "Searcher Mode Routing", 6)
+local modeToggleBtn = new("TextButton", {
+    Size = UDim2.new(1, 0, 0, 32),
+    BackgroundColor3 = C.card,
+    Text = (CONFIG.SEARCHER_BROADCAST_MODE == "All") and "🌐 Mode: ALL (Broadcast)" or "🔒 Mode: ONLY YOU (Private)",
+    TextColor3 = (CONFIG.SEARCHER_BROADCAST_MODE == "All") and Color3.fromRGB(100, 220, 255) or C.accent,
+    Font = Enum.Font.GothamBold,
+    TextSize = 10,
+    BorderSizePixel = 0,
+    LayoutOrder = 7,
+    Parent = drawerContent,
+})
+round(modeToggleBtn, 6)
+stroke(modeToggleBtn, C.border, 1)
+modeToggleBtn.MouseButton1Click:Connect(function()
+    if CONFIG.SEARCHER_BROADCAST_MODE == "All" then
+        CONFIG.SEARCHER_BROADCAST_MODE = "Only You"
+    else
+        CONFIG.SEARCHER_BROADCAST_MODE = "All"
+    end
+    modeToggleBtn.Text = (CONFIG.SEARCHER_BROADCAST_MODE == "All") and "🌐 Mode: ALL (Broadcast)" or "🔒 Mode: ONLY YOU (Private)"
+    modeToggleBtn.TextColor3 = (CONFIG.SEARCHER_BROADCAST_MODE == "All") and Color3.fromRGB(100, 220, 255) or C.accent
+    saveNow()
+end)
+
+section(drawerContent, "Actions", 8)
+makeBtn(drawerContent, "Pause / Resume Hopper", "⏸", C.card, 9, function()
+    Hopper.Toggle()
+end)
+
+makeBtn(drawerContent, "Force Server Hop", "🚀", C.card, 10, function()
+    rejoinDifferent()
+end)
+
+makeBtn(drawerContent, "Clean RAM Garbage", "🧹", C.card, 11, function()
+    collectgarbage("collect")
+end)
+
+-- ══════════════════════════════════════════════════════════════════════
+--  TAB 4: LOOTED (SESSION HISTORY & INVENTORY BAG)
+-- ══════════════════════════════════════════════════════════════════════
+local PAGE_LOOTED = new("Frame", {
+    Size = UDim2.new(1, 0, 0, 0),
+    AutomaticSize = Enum.AutomaticSize.Y,
+    BackgroundTransparency = 1,
+    Visible = false,
+    Parent = content,
+})
+new("UIListLayout", { SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0, 8), Parent = PAGE_LOOTED })
+
+section(PAGE_LOOTED, "Session Overview", 1)
+
+local lootSummaryRow = new("Frame", {
+    Size = UDim2.new(1, 0, 0, 56),
+    BackgroundTransparency = 1,
+    LayoutOrder = 2,
+    Parent = PAGE_LOOTED,
+})
+new("UIListLayout", { FillDirection = Enum.FillDirection.Horizontal, Padding = UDim.new(0, 6), Parent = lootSummaryRow })
+
+local function makeSummaryCard(parent, title, valText, icon, color)
+    local card = new("Frame", {
+        Size = UDim2.new(0.25, -5, 1, 0),
+        BackgroundColor3 = C.card,
+        BorderSizePixel = 0,
+        Parent = parent,
+    })
+    round(card, 8)
+    stroke(card, C.border, 1)
+
+    new("TextLabel", {
+        Size = UDim2.new(1, -12, 0, 14),
+        Position = UDim2.new(0, 8, 0, 6),
+        BackgroundTransparency = 1,
+        Text = string.upper(title),
+        TextColor3 = C.dim,
+        Font = Enum.Font.GothamBold,
+        TextSize = 8,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        Parent = card,
+    })
+    local vLbl = new("TextLabel", {
+        Size = UDim2.new(1, -12, 0, 22),
+        Position = UDim2.new(0, 8, 0, 24),
+        BackgroundTransparency = 1,
+        Text = tostring(valText or "0"),
+        TextColor3 = color or C.accent,
+        Font = Enum.Font.GothamBold,
+        TextSize = 13,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        Parent = card,
+    })
+    return vLbl
+end
+
+local honeyValLbl = makeSummaryCard(lootSummaryRow, "Honey Gained", "+0", "🍯", C.accent)
+local sproutsValLbl = makeSummaryCard(lootSummaryRow, "Sprouts Popped", "0", "🌱", Color3.fromRGB(80, 240, 140))
+local viciousValLbl = makeSummaryCard(lootSummaryRow, "Vicious Defeated", "0", "🐝", Color3.fromRGB(255, 90, 90))
+local uptimeValLbl = makeSummaryCard(lootSummaryRow, "Session Uptime", "0m", "⏱", Color3.fromRGB(160, 200, 255))
+
+section(PAGE_LOOTED, "Sprouts Harvested by Rarity", 3)
+
+local sproutGrid = new("Frame", {
+    Size = UDim2.new(1, 0, 0, 88),
+    BackgroundTransparency = 1,
+    LayoutOrder = 4,
+    Parent = PAGE_LOOTED,
+})
+new("UIGridLayout", {
+    CellSize = UDim2.new(0.25, -6, 0, 40),
+    CellPadding = UDim2.new(0, 8, 0, 6),
+    SortOrder = Enum.SortOrder.LayoutOrder,
+    Parent = sproutGrid,
+})
+
+local SPROUT_RARITY_META = {
+    { key = "supreme",   name = "Supreme",   color = Color3.fromRGB(255, 215, 0),   bg = Color3.fromRGB(45, 38, 15) },
+    { key = "legendary", name = "Legendary", color = Color3.fromRGB(240, 70, 210),  bg = Color3.fromRGB(42, 18, 40) },
+    { key = "epic",      name = "Epic",      color = Color3.fromRGB(165, 80, 245),  bg = Color3.fromRGB(32, 18, 45) },
+    { key = "moon",      name = "Moon",      color = Color3.fromRGB(100, 200, 255), bg = Color3.fromRGB(18, 30, 45) },
+    { key = "diamond",   name = "Diamond",   color = Color3.fromRGB(80, 225, 255),  bg = Color3.fromRGB(16, 32, 44) },
+    { key = "gold",      name = "Gold",      color = Color3.fromRGB(255, 200, 50),  bg = Color3.fromRGB(40, 32, 14) },
+    { key = "silver",    name = "Silver",    color = Color3.fromRGB(200, 210, 225), bg = Color3.fromRGB(28, 32, 38) },
+    { key = "basic",     name = "Basic",     color = Color3.fromRGB(160, 240, 140), bg = Color3.fromRGB(20, 35, 25) },
+}
+
+local sproutCountLabels = {}
+for idx, rMeta in ipairs(SPROUT_RARITY_META) do
+    local card = new("Frame", {
+        BackgroundColor3 = rMeta.bg,
+        BorderSizePixel = 0,
+        LayoutOrder = idx,
+        Parent = sproutGrid,
+    })
+    round(card, 6)
+    stroke(card, rMeta.color, 0.8)
+
+    new("TextLabel", {
+        Size = UDim2.new(1, -40, 1, 0),
+        Position = UDim2.new(0, 8, 0, 0),
+        BackgroundTransparency = 1,
+        Text = rMeta.name,
+        TextColor3 = rMeta.color,
+        Font = Enum.Font.GothamBold,
+        TextSize = 10,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        Parent = card,
+    })
+    local cntLbl = new("TextLabel", {
+        Size = UDim2.new(0, 32, 1, 0),
+        Position = UDim2.new(1, -38, 0, 0),
+        BackgroundTransparency = 1,
+        Text = "0",
+        TextColor3 = Color3.fromRGB(255, 255, 255),
+        Font = Enum.Font.GothamBold,
+        TextSize = 12,
+        TextXAlignment = Enum.TextXAlignment.Right,
+        Parent = card,
+    })
+    sproutCountLabels[rMeta.key] = cntLbl
+end
+
+section(PAGE_LOOTED, "Rare Loot & Items Bag", 5)
+
+local itemsGrid = new("Frame", {
+    Size = UDim2.new(1, 0, 0, 0),
+    AutomaticSize = Enum.AutomaticSize.Y,
+    BackgroundTransparency = 1,
+    LayoutOrder = 6,
+    Parent = PAGE_LOOTED,
+})
+new("UIGridLayout", {
+    CellSize = UDim2.new(0.25, -6, 0, 34),
+    CellPadding = UDim2.new(0, 8, 0, 6),
+    SortOrder = Enum.SortOrder.LayoutOrder,
+    Parent = itemsGrid,
+})
+
+local TRACKED_BAG_ITEMS = {
+    { name = "Stinger",       icon = "🗡️", color = Color3.fromRGB(255, 90, 90) },
+    { name = "Star Jelly",    icon = "🌟", color = Color3.fromRGB(255, 220, 80) },
+    { name = "Moon Charm",    icon = "🌙", color = Color3.fromRGB(150, 200, 255) },
+    { name = "Enzymes",       icon = "🧪", color = Color3.fromRGB(240, 120, 60) },
+    { name = "Oil",           icon = "🛢️", color = Color3.fromRGB(230, 230, 100) },
+    { name = "Glue",          icon = "🧴", color = Color3.fromRGB(200, 240, 255) },
+    { name = "Glitter",       icon = "✨", color = Color3.fromRGB(255, 180, 240) },
+    { name = "Magic Bean",    icon = "🌱", color = Color3.fromRGB(100, 255, 130) },
+    { name = "Ticket",        icon = "🎟️", color = Color3.fromRGB(255, 120, 120) },
+    { name = "Mythic Egg",    icon = "🥚", color = Color3.fromRGB(180, 80, 255) },
+    { name = "Star Egg",      icon = "🥚", color = Color3.fromRGB(255, 230, 100) },
+    { name = "Gifted Egg",    icon = "🥚", color = Color3.fromRGB(100, 220, 255) },
+}
+
+local bagItemLabels = {}
+for idx, itemMeta in ipairs(TRACKED_BAG_ITEMS) do
+    local card = new("Frame", {
+        BackgroundColor3 = C.card,
+        BorderSizePixel = 0,
+        LayoutOrder = idx,
+        Parent = itemsGrid,
+    })
+    round(card, 6)
+    stroke(card, C.border, 1)
+
+    new("TextLabel", {
+        Size = UDim2.new(0, 18, 1, 0),
+        Position = UDim2.new(0, 6, 0, 0),
+        BackgroundTransparency = 1,
+        Text = itemMeta.icon,
+        Font = Enum.Font.GothamBold,
+        TextSize = 11,
+        Parent = card,
+    })
+    new("TextLabel", {
+        Size = UDim2.new(1, -54, 1, 0),
+        Position = UDim2.new(0, 26, 0, 0),
+        BackgroundTransparency = 1,
+        Text = itemMeta.name,
+        TextColor3 = C.text,
+        Font = Enum.Font.GothamMedium,
+        TextSize = 9,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        Parent = card,
+    })
+    local cntLbl = new("TextLabel", {
+        Size = UDim2.new(0, 26, 1, 0),
+        Position = UDim2.new(1, -30, 0, 0),
+        BackgroundTransparency = 1,
+        Text = "0",
+        TextColor3 = itemMeta.color,
+        Font = Enum.Font.GothamBold,
+        TextSize = 10,
+        TextXAlignment = Enum.TextXAlignment.Right,
+        Parent = card,
+    })
+    bagItemLabels[itemMeta.name] = cntLbl
+end
+
+section(PAGE_LOOTED, "Recent Loot Feed (Live Log)", 7)
+
+local feedContainer = new("ScrollingFrame", {
+    Size = UDim2.new(1, 0, 0, 120),
+    BackgroundColor3 = Color3.fromRGB(14, 18, 25),
+    BorderSizePixel = 0,
+    ScrollBarThickness = 3,
+    ScrollBarImageColor3 = C.border,
+    AutomaticCanvasSize = Enum.AutomaticSize.Y,
+    CanvasSize = UDim2.new(),
+    LayoutOrder = 8,
+    Parent = PAGE_LOOTED,
+})
+round(feedContainer, 8)
+stroke(feedContainer, C.border, 1)
+new("UIListLayout", { SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0, 2), Parent = feedContainer })
+new("UIPadding", { PaddingTop = UDim.new(0, 4), PaddingBottom = UDim.new(0, 4), PaddingLeft = UDim.new(0, 8), PaddingRight = UDim.new(0, 8), Parent = feedContainer })
+
+makeBtn(PAGE_LOOTED, "Reset Session Loot Counters", "🔄", Color3.fromRGB(70, 25, 30), 9, function()
+    LOOT_REPORT_STATS.startTime = os.clock()
+    LOOT_REPORT_STATS.startHoney = getPlayerHoney()
+    LOOT_REPORT_STATS.lastHoney = LOOT_REPORT_STATS.startHoney
+    LOOT_REPORT_STATS.sprouts = 0
+    LOOT_REPORT_STATS.vicious = 0
+    LOOT_REPORT_STATS.windy = 0
+    LOOT_REPORT_STATS.meteors = 0
+    LOOT_REPORT_STATS.planters = 0
+    LOOT_REPORT_STATS.sproutsByRarity = { basic=0, silver=0, gold=0, diamond=0, epic=0, legendary=0, supreme=0, moon=0 }
+    LOOT_REPORT_STATS.viciousByKind = { wild=0, rogue=0 }
+    LOOT_REPORT_STATS.items = {}
+    LOOT_REPORT_STATS.periodItems = {}
+    table.clear(LOOT_HISTORY)
+    if updateLootedUI then updateLootedUI() end
+end)
+
+updateLootedUI = function()
+    local curHoney = getPlayerHoney()
+    if LOOT_REPORT_STATS.startHoney == 0 and curHoney > 0 then
+        LOOT_REPORT_STATS.startHoney = curHoney
+    end
+    local totalHoney = math.max(0, curHoney - (LOOT_REPORT_STATS.startHoney > 0 and LOOT_REPORT_STATS.startHoney or curHoney))
+    honeyValLbl.Text = "+" .. formatNumber(totalHoney)
+    sproutsValLbl.Text = tostring(LOOT_REPORT_STATS.sprouts or 0)
+    viciousValLbl.Text = tostring(LOOT_REPORT_STATS.vicious or 0)
+
+    local uptimeMins = math.floor((os.clock() - LOOT_REPORT_STATS.startTime) / 60)
+    local h = math.floor(uptimeMins / 60)
+    local m = uptimeMins % 60
+    uptimeValLbl.Text = (h > 0) and string.format("%dh %dm", h, m) or string.format("%dm", m)
+
+    for rKey, lbl in pairs(sproutCountLabels) do
+        local count = (LOOT_REPORT_STATS.sproutsByRarity and LOOT_REPORT_STATS.sproutsByRarity[rKey]) or 0
+        lbl.Text = tostring(count)
+    end
+
+    for itemName, lbl in pairs(bagItemLabels) do
+        local count = 0
+        if LOOT_REPORT_STATS.items then
+            if itemName == "Gifted Egg" then
+                count = (LOOT_REPORT_STATS.items["Gifted Silver Egg"] or 0) + (LOOT_REPORT_STATS.items["Gifted Gold Egg"] or 0) + (LOOT_REPORT_STATS.items["Gifted Diamond Egg"] or 0)
+            else
+                count = LOOT_REPORT_STATS.items[itemName] or 0
+            end
+        end
+        lbl.Text = tostring(count)
+    end
+
+    -- Update feed log
+    for _, child in ipairs(feedContainer:GetChildren()) do
+        if child:IsA("TextLabel") then child:Destroy() end
+    end
+    for idx, entry in ipairs(LOOT_HISTORY) do
+        if idx > 35 then break end
+        local tStr = os.date("%X", entry.time or os.time())
+        local lbl = new("TextLabel", {
+            Size = UDim2.new(1, 0, 0, 16),
+            BackgroundTransparency = 1,
+            Text = string.format("[%s] %s", tStr, entry.text),
+            TextColor3 = (entry.rarity == "ultra") and Color3.fromRGB(255, 215, 0)
+                or (entry.rarity == "vicious" and Color3.fromRGB(255, 100, 100))
+                or (entry.rarity == "supreme" and Color3.fromRGB(255, 215, 0))
+                or C.text,
+            Font = (entry.rarity == "ultra" or entry.rarity == "supreme") and Enum.Font.GothamBold or Enum.Font.Gotham,
+            TextSize = 9,
+            TextXAlignment = Enum.TextXAlignment.Left,
+            LayoutOrder = idx,
+            Parent = feedContainer,
+        })
+    end
+end
+
+-- ══════════════════════════════════════════════════════════════════════
+--  TAB 5: TELEGRAM REMOTE CONTROL & ALERTS
+-- ══════════════════════════════════════════════════════════════════════
+local PAGE_TELEGRAM = new("Frame", {
+    Size = UDim2.new(1, 0, 0, 0),
+    AutomaticSize = Enum.AutomaticSize.Y,
+    BackgroundTransparency = 1,
+    Visible = false,
+    Parent = content,
+})
+new("UIListLayout", { SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0, 8), Parent = PAGE_TELEGRAM })
+
+section(PAGE_TELEGRAM, "Telegram Bot Configuration", 1)
+
+local fTgTok = makeField(PAGE_TELEGRAM, "Telegram Bot Token", CONFIG.TELEGRAM_BOT_TOKEN or "", "e.g. 123456789:ABCdef-ghijk...", 2, function(v)
+    CONFIG.TELEGRAM_BOT_TOKEN = v; saveNow()
+end)
+
+local fTgCId = makeField(PAGE_TELEGRAM, "Your Telegram Chat ID", CONFIG.TELEGRAM_CHAT_ID or "", "e.g. 123456789", 3, function(v)
+    CONFIG.TELEGRAM_CHAT_ID = v; saveNow()
+end)
+
+makeToggle(PAGE_TELEGRAM, "Enable Remote Command Polling", "Allows you to control this account from phone via Telegram", CONFIG.TELEGRAM_BOT_POLLING ~= false, 4, function(v)
+    CONFIG.TELEGRAM_BOT_POLLING = v; saveNow()
+end)
+
+makeToggle(PAGE_TELEGRAM, "Instant Ultra-Rare Drop Alerts", "Sends instant phone notification upon looting Mythic Eggs, Star Eggs, Turpentine, etc.", CONFIG.ALERT_ULTRA_RARE_ITEMS ~= false, 5, function(v)
+    CONFIG.ALERT_ULTRA_RARE_ITEMS = v; saveNow()
+end)
+
+makeBtn(PAGE_TELEGRAM, "Send Test Ping to Telegram", "✈️", C.card, 6, function()
+    sendTelegramMessage(string.format("👋 *Test Notification!*\nAccount `%s` connected successfully to BSS Hopper Remote Engine!", player.Name))
+end)
+
+section(PAGE_TELEGRAM, "Remote Phone Commands Reference", 10)
+
+local cmdsCard = new("Frame", {
+    Size = UDim2.new(1, 0, 0, 110),
+    BackgroundColor3 = Color3.fromRGB(16, 20, 28),
+    BorderSizePixel = 0,
+    LayoutOrder = 11,
+    Parent = PAGE_TELEGRAM,
+})
+round(cmdsCard, 8)
+stroke(cmdsCard, C.border, 1)
+
+local cmdLines = {
+    "/status   — Full live status (Honey gained, sprouts, ping, current mode, server)",
+    "/searcher — Switch account to Searcher mode",
+    "/looter   — Switch account to Looter mode",
+    "/solo     — Switch account to Solo mode",
+    "/pause    — Toggle pause / resume farming",
+    "/hop      — Force immediate server hop",
+}
+for i, line in ipairs(cmdLines) do
+    new("TextLabel", {
+        Size = UDim2.new(1, -20, 0, 16),
+        Position = UDim2.new(0, 10, 0, 6 + (i - 1) * 17),
+        BackgroundTransparency = 1,
+        Text = line,
+        TextColor3 = C.dim,
+        Font = Enum.Font.GothamMedium,
+        TextSize = 9,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        Parent = cmdsCard,
+    })
+end
+
+-- ══════════════════════════════════════════════════════════════════════
 --  TAB NAVIGATION LOGIC
 -- ══════════════════════════════════════════════════════════════════════
 local pages = {
     main = PAGE_HOME,
     sprouts = PAGE_SPROUTS,
     planters_mobs = PAGE_PLANTERS_MOBS,
+    looted = PAGE_LOOTED,
+    telegram = PAGE_TELEGRAM,
     configs = PAGE_CONFIGS,
     settings = PAGE_SETTINGS,
 }
@@ -10181,6 +11177,7 @@ showPage = function(which)
         t.label.TextColor3 = on and C.text or C.dim
     end
     content.CanvasPosition = Vector2.new(0, 0)
+    if which == "looted" and updateLootedUI then updateLootedUI() end
     if refresh then pcall(refresh) end
 end
 
